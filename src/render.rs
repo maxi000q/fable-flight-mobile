@@ -123,6 +123,10 @@ pub struct Globals {
     pub cs: [[f32; 4]; 8],
     /// mid-level cloud: amount 0..1, height (m)
     pub alto: [f32; 4],
+    /// the ocean (ocean.rs `Ocean::globals`): offset of its coordinates and
+    /// the wind direction; wind, wave height, whitecap cover; mean square
+    /// slope per cascade and of the ripples below them
+    pub ocean: [[f32; 4]; 3],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
@@ -537,6 +541,8 @@ pub struct Frame<'a> {
     pub sim_steps: bool,
     /// the crash's fire simulation, while there is one
     pub fluid: Option<crate::fluid::FluidFrame>,
+    /// this frame's ocean spectrum (ocean.rs)
+    pub ocean: crate::ocean::OceanU,
     pub egui: Option<(Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32)>,
     pub shot: Option<std::path::PathBuf>,
 }
@@ -679,6 +685,7 @@ pub struct Renderer {
     bg_vol_b: wgpu::BindGroup,
     vol_acc: wgpu::Buffer,
     pub fluid: crate::fluid::FluidGpu,
+    ocean: crate::ocean::OceanGpu,
     fluid_t: crate::fluid::FluidTargets,
     /// game time (s) until which some smoke may still be alive, and the time now
     smoke_until: f32,
@@ -903,7 +910,8 @@ impl GroundMats {
     }
 }
 
-/// Tiling wave texture: RG slope, B height, A an independent noise channel.
+/// Tiling wave texture: RG slope, B height (caustics), A an independent noise
+/// channel. The water's waves themselves come from the FFT ocean (ocean.rs).
 fn wave_texture() -> Vec<u8> {
     const N: usize = 256;
     let mut rng = 0x9e3779b97f4a7c15u64;
@@ -1086,6 +1094,7 @@ impl Renderer {
             }
             queue.submit([enc.finish()]);
         }
+        let ocean = crate::ocean::OceanGpu::new(d, &queue);
         let wave = upload_mips(d, &queue, "wave", 256, wgpu::TextureFormat::Rgba8Unorm, 4, &crate::sources::mip_chain(wave_texture(), 256, 4));
         let ground_mats = GroundMats::new(d, &queue);
         let (det_alb, det_nrm) = ground_mats.views();
@@ -1113,6 +1122,7 @@ impl Renderer {
                 samp_entry(14, wgpu::SamplerBindingType::Filtering),
                 tex_entry(15, d2, false),
                 tex_entry(16, wgpu::TextureViewDimension::D2Array, false),
+                tex_entry(17, wgpu::TextureViewDimension::D2Array, false),
             ],
         });
         // Coverage of the photorealistic 3D tiles, seen from above (tiles3d.rs).
@@ -1140,6 +1150,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&s_detail) },
                     tex_res(15, pm),
                     tex_res(16, cs),
+                    tex_res(17, &ocean.view),
                 ],
             })
         };
@@ -1562,7 +1573,7 @@ impl Renderer {
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit,
-            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, smoke_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, surface, config, queue, device,
+            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, smoke_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, surface, config, queue, device,
         })
     }
 
@@ -1919,6 +1930,7 @@ impl Renderer {
             Some(ff) => self.fluid.compute(q, &mut enc, ff),
             None => self.fluid.live = false,
         }
+        self.ocean.compute(q, &mut enc, &f.ocean);
         if f.g.weather[3] != self.lut_haze {
             self.lut_haze = f.g.weather[3];
             self.lut_bake.draw(&mut enc);

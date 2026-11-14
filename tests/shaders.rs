@@ -23,6 +23,7 @@ fn shaders_validate() {
     let mut ok = check("noise3d", include_str!("../src/shaders/noise3d.wgsl"));
     ok &= check("resolve", include_str!("../src/shaders/resolve.wgsl"));
     ok &= check("detail", include_str!("../src/shaders/detail.wgsl"));
+    ok &= check("ocean", include_str!("../src/shaders/ocean.wgsl"));
     for (name, src) in [
         ("lut", include_str!("../src/shaders/lut.wgsl")),
         ("terrain", include_str!("../src/shaders/terrain.wgsl")),

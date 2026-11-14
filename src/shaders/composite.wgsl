@@ -5,12 +5,10 @@
 @group(1) @binding(3) var t_ao: texture_2d<f32>;
 @group(1) @binding(4) var t_amb: texture_2d<f32>;
 
-const SLOPE = 0.5;
-
 // Wave texture lookup at the mip that matches the pixel footprint (fp, metres).
 fn wtex(uv: vec2f, size: f32, fp: f32) -> vec4f {
   return textureSampleLevel(t_wave, s_repeat, uv, log2(max(fp * 256.0 / size, 1.0)));
-} // slope represented by a full-scale wave texture texel
+}
 
 fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
   let dims = vec2f(textureDimensions(t_depth));
@@ -70,14 +68,12 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let t = G.time.x;
   let cosv = max(dot(-V, upn), 0.03);
   let fp = dist * G.misc.w / cosv;                // pixel footprint along the view direction, metres
-  let st = sea_state(wclass, upn.z, shore);
+  var st = sea_state(wclass, upn.z, shore);
+  let wind = G.ocean[1].x;
 
-  // Long swell: same function that displaces the geometry.
-  let sw = swell(wc, t, fp * 2.5);
-  var slope = sw.yz * st.x;
-  // Wind: the ripples run across it, and it blows in gusts, ruffling some
-  // patches of the surface and leaving others glassy between (cat's paws).
-  let wdir = vec2f(0.83, 0.56);
+  // Wind (from the weather): it blows in gusts, ruffling some patches of the
+  // surface and leaving others glassy between (cat's paws), more so in light air.
+  let wdir = G.ocean[0].zw;
   let wn = vec2f(-wdir.y, wdir.x);
   let ww = vec2f(dot(wc, wdir), dot(wc, wn));
   let g1 = textureSampleLevel(t_noise, s_repeat, vec3f(ww.x / 520.0 - t * 0.012, ww.y / 170.0, 0.37), 0.0);
@@ -87,30 +83,62 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let g1r = mix(g1.r, 0.5, smoothstep(10.0, 45.0, fp));
   let g2g = mix(g2.g, 0.5, smoothstep(2.5, 10.0, fp));
   let g2b = mix(g2.b, 0.5, smoothstep(2.5, 10.0, fp));
-  let ruffle = smoothstep(0.28, 0.72, g1r * 0.65 + g2g * 0.45 - 0.02 + 0.2 * (1.0 - st.y));
-  let ripple_k = mix(0.25, 1.15, ruffle);
-  // Slope variance of everything too small to resolve: it widens reflections instead.
-  var sig2 = st.x * st.x * 0.006 * smoothstep(8.0, 120.0, fp * 2.5);
-  // Ripple octaves, each fading in only once the camera is close enough to
-  // resolve it. One layer is stretched across the wind, as wind ripples are.
-  var lost = 0.0;
-  var size = 43.0;
-  for (var i = 0; i < 5; i++) {
-    let w = 1.0 - smoothstep(size / 50.0, size / 12.0, fp);
-    let amp = st.y * (0.42 + 0.1 * f32(i)) * ripple_k;
-    if (w > 0.0) {
-      let sp = 0.55 / sqrt(size);
-      let a = wtex(vec2f(ww.x, ww.y * 0.6) / size + vec2f(0.95, 0.15) * t * sp, size, fp).rg * 2.0 - 1.0;
-      let aw = wdir * a.x + wn * (a.y * 0.6);
-      let q = vec2f(wc.x * 0.8 - wc.y * 0.6, wc.x * 0.6 + wc.y * 0.8) / (size * 1.31);
-      let b = wtex(q - vec2f(0.3, 0.95) * t * sp, size * 1.31, fp).rg * 2.0 - 1.0;
-      slope += (aw + vec2f(b.x * 0.8 + b.y * 0.6, -b.x * 0.6 + b.y * 0.8)) * amp * w * SLOPE;
+  let calm = 1.0 - smoothstep(1.5, 7.0, wind);
+  let ruffle = smoothstep(0.28, 0.72, g1r * 0.65 + g2g * 0.45 - 0.02 + 0.2 * (1.0 - st.z) - 0.3 * calm);
+  // Gusts raise the short waves most.
+  st.z *= mix(0.3, 1.2, ruffle);
+  st.y *= mix(0.8, 1.1, ruffle);
+
+  // The FFT ocean (ocean.wgsl). This pixel is where the sideways shift
+  // carried a surface point to: find that point first (two fixed-point steps
+  // over the cascades that move it most), then read its slopes.
+  let xo = ocean_coord(P);
+  var lod = vec3f(0.0);
+  for (var c = 0; c < 3; c++) { lod[c] = log2(max(fp * 256.0 / ocean_size(c), 1.0)); }
+  var x0 = xo;
+  var hgt = 0.0;
+  for (var it = 0; it < 2; it++) {
+    var ds = vec3f(0.0);
+    for (var c = 0; c < 2; c++) {
+      if (lod[c] < 8.0) { ds += textureSampleLevel(t_ocean, s_repeat, x0 / ocean_size(c), c, lod[c]).xyz * st[c]; }
     }
-    lost += amp * amp * (1.0 - w);
-    sig2 += amp * amp * (1.0 - w) * SLOPE * SLOPE * 0.1;
-    size /= 3.9;
+    x0 = xo - ds.xy;
+    hgt = ds.z;
   }
-  let rough = clamp(0.03 + 0.04 * ruffle + sqrt(lost) * 0.16, 0.03, 0.32);
+  var sl = vec2f(0.0);   // dh/dx, dh/dy over the undisplaced surface
+  var jd = vec3f(0.0);   // Dxx, Dyy, Dxy
+  var jd01 = vec3f(0.0); // the same for the two longer cascades (whitecaps)
+  // Slope variance of everything too small to resolve here: it widens
+  // reflections and the sun's glitter instead. Each cascade's waves are lost
+  // to the mips over a range of levels (its band in octaves).
+  var sig2 = 0.0;
+  let lo_a = vec3f(3.7, 3.7, 0.0);
+  let lo_b = vec3f(7.0, 6.3, 6.4);
+  for (var c = 0; c < 3; c++) {
+    let w = st[c];
+    if (w <= 0.0) { continue; }
+    let L = ocean_size(c);
+    if (lod[c] < 8.0) {
+      let a = textureSampleLevel(t_ocean, s_repeat, x0 / L, c, lod[c]);
+      let b = textureSampleLevel(t_ocean, s_repeat, x0 / L, c + 3, lod[c]);
+      sl += b.xy * w;
+      jd += vec3f(b.zw, a.w) * w;
+      if (c < 2) { jd01 += vec3f(b.zw, a.w) * w; }
+    }
+    sig2 += G.ocean[2][c] * w * w * clamp((lod[c] - lo_a[c]) / (lo_b[c] - lo_a[c]), 0.0, 1.0);
+  }
+  // Capillary ripples (shorter than any cascade) count once a pixel outgrows them.
+  sig2 += G.ocean[2].w * st.z * st.z * clamp(log2(fp / 0.004) / 3.6, 0.0, 1.0);
+  // Surface normal through the sideways shift: slopes over the moved surface.
+  let jxx = 1.0 + jd.x;
+  let jyy = 1.0 + jd.y;
+  let J = jxx * jyy - jd.z * jd.z;
+  var slope = vec2f(sl.x * jyy - sl.y * jd.z, sl.y * jxx - sl.x * jd.z) / max(J, 0.25);
+  let smag = length(slope);
+  if (smag > 1.5) { slope *= 1.5 / smag; }
+  let J01 = (1.0 + jd01.x) * (1.0 + jd01.y) - jd01.z * jd01.z;
+  let rough = clamp(pow(sig2 * 0.5, 0.25), 0.03, 0.36);
+  sig2 *= 0.5;
   let N = normalize(upn - e * slope.x - n * slope.y);
 
   // Reflection: screen-space first, sky (with cloud glints) as the fallback.
@@ -230,14 +258,15 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
 
   // Light through the crests: looking toward the sun, the wave between the
   // eye and it glows green where it is thin and lit from behind.
-  let crest_h = clamp(sw.x * st.x / 1.2 + 0.45, 0.0, 1.0);
+  let hs = max(G.ocean[1].y * (st.x + st.y) * 0.5, 0.2);
+  let crest_h = clamp(hgt / hs + 0.45, 0.0, 1.0);
   let toward = pow(max(dot(V, G.sun_dir.xyz), 0.0), 4.0);
   let sss = toward * crest_h * (0.3 + 0.7 * (1.0 - ndv)) * max(dot(G.sun_dir.xyz, upn), 0.0);
   under += (body * 8.0 + vec3f(0.01, 0.06, 0.05)) * l.sun * sss * 0.4 / PI;
 
   var col = mix(under, refl, clamp(F, 0.0, 1.0)) + spec + point_light(P, upn) * body * 4.0;
 
-  // Foam: surf line at the shore, whitecaps on steep ocean swell.
+  // Foam: surf line at the shore, whitecaps where the crests fold over.
   let fa = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 37.0 + vec2f(0.012, 0.007) * t, t * 0.02), 0.0);
   let fb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 5.3 - vec2f(0.02, 0.03) * t, 0.4 + t * 0.03), 0.0);
   let gust = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 1900.0 + vec2f(0.002, 0.0) * t, 0.77), 0.0).r;
@@ -250,14 +279,21 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let fnear = 1.0 - smoothstep(2500.0, 9000.0, dist);
   let surge = 0.5 + 0.5 * sin(t * 0.7 + wd * 4.0 + fa_r * 6.0);
   var foam = smoothstep(1.1, 0.0, wd / (0.5 + 0.9 * surge)) * smoothstep(0.35, 0.6, lace + fa_g * 0.25) * select(1.0, 0.25, wclass > 1.5);
-  let crest = sw.x / 2.2 * st.x;
-  // Whitecaps break along the crests, so they are drawn out across the wind;
-  // from afar a cap is part bubbles, part dark water, so it shows paler.
+  // Whitecaps: the sea breaks where the sideways shift folds the surface
+  // (the Jacobian falls toward zero), from a moderate breeze up. They break
+  // along the crests, so they are drawn out across the wind; from afar a cap
+  // is part bubbles, part dark water, so it shows paler.
+  let capw = smoothstep(3.5, 9.0, wind) * step(wclass, 1.5);
   let fw = textureSampleLevel(t_noise, s_repeat, vec3f(ww.x / 21.0 - t * 0.02, ww.y / 64.0, 0.55 + t * 0.015), 0.0).r;
   let cap_n = mix(fw, 0.5, smoothstep(1.0, 4.0, fp));
-  foam += smoothstep(0.75, 1.15, crest + (fa_r - 0.5) * 0.35 + (cap_n - 0.5) * 0.6 + (gust - 0.6) * 1.6) * smoothstep(0.42, 0.62, lace) * step(wclass, 1.5) * mix(0.7, 0.4, far_a);
+  let fold = 0.9 - J01;
+  let near_cap = smoothstep(0.1, 0.55, fold + (fa_r - 0.5) * 0.3 + (cap_n - 0.5) * 0.5 + (gust - 0.6) * 0.8 + (crest_h - 0.6) * 0.3) * smoothstep(0.42, 0.62, lace);
+  // Once the mips have smoothed the folds away, as much of the sea as the
+  // wind whitens on average, in patches with the gusts.
+  let far_cap = clamp(G.ocean[1].z * 2.5 * (0.4 + 1.2 * gust), 0.0, 1.0);
+  foam += mix(near_cap, far_cap, smoothstep(2.0, 5.0, lod[1])) * capw * mix(0.8, 0.45, far_a);
   // Streaks of spent foam drawn out downwind of the whitecaps.
-  let streak = smoothstep(0.62, 0.85, g2b) * ruffle * step(wclass, 1.5) * smoothstep(-0.2, 0.6, crest) * 0.3;
+  let streak = smoothstep(0.62, 0.85, g2b) * ruffle * capw * 0.3;
   foam = max(foam, streak * smoothstep(0.4, 0.6, lace));
   foam = clamp(foam * fnear, 0.0, 1.0);
   // Foam is bubbles, not paint: holes and lace within it, close up.

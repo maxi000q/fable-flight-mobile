@@ -48,6 +48,10 @@ struct Globals {
   // half size; north axis + first layer; base and top of its bands, valid.
   cs: array<vec4f, 8>,
   alto: vec4f,       // mid-level cloud: amount 0..1, height (m)
+  // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
+  // toward (east, north); wind (m/s), significant wave height (m), whitecap
+  // cover, 1; mean square slope in each cascade and of the ripples below them.
+  ocean: array<vec4f, 3>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -71,6 +75,9 @@ struct Globals {
 @group(0) @binding(15) var t_photo: texture_2d<f32>;
 // Cloud shadow map, two cascades double-buffered (see cloud_sun).
 @group(0) @binding(16) var t_cshadow: texture_2d_array<f32>;
+// The ocean's three wave cascades (ocean.wgsl): layer c = (Dx, Dy, height,
+// Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy).
+@group(0) @binding(17) var t_ocean: texture_2d_array<f32>;
 
 // GPU particles (explosions, smoke, dust, spray) and their simulation constants.
 struct Particle {
@@ -505,40 +512,34 @@ fn cirrus(pp: vec3f) -> f32 {
 fn wave_coord(p: vec3f) -> vec2f {
   return vec2f(dot(p, G.east.xyz) + G.east.w, dot(p, G.north.xyz) + G.north.w);
 }
-// Sea state: x = swell amplitude scale, y = ripple strength, by water wclass and latitude.
-fn sea_state(wclass: f32, sinlat: f32, shore: f32) -> vec2f {
-  let rough = 1.0 + 0.8 * smoothstep(0.55, 0.85, abs(sinlat));
-  var s = vec2f(1.0, 1.0) * rough;                 // ocean
-  if (wclass > 2.5) { s = vec2f(0.03, 0.55); }      // river
-  else if (wclass > 1.5) { s = vec2f(0.12, 0.7); }  // lake
-  return vec2f(s.x * mix(0.25, 1.0, shore), s.y);
+// Position in the ocean's own coordinates (m, east and north), which wrap at a
+// multiple of every cascade's size (ocean.rs WRAP).
+fn ocean_coord(p: vec3f) -> vec2f {
+  return vec2f(dot(p, G.east.xyz), dot(p, G.north.xyz)) + G.ocean[0].xy;
 }
-// Sum of sharpened directional swells. Returns (height, d/dx, d/dy) for unit sea
-// state. Waves shorter than lam_cut fade out so coarse geometry or distant
-// pixels never see detail they cannot resolve.
-fn swell(x: vec2f, t: f32, lam_cut: f32) -> vec3f {
+fn ocean_size(c: i32) -> f32 { return select(select(6.0, 40.0, c == 1), 250.0, c == 0); }
+// Sea state: how much of each wave cascade (about 250 m, 40 m and 6 m across)
+// a stretch of water shows, by its class, latitude and how open it is (shore:
+// 0 by the coast, 1 out on open water). Short fetch - bays, lakes, rivers -
+// keeps the short chop and loses the long waves and the swell. ocean.rs
+// `sea_state` mirrors it for the floating aircraft.
+fn sea_state(wclass: f32, sinlat: f32, shore: f32) -> vec3f {
+  if (wclass > 2.5) { return vec3f(0.0, 0.1, 0.45); }   // river
+  if (wclass > 1.5) { return vec3f(0.05, 0.45, 0.85); } // lake
+  let rough = 1.0 + 0.3 * smoothstep(0.55, 0.85, abs(sinlat));
+  return vec3f(rough * mix(0.3, 1.0, shore), mix(0.75, 1.0, shore), 1.0);
+}
+// Sideways (x = east, y = north) and vertical displacement of the sea surface
+// above ocean coordinates x, filtered for a vertex spacing of sp metres;
+// w = sea_state.
+fn ocean_disp(x: vec2f, sp: f32, w: vec3f) -> vec3f {
   var o = vec3f(0.0);
-  var lam = 173.0;
-  var ang = 0.6;
-  // Wave groups: sets of bigger waves drifting through calmer water.
-  let grp = textureSampleLevel(t_wave, s_repeat, x / 900.0 + vec2f(t * 0.004, 0.0), 0.0).a;
-  let grp2 = textureSampleLevel(t_wave, s_repeat, x.yx / 2300.0 - vec2f(0.0, t * 0.002), 0.0).a;
-  let env = 0.35 + 1.3 * grp * grp2 * 2.0;
-  for (var i = 0; i < 8; i++) {
-    let w = smoothstep(lam_cut, lam_cut * 2.0, lam);
-    if (w > 0.0) {
-      let k = 2.0 * PI / lam;
-      let dir = vec2f(cos(ang), sin(ang));
-      let th = dot(dir, x) * k - sqrt(9.81 * k) * t + f32(i) * 1.7 + grp * 5.0;
-      let a = lam * 0.0052 * w * env;
-      let s = (sin(th) + 1.0) * 0.5;
-      o.x += a * (2.0 * pow(s, 1.5) - 1.0);
-      let dh = a * 1.5 * sqrt(s) * cos(th) * k;
-      o.y += dh * dir.x;
-      o.z += dh * dir.y;
+  for (var c = 0; c < 3; c++) {
+    let L = ocean_size(c);
+    let lod = log2(max(2.0 * sp * 256.0 / L, 1.0));
+    if (lod < 8.0 && w[c] > 0.0) {
+      o += textureSampleLevel(t_ocean, s_repeat, x / L, c, lod).xyz * w[c];
     }
-    lam *= 0.66;
-    ang += 0.83 + f32(i) * 0.61;
   }
   return o;
 }

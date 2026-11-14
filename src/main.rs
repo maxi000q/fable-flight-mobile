@@ -32,6 +32,7 @@ mod skin;
 mod sources;
 mod traffic;
 mod trees;
+mod ocean;
 mod world;
 
 #[derive(Copy, Clone, PartialEq)]
@@ -435,6 +436,8 @@ struct Game {
     last: Instant,
     acc: f64,
     wave_off: DVec2,
+    /// the camera in the ocean's coordinates (ocean.rs, wraps at its WRAP)
+    ocean_off: DVec2,
     prev_cam: DVec3,
     prev_vp: [[f32; 4]; 4],
     /// temporal anti-aliasing (F2)
@@ -643,7 +646,7 @@ impl Game {
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, window, r, world, src, model, piece_mesh, group_mesh, piece_cut, crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { 0 }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
+            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
             frame: 0, fps: 60.0, paused: false, show_help: false, show_hud: true, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
@@ -2060,7 +2063,12 @@ impl Game {
         if delta.length() < 5000.0 {
             self.wave_off += DVec2::new(delta.dot(east), delta.dot(north));
             self.wave_off = DVec2::new(self.wave_off.x.rem_euclid(65536.0), self.wave_off.y.rem_euclid(65536.0));
+            self.ocean_off += DVec2::new(delta.dot(east), delta.dot(north));
+            self.ocean_off = DVec2::new(self.ocean_off.x.rem_euclid(ocean::WRAP), self.ocean_off.y.rem_euclid(ocean::WRAP));
         }
+        // The sea follows the weather's wind (and the clock).
+        let sinlat = cam.normalize().z;
+        self.world.ocean.update(dt, self.time, self.wx.wind, self.wx.wind_from, sinlat, cam, east, north, self.ocean_off);
         let sun = self.sun_dir();
         let (moon, moon_lit) = self.moon_dir();
         // Detail building tiles in range stand in for "how much city is around".
@@ -2145,6 +2153,7 @@ impl Game {
             cut_v: [[0.0; 4]; tiles3d::MAX_CUT_V / 2],
             cs: [[0.0; 4]; 8],
             alto: [if in_menu { 0.0 } else { self.wx.alto }, 4800f32.max(self.wx.cloud_base + 0.4 * self.wx.cloud_depth + 800.0), 0.0, 0.0],
+            ocean: self.world.ocean.globals(),
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -2348,7 +2357,7 @@ impl Game {
         }
         let had_shots = shot.is_some() && self.shots.is_empty();
         let (skin_slots, skins) = if in_menu { (Vec::new(), Vec::new()) } else { self.destr.skin_draws() };
-        self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, psim, sim_steps: dt > 0.0, fluid, egui: Some(ui), shot });
+        self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.ocean.uniform(), egui: Some(ui), shot });
         if (had_shots && std::env::args().any(|a| a == "--shot") && self.record.is_none()) || rec_done {
             self.quit = true;
         }
