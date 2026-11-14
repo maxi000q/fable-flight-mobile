@@ -9,8 +9,23 @@ fn hg(c: f32, g: f32) -> f32 { return (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * 
 // Droplet (Mie) phase as three lobes: a sharp forward peak, a broad forward lobe that
 // carries the silver lining out to ~45 degrees from the sun, and a weak back lobe.
 // k < 1 flattens it for light that has already scattered a few times.
+// A narrow fourth lobe stands in for the diffraction peak (a big share of a droplet's
+// scattering stays within a few degrees of the sun): thin cloud over the sun blazes.
 fn cloud_phase(c: f32, k: f32) -> f32 {
-  return hg(c, 0.86 * k) * 0.5 + hg(c, 0.5 * k) * 0.3 + hg(c, -0.25 * k) * 0.2;
+  return hg(c, 0.86 * k) * 0.42 + hg(c, 0.5 * k) * 0.3 + hg(c, -0.25 * k) * 0.2 + hg(c, 0.97 * k) * 0.08;
+}
+// Light that has diffused right through a cloud still mostly travels away from the
+// sun, so a cloud in front of a low sun glows through its body instead of going grey.
+// Diffuse transmission falls off slowly with depth, ~1/(1 + 0.75 (1 - g) od) for g ~ 0.85.
+// Thin parts let more through than thick ones (second term), so the glow keeps the
+// cloud's structure. The SILVER term is light scattered forward a few times near the
+// thin edges; the outline itself gets the RIM term after the march (see fs).
+const GLOW = 0.06;
+const SILVER = 0.5;
+const RIM = 1.5;
+fn cloud_glow(cs: f32, od: f32) -> f32 {
+  return GLOW * hg(cs, 0.85) * (1.0 / (1.0 + 0.3 * od) + exp(-0.3 * od))
+        + SILVER * hg(cs, 0.9) * exp(-0.35 * od);
 }
 
 // ---------------------------------------------------------- mid-level cloud
@@ -93,6 +108,7 @@ fn alto_march(oc: vec3f, rd: vec3f, t0: f32, t1: f32, a: f32, jit: f32, cs: f32,
       kc *= 0.5;
     }
     ms += 0.4 / (4.0 * PI) / (1.0 + 0.25 * od);
+    ms += cloud_glow(cs, od);
     let hn = clamp((z - ln.x) / max(ln.y - ln.x, 1.0), 0.0, 1.0);
     let sunc = sun_trans(h, mu) * G.sun_dir.w;
     let amb = sky_amb * mix(0.35, 1.0, hn) + gnd_amb * mix(1.0, 0.3, hn);
@@ -145,6 +161,9 @@ fn depth_match(a: f32, b: f32) -> f32 {
   var L = vec3f(0.0);
   var tw = 0.0;
   var ws = 0.0;
+  var sunw = vec3f(0.0);  // opacity-weighted sunlight and sunward transmittance, for the rim
+  var litw = 0.0;
+  var cw = 0.0;
 
   // Sky light for the ambient term: zenith and horizon from the sky table, plus
   // sunlight bounced off the ground below.
@@ -253,6 +272,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
       // Deep inside, light arrives by diffusion, which falls off like 1/depth rather
       // than exponentially (two-stream approximation, g ~ 0.85).
       ms += 0.4 / (4.0 * PI) / (1.0 + 0.25 * od);
+      ms += cloud_glow(cs, od);
       // In-scatter probability: wispy edges and the undersides of clouds collect
       // less multiply-scattered light, which gives the dark creases between puffs.
       let dprob = 0.08 + pow(d, remap(clamp(hn, 0.3, 0.85), 0.3, 0.85, 0.5, 2.0));
@@ -268,10 +288,24 @@ fn depth_match(a: f32, b: f32) -> f32 {
       let st = exp(-e * dt);
       L += T * S * (1.0 - st) / e;
       let wgt = T * (1.0 - st);
+      sunw += wgt * sunc;
+      litw += wgt * exp(-od);
+      cw += wgt;
       tw += ts * wgt;
       ws += wgt;
       T *= st;
       if (T < 0.004) { T = 0.0; break; }
+    }
+    // Silver lining. Looking towards the sun the sunward path from a sample runs on
+    // along the line of sight, so only where the whole line of sight through the cloud
+    // is thin does sunlight get through: a band at the outline metres wide, far finer
+    // than the march resolves. Its partly transparent edge pixels stand in for it:
+    // single scattering through a slab of optical depth tau = -ln T is tau e^-tau.
+    // Only the share the march did not already light (litw) is added.
+    if (cw > 0.0 && cs > 0.5) {
+      let tau = -log(max(T, 1e-4));
+      let lit = litw / cw;
+      L += (sunw / cw) * (RIM * hg(cs, 0.94) * tau * exp(-tau) * (1.0 - lit));
     }
   }
   if (alto_on && T > 0.004) {
