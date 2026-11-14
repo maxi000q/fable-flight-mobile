@@ -50,6 +50,10 @@ const PHOTO_MASK: u32 = 4096;
 const PHOTO_MASK_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Slot of the coverage mask's projection among the cascade matrices.
 pub const MASK_SLOT: usize = CASCADES + 1;
+/// Slot of the shore mask's projection (shore.rs).
+pub const SHORE_SLOT: usize = CASCADES + 2;
+/// Slot of the shore's wide mask's projection (shore.rs).
+pub const SHORE_WIDE_SLOT: usize = CASCADES + 3;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -127,6 +131,10 @@ pub struct Globals {
     /// the wind direction; wind, wave height, whitecap cover; the ripples'
     /// slope covariance; the slope covariance each cascade's mips lose
     pub ocean: [[f32; 4]; crate::ocean::OCEAN_G],
+    /// camera-relative to the shore distance field (shore.rs)
+    pub shore_vp: [[f32; 4]; 4],
+    /// field valid, metres per texel, farthest distance kept (m), side of the square (m)
+    pub shore: [f32; 4],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
@@ -536,7 +544,13 @@ pub struct Frame<'a> {
     /// trees (for their leaf cards) and undergrowth near the camera, relative to their tiles
     pub near: Vec<TreeInst>,
     /// shadow cascades, the aircraft's shadow, the 3D tiles' coverage mask
-    pub casc_vp: [[[f32; 4]; 4]; CASCADES + 2],
+    pub casc_vp: [[[f32; 4]; 4]; CASCADES + 4],
+    /// the shore field's part this frame (shore.rs), and for drawing its
+    /// mask: the new square's centre (camera-relative) and the terrain tiles
+    /// near it that are out of view (their uniforms follow the view tiles')
+    pub shore: Option<crate::shore::Step>,
+    pub shore_c: [f32; 3],
+    pub shore_tiles: Vec<(&'a TileGpu, [f32; 12])>,
     pub psim: PSim,
     pub sim_steps: bool,
     /// the crash's fire simulation, while there is one
@@ -649,6 +663,8 @@ pub struct Renderer {
     p_skin: wgpu::RenderPipeline,
     skin_slots: wgpu::Buffer,
     p_water_top: wgpu::RenderPipeline,
+    /// where any ground is, into the shore mask (shore.rs)
+    p_shore_cover: wgpu::RenderPipeline,
     p_lamp_top: wgpu::RenderPipeline,
     photo_mask: wgpu::TextureView,
     /// the mask holds something that has to be cleared when no tiles are drawn
@@ -686,6 +702,7 @@ pub struct Renderer {
     vol_acc: wgpu::Buffer,
     pub fluid: crate::fluid::FluidGpu,
     ocean: crate::ocean::OceanGpu,
+    shore: crate::shore::ShoreGpu,
     fluid_t: crate::fluid::FluidTargets,
     /// game time (s) until which some smoke may still be alive, and the time now
     smoke_until: f32,
@@ -1095,6 +1112,7 @@ impl Renderer {
             queue.submit([enc.finish()]);
         }
         let ocean = crate::ocean::OceanGpu::new(d, &queue);
+        let shore = crate::shore::ShoreGpu::new(d, &queue, PHOTO_MASK_FMT);
         let wave = upload_mips(d, &queue, "wave", 256, wgpu::TextureFormat::Rgba8Unorm, 4, &crate::sources::mip_chain(wave_texture(), 256, 4));
         let ground_mats = GroundMats::new(d, &queue);
         let (det_alb, det_nrm) = ground_mats.views();
@@ -1123,6 +1141,7 @@ impl Renderer {
                 tex_entry(15, d2, false),
                 tex_entry(16, wgpu::TextureViewDimension::D2Array, false),
                 tex_entry(17, wgpu::TextureViewDimension::D2Array, false),
+                tex_entry(18, d2, false),
             ],
         });
         // Coverage of the photorealistic 3D tiles, seen from above (tiles3d.rs).
@@ -1151,6 +1170,7 @@ impl Renderer {
                     tex_res(15, pm),
                     tex_res(16, cs),
                     tex_res(17, &ocean.view),
+                    tex_res(18, &shore.view),
                 ],
             })
         };
@@ -1419,6 +1439,19 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // Where there is ground at all, into the shore mask (red; our water
+        // goes into its green with `p_water_top`).
+        let p_shore_cover = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shore cover"),
+            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
+            vertex: wgpu::VertexState { module: &m_terrain, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(40, false, &A_TERRAIN)] },
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState { module: &m_terrain, entry_point: Some("fs_cover"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
+            multiview_mask: None,
+            cache: None,
+        });
         // Our street lamps into the same mask (blue, with the road's height in
         // alpha): the light they would throw on the mesh at night.
         let max = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Max };
@@ -1513,7 +1546,7 @@ impl Renderer {
 
         // ---- per-draw uniform pools
         let pool = |label: &str, n: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: n * UB_ALIGN, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let (tile_ub, build_ub, obj_ub, casc_ub) = (pool("tiles", MAX_TILES), pool("builds", MAX_BUILDS + 1 + MAX_FIELDS as u64), pool("objs", MAX_OBJS), pool("cascades", CASCADES as u64 + 2));
+        let (tile_ub, build_ub, obj_ub, casc_ub) = (pool("tiles", MAX_TILES), pool("builds", MAX_BUILDS + 1 + MAX_FIELDS as u64), pool("objs", MAX_OBJS), pool("cascades", CASCADES as u64 + 4));
         let photo_ub = pool("photo tiles", MAX_PHOTO);
         let bg_tileu = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_tileu, entries: &[buf_res(0, &build_ub, 48)] });
         let bg_casc = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_casc, entries: &[buf_res(0, &casc_ub, 64)] });
@@ -1573,7 +1606,7 @@ impl Renderer {
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit,
-            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, smoke_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, surface, config, queue, device,
+            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, surface, config, queue, device,
         })
     }
 
@@ -1833,10 +1866,11 @@ impl Renderer {
         q.write_buffer(&self.globals_ub, 0, bytemuck::bytes_of(&f.g));
         q.write_buffer(&self.psim_ub, 0, bytemuck::bytes_of(&f.psim));
         let n_tiles = f.tiles.len().min(MAX_TILES as usize);
+        let n_shore_tiles = f.shore_tiles.len().min(MAX_TILES as usize - n_tiles);
         let n_builds = f.details.len().min(MAX_BUILDS as usize);
         let n_objs = f.objs.len().min(MAX_OBJS as usize);
-        let mut blob = vec![0u8; n_tiles * UB_ALIGN as usize];
-        for (i, (_, u)) in f.tiles.iter().take(n_tiles).enumerate() {
+        let mut blob = vec![0u8; (n_tiles + n_shore_tiles) * UB_ALIGN as usize];
+        for (i, (_, u)) in f.tiles.iter().take(n_tiles).chain(f.shore_tiles.iter().take(n_shore_tiles)).enumerate() {
             blob[i * 256..i * 256 + 48].copy_from_slice(bytemuck::bytes_of(u));
         }
         q.write_buffer(&self.tile_ub, 0, &blob);
@@ -1870,7 +1904,7 @@ impl Renderer {
             }
             q.write_buffer(&self.photo_ub, 0, &blob);
         }
-        let mut blob = vec![0u8; (CASCADES + 2) * UB_ALIGN as usize];
+        let mut blob = vec![0u8; (CASCADES + 4) * UB_ALIGN as usize];
         for (i, m) in f.casc_vp.iter().enumerate() {
             blob[i * 256..i * 256 + 64].copy_from_slice(bytemuck::bytes_of(m));
         }
@@ -2225,6 +2259,35 @@ impl Renderer {
                 }
             }
             self.photo_mask_dirty = n_photo > 0;
+        }
+        // The shore distance field (shore.rs), a step a frame: our water from
+        // above, and where there is ground at all, then the flood.
+        if let Some(step) = f.shore {
+            if let crate::shore::Step::Raster = step {
+                // the square itself, and the wide one around it (for the exposure)
+                for (view, slot, half) in [(&self.shore.mask, SHORE_SLOT, crate::shore::HALF), (&self.shore.wide, SHORE_WIDE_SLOT, crate::shore::WIDE_HALF)] {
+                    let clear = wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: -1e4, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } };
+                    let mut rp = enc.begin_render_pass(&pass_desc(&[Some(clear)], None));
+                    rp.set_bind_group(0, &self.bg0_pre, &[]);
+                    rp.set_bind_group(2, &self.bg_casc, &[slot as u32 * 256]);
+                    rp.set_index_buffer(self.tile_ibuf.slice(..), wgpu::IndexFormat::Uint16);
+                    let c = glam::Vec3::from(f.shore_c);
+                    let reach = half as f32 * 1.45;
+                    let near = |u: &[f32; 12]| (glam::Vec3::new(u[0], u[1], u[2]) - c).length() - u[3] * crate::sources::GRID as f32 * 0.75 < reach;
+                    let all = f.tiles.iter().take(n_tiles).chain(f.shore_tiles.iter().take(n_shore_tiles)).enumerate();
+                    for p in [&self.p_shore_cover, &self.p_water_top] {
+                        rp.set_pipeline(p);
+                        for (i, (tile, u)) in all.clone() {
+                            if near(u) {
+                                rp.set_bind_group(1, &tile.bind, &[i as u32 * 256]);
+                                rp.set_vertex_buffer(0, tile.vbuf.slice(..));
+                                rp.draw_indexed(0..self.tile_nidx, 0, 0..1);
+                            }
+                        }
+                    }
+                }
+            }
+            self.shore.compute(q, &mut enc, step, [f.g.ocean[0], f.g.ocean[1]]);
         }
         for c in 0..CASCADES {
             let mut rp = enc.begin_render_pass(&pass_desc(&[], Some(depth_att(&self.shadow[c], 1.0))));

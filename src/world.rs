@@ -184,6 +184,8 @@ pub struct World {
     pub lod_k: f64,
     pub buildings_on: bool,
     draw: Vec<TileId>,
+    /// selected tiles out of view but near the camera: for the shore masks (shore.rs)
+    draw_shore: Vec<TileId>,
     draw_b: Vec<TileId>,
     wanted: Vec<(f32, TileId)>,
     in_view: Vec<bool>,
@@ -219,7 +221,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -875,6 +877,7 @@ impl World {
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let gh = self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
         self.draw.clear();
+        self.draw_shore.clear();
         self.wanted.clear();
         for y in 0..4 {
             for x in 0..4 {
@@ -1194,8 +1197,27 @@ impl World {
         }
         if fr.sphere(center - cam, radius) {
             self.draw.push(id);
+        } else if (center - cam).length() - radius < crate::shore::WIDE_HALF * 1.6 {
+            self.draw_shore.push(id);
         }
         true
+    }
+
+    /// Terrain tiles out of view that reach into the shore mask's square
+    /// (centre `c`, both camera-relative), with their uniforms as `draw_lists`.
+    pub fn shore_tiles(&self, cam: DVec3, c: DVec3) -> Vec<(&TileGpu, [f32; 12])> {
+        let mut out = Vec::new();
+        for id in &self.draw_shore {
+            if let Some(Slot::Ready(t)) = self.tiles.get(id) {
+                let o = t.center - cam;
+                if (o - c).length() - t.radius > crate::shore::WIDE_HALF * 1.45 {
+                    continue;
+                }
+                let o = o.as_vec3();
+                out.push((&t.gpu, [o.x, o.y, o.z, (id.width_m() / GRID as f64) as f32, id.z as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+            }
+        }
+        out
     }
 
     /// Terrain tiles and detail tiles to draw. `focus` and `casc` (radius of

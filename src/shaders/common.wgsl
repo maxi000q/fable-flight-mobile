@@ -54,6 +54,8 @@ struct Globals {
   // ripples shorter than any cascade; then at 3 + 9 c + m the slope covariance
   // cascade c's mip level m no longer holds (see `ocean_lost`).
   ocean: array<vec4f, 30>,
+  shore_vp: mat4x4f, // camera-relative to the shore distance field (shore.rs)
+  shore: vec4f,      // field valid, metres per texel, farthest distance kept (m), side of the square (m)
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -81,6 +83,9 @@ struct Globals {
 // Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy); layer 6 the whitecaps on
 // cascade 0's grid (foam cover, fresh foam, fold threshold on the Jacobian, 0).
 @group(0) @binding(17) var t_ocean: texture_2d_array<f32>;
+// Distance to the shore (shore.rs): metres to the nearest land, seaward
+// direction (east, north), 1.
+@group(0) @binding(18) var t_shore: texture_2d<f32>;
 
 // GPU particles (explosions, smoke, dust, spray) and their simulation constants.
 struct Particle {

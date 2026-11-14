@@ -516,6 +516,12 @@ struct TopOut { @builtin(position) clip: vec4f, @location(0) uv: vec2f, @locatio
   if (in.skirt > 0.5 || textureSampleLevel(t_mask, s_clamp, in.uv, 0.0).r < 0.5) { discard; }
   return vec4f(0.0, in.h, 0.0, 0.0);
 }
+// Where any ground was drawn at all, into the red channel of the shore mask
+// (shore.rs): land there is ground without our water on it.
+@fragment fn fs_cover(in: TopOut) -> @location(0) vec4f {
+  if (in.skirt > 0.5) { discard; }
+  return vec4f(1.0, 0.0, 0.0, 0.0);
+}
 
 @vertex fn vs(@location(0) pos: vec3f, @location(1) depth: f32, @location(2) nrm: vec3f, @location(3) skirt: f32, @location(4) uv: vec2f) -> VOut {
   return finish(pos + T.offset.xyz, nrm, uv, depth, skirt, T.offset.w);

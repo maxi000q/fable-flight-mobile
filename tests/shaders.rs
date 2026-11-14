@@ -24,6 +24,7 @@ fn shaders_validate() {
     ok &= check("resolve", include_str!("../src/shaders/resolve.wgsl"));
     ok &= check("detail", include_str!("../src/shaders/detail.wgsl"));
     ok &= check("ocean", include_str!("../src/shaders/ocean.wgsl"));
+    ok &= check("shore", include_str!("../src/shaders/shore.wgsl"));
     for (name, src) in [
         ("lut", include_str!("../src/shaders/lut.wgsl")),
         ("terrain", include_str!("../src/shaders/terrain.wgsl")),

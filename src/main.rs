@@ -33,6 +33,7 @@ mod sources;
 mod traffic;
 mod trees;
 mod ocean;
+mod shore;
 mod world;
 
 #[derive(Copy, Clone, PartialEq)]
@@ -436,6 +437,8 @@ struct Game {
     last: Instant,
     acc: f64,
     wave_off: DVec2,
+    /// the shore distance field's squares (shore.rs)
+    shore: shore::Shore,
     /// the camera in the ocean's coordinates (ocean.rs, wraps at its WRAP)
     ocean_off: DVec2,
     prev_cam: DVec3,
@@ -646,7 +649,7 @@ impl Game {
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, window, r, world, src, model, piece_mesh, group_mesh, piece_cut, crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { 0 }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
+            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
             frame: 0, fps: 60.0, paused: false, show_help: false, show_hud: true, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
@@ -2089,7 +2092,7 @@ impl Game {
         // to its own texel grid so shadows do not shimmer as it moves.
         let shadow_on = mu > 0.04 && !in_menu;
         const CASC: [f32; 3] = [260.0, 1500.0, 8500.0];
-        let mut casc_vp = [[[0f32; 4]; 4]; render::CASCADES + 2];
+        let mut casc_vp = [[[0f32; 4]; 4]; render::CASCADES + 4];
         {
             let right = { let r = DVec3::Z.cross(sun); if r.length_squared() < 1e-6 { DVec3::X } else { r.normalize() } };
             let upl = sun.cross(right);
@@ -2154,6 +2157,8 @@ impl Game {
             cs: [[0.0; 4]; 8],
             alto: [if in_menu { 0.0 } else { self.wx.alto }, 4800f32.max(self.wx.cloud_base + 0.4 * self.wx.cloud_depth + 800.0), 0.0, 0.0],
             ocean: self.world.ocean.globals(),
+            shore_vp: [[0.0; 4]; 4],
+            shore: [0.0; 4],
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -2324,6 +2329,14 @@ impl Game {
         g.cut_v = pf.cut_v;
         casc_vp[render::MASK_SLOT] = g.photo_vp;
         let (tiles, details, near) = self.world.draw_lists(cam, focus_abs, CASC);
+        // The shore distance field: a step of its rebuild this frame.
+        let sf = self.shore.frame(cam);
+        casc_vp[render::SHORE_SLOT] = sf.build_vp;
+        casc_vp[render::SHORE_WIDE_SLOT] = sf.build_vp_wide;
+        g.shore_vp = sf.vp;
+        g.shore = [if sf.on { 1.0 } else { 0.0 }, shore::TEXEL as f32, shore::MAX_D, 2.0 * shore::HALF as f32];
+        let shore_tiles = if matches!(sf.step, Some(shore::Step::Raster)) { self.world.shore_tiles(cam, sf.build_c) } else { Vec::new() };
+        let shore_c = sf.build_c.as_vec3().to_array();
         let fields = if in_menu { Vec::new() } else { self.world.field_draws(cam) };
         let mut shot = match self.shots.first() {
             Some((t, _, _)) if self.real >= *t => {
@@ -2357,7 +2370,7 @@ impl Game {
         }
         let had_shots = shot.is_some() && self.shots.is_empty();
         let (skin_slots, skins) = if in_menu { (Vec::new(), Vec::new()) } else { self.destr.skin_draws() };
-        self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.ocean.uniform(), egui: Some(ui), shot });
+        self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.ocean.uniform(), egui: Some(ui), shot });
         if (had_shots && std::env::args().any(|a| a == "--shot") && self.record.is_none()) || rec_done {
             self.quit = true;
         }

@@ -90,6 +90,159 @@ fn sea_glint(Ls: vec3f, V: vec3f, N: vec3f, Tx: vec3f, Ty: vec3f, cv: vec3f) -> 
   return fr * p / (4.0 * zv * zh * zh * zh * zh * g);
 }
 
+// ------------------------------------------------------------ breakers
+// The shore distance field at P (shore.rs): distance to land (m) as it is
+// and smoothed, the seaward direction (east, north), how far to trust it, and
+// how tall the breakers come in here (m; from how exposed it is, shore.wgsl
+// `breaker_height`). Near the edge of its square the nearest land may lie
+// outside: a distance shorter than the way to the edge is exact, a longer
+// one may not be.
+struct ShoreAt { d0: f32, d: f32, dir: vec2f, w: f32, hb: f32 };
+fn shore_at(P: vec3f) -> ShoreAt {
+  var o = ShoreAt(G.shore.z, G.shore.z, vec2f(0.0), 0.0, 0.0);
+  if (G.shore.x < 0.5) { return o; }
+  let q = G.shore_vp * vec4f(P, 1.0);
+  let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
+  let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) * G.shore.w;
+  if (edge <= 0.0) { return o; }
+  // Smoothed over some 15 m plus a third of the way out: refraction turns
+  // the crests to the shore's general line, not its every step and corner
+  // (the water's edge itself comes in steps of the land cover's texels).
+  let f0 = textureSampleLevel(t_shore, s_clamp, uv, 0.0);
+  let lod = clamp(log2((0.35 * f0.x + 15.0) / G.shore.y), 0.0, 6.0);
+  let f = textureSampleLevel(t_shore, s_clamp, uv, lod);
+  let sl = length(f.yz);
+  o.d0 = f0.x;
+  o.d = f.x;
+  o.dir = select(vec2f(0.0), f.yz / sl, sl > 1e-3);
+  o.w = 1.0 - smoothstep(edge * 0.75, edge, f0.x);
+  o.hb = max(f.w, 0.0);
+  return o;
+}
+
+fn surf_hash(i: i32) -> f32 {
+  var h = bitcast<u32>(i) * 747796405u + 2891336453u;
+  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+  return f32((h >> 22u) ^ h) / 4294967295.0;
+}
+
+// exp(-a x) behind a front at x = 0 (x >= 0, in wave cycles), spread over a
+// pixel footprint of b cycles without changing its integral; ahead of the
+// front (x < 0) it falls off over the footprint or a sharp edge's width.
+fn surf_exp(x: f32, a: f32, b: f32) -> f32 {
+  let ae = a / (1.0 + a * b);
+  return (ae / a) * select(exp(x / (0.006 + b)), exp(-ae * x), x >= 0.0);
+}
+
+struct Surf {
+  foam: f32,
+  slope: vec2f,   // dh/de, dh/dn of the swell's own shape
+  h: f32,         // its height above the mean (m)
+  sv: vec3f,      // slope covariance (ee, nn, en) of the swell too fine to resolve
+};
+
+// Waves breaking along the shore. The swell runs in shore-parallel crests
+// over a beach of slope s (depth h = s d + h0 at distance d), slowing as
+// shallow-water waves (c = sqrt(g h)), so the phase from the shoreline is
+// 2 w (sqrt(h) - sqrt(h0)) / (s sqrt(g)) and the crests bunch up toward land.
+// Each crest breaks where the water is shallower than its height / 0.78 and
+// runs in as a white bore, leaving foam behind it that fades; at the water's
+// edge the swash spreads a fringe of foam that pulses as each bore arrives.
+// Every wave has its own height, and breaks in its own sections along the
+// shore. How tall they come in depends on how exposed the shore is (sh.hb):
+// the surf of an open coast, a ripple lapping at a harbour wall in light air.
+// Small waves spill without much white water, and run up steeper banks.
+// fp: pixel footprint (m).
+fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
+  var o = Surf(0.0, vec2f(0.0), 0.0, vec3f(0.0));
+  let d = sh.d;
+  if (sh.w <= 0.0 || min(d, sh.d0) >= G.shore.z - 2.0) { return o; }
+  let sdir = sh.dir;
+  let wind = G.ocean[1].x;
+  // Swell is always running in at sea; wind blowing onshore builds it.
+  let onshore = -dot(G.ocean[0].zw, sdir);
+  var H0: f32;
+  var T: f32;
+  var s: f32;
+  var fk: f32;
+  var wmax: f32;
+  if (wclass > 2.5) { H0 = min(0.03 + 0.005 * wind, sh.hb + 0.01); T = 1.3 + 0.08 * wind; s = 0.08; fk = 0.3; wmax = 0.3; }        // river
+  else if (wclass > 1.5) { H0 = min(0.05 + 0.014 * wind, sh.hb + 0.01); T = 1.6 + 0.13 * wind; s = 0.06; fk = 0.55; wmax = 0.6; } // lake
+  else {
+    H0 = sh.hb;
+    T = min(2.0 + 6.5 * sqrt(H0), 14.0);
+    s = mix(0.06, 0.02, smoothstep(0.15, 0.7, H0));
+    fk = 1.0;
+    wmax = 0.4 + 4.5 * H0;
+  }
+  H0 *= 0.85 + 0.15 * onshore;
+  if (H0 < 0.015) { return o; }
+  fk *= smoothstep(0.04, 0.5, H0);
+  // Beaches steeper and shallower along the shore, crests not quite parallel to it.
+  let nb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2600.0, 0.43), 0.0);
+  let na = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 1100.0, 0.77), 0.0);
+  s *= mix(0.55, 1.7, smoothstep(0.25, 0.75, nb.r));
+  let psi = (na.r - 0.5) * 5.0;
+
+  let h0 = 0.08;
+  let h = s * d + h0;
+  let w = 2.0 * PI / T;
+  let kl = w / sqrt(9.81 * h);                 // local wavenumber
+  let lam = 2.0 * PI / kl;
+  let phi = 2.0 * w * (sqrt(h) - sqrt(h0)) / (s * sqrt(9.81));
+  let cyc = (phi + psi) / (2.0 * PI) + t / T;
+  let mf = floor(cyc);
+  let u = cyc - mf;                             // 0 at the crest shoreward of us, 1 at the next one out
+  let m = i32(mf);
+  let b = fp / lam;                             // footprint in cycles
+  let far = smoothstep(0.18, 0.55, b);
+
+  // The two crests either side: height, and how far in it breaks.
+  let z0 = surf_hash(m);
+  let z1 = surf_hash(m + 1);
+  let sec0 = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 900.0, z0), 0.0).r;
+  let sec1 = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 900.0, z1), 0.0).r;
+  let H_0 = H0 * (0.65 + 0.6 * z0) * mix(0.5, 1.2, smoothstep(0.3, 0.7, sec0));
+  let H_1 = H0 * (0.65 + 0.6 * z1) * mix(0.5, 1.2, smoothstep(0.3, 0.7, sec1));
+  let db0 = max(H_0 / 0.78 - h0, 0.0) / s;
+  let db1 = max(H_1 / 0.78 - h0, 0.0) / s;
+  // Broken by the time it reaches us; whitest just after it breaks.
+  let br0 = smoothstep(db0 * 1.08 + 0.5, db0 * 0.85, d) * (0.8 + 0.5 * exp(-pow((d - db0 * 0.85) / (0.25 * db0 + 1.0), 2.0)));
+  let br1 = smoothstep(db1 * 1.08 + 0.5, db1 * 0.85, d) * (0.8 + 0.5 * exp(-pow((d - db1 * 0.85) / (0.25 * db1 + 1.0), 2.0)));
+  // The bore: a white front, foam trailing behind it (seaward) that fades.
+  let fr = 0.5;
+  var foam = br0 * (fr * surf_exp(u, 16.0, b) + (1.0 - fr) * surf_exp(u, 3.0, b)) + br1 * (fr * surf_exp(u - 1.0, 16.0, b) + (1.0 - fr) * surf_exp(u - 1.0, 3.0, b));
+  // Far off the pattern is finer than a pixel: its mean over a cycle.
+  let dbm = max(H0 * 0.9 / 0.78 - h0, 0.0) / s;
+  let mean = smoothstep(dbm * 1.15 + 0.5, dbm * 0.7, d) * 0.22;
+  foam = mix(foam, mean, far);
+  // Spent foam milky over the whole surf zone.
+  foam += 0.18 * smoothstep(dbm * 1.2 + 0.5, dbm * 0.3, d);
+  // The swash: a fringe at the water's edge, widest as each bore arrives.
+  let us = fract(psi / (2.0 * PI) + t / T);
+  let ws = wmax * (0.25 + 0.75 * pow(1.0 - us, 2.0)) * (0.7 + 0.6 * surf_hash(i32(floor(psi / (2.0 * PI) + t / T))));
+  let fringe = smoothstep(ws + 0.4 + fp, ws * 0.4, sh.d0);
+  foam = max(foam, mix(fringe, smoothstep(wmax + fp, 0.0, sh.d0) * 0.5, smoothstep(0.3, 1.0, fp / wmax)));
+  o.foam = clamp(foam, 0.0, 1.0) * fk * sh.w;
+
+  // The swell's shape: a long back and a short, steep face toward the shore
+  // (trough 70% of the way from one crest to the next), as tall as the wave
+  // or the water allows, fading out to sea where the open-ocean waves take over.
+  let Hb = mix(H_0, H_1, smoothstep(0.55, 0.85, u));
+  let env = (1.0 - smoothstep(min(4.0 * dbm + 40.0, 300.0), min(8.0 * dbm + 90.0, 0.9 * G.shore.z), d)) * sh.w;
+  let Hl = min(Hb, 0.78 * h) * env;
+  let back = u < 0.7;
+  let wu = select(0.5 + 0.5 * (u - 0.7) / 0.3, 0.5 * u / 0.7, back);
+  let dw = select(0.5 / 0.3, 0.5 / 0.7, back);
+  let amp = 0.5 * Hl * kl;                      // slope scale: d(height)/d(distance)
+  let fine = 1.0 - smoothstep(0.12, 0.4, b);
+  o.slope = sdir * (-amp * sin(2.0 * PI * wu) * dw * fine);
+  o.h = 0.5 * Hl * cos(2.0 * PI * wu) * fine;
+  let var_s = 0.6 * amp * amp * (1.0 - fine);
+  o.sv = vec3f(sdir.x * sdir.x, sdir.y * sdir.y, sdir.x * sdir.y) * var_s;
+  return o;
+}
+
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
   // Edge pixels average in the normals other geometry writes here: keep the
   // water parameters in range or the absorption maths goes negative.
@@ -126,6 +279,8 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // Gusts raise the short waves most.
   st.z *= mix(0.3, 1.2, ruffle);
   st.y *= mix(0.8, 1.1, ruffle);
+  // Breakers along the shore, from the distance to it.
+  let surf = breakers(wc, shore_at(P), wclass, fp, t);
 
   // The FFT ocean (ocean.wgsl). This pixel is where the sideways shift
   // carried a surface point to: find that point first (two fixed-point steps
@@ -166,17 +321,22 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     }
     cv += ocean_lost(c, lod[c]) * (w * w);
   }
+  // The swell running in to the shore, where it is finer than a pixel.
+  cv += surf.sv;
   // The sun's disc, seen in a mirror, spans slopes of about its half radius.
   cv += vec3f(SUN_SLOPE2, SUN_SLOPE2, 0.0);
   // Surface normal through the sideways shift: slopes over the moved surface.
   let jxx = 1.0 + jd.x;
   let jyy = 1.0 + jd.y;
   let J = jxx * jyy - jd.z * jd.z;
-  var slope = vec2f(sl.x * jyy - sl.y * jd.z, sl.y * jxx - sl.x * jd.z) / max(J, 0.25);
+  var slope = vec2f(sl.x * jyy - sl.y * jd.z, sl.y * jxx - sl.x * jd.z) / max(J, 0.25) + surf.slope;
   let smag = length(slope);
   if (smag > 1.5) { slope *= 1.5 / smag; }
   let J01 = (1.0 + jd01.x) * (1.0 + jd01.y) - jd01.z * jd01.z;
   let N = normalize(upn - e * slope.x - n * slope.y);
+  // (the march for reflected scenery leaves out the swell's long, even
+  // crests: whole crest lines would catch the beach behind them at once)
+  let Nw = normalize(upn - e * (slope.x - surf.slope.x) - n * (slope.y - surf.slope.y));
   // Tangent frame on the resolved surface, east and north as near as may be.
   let Tx = normalize(e - N * dot(e, N));
   let Ty = cross(N, Tx);
@@ -252,7 +412,7 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     // hit and miss on alternate pixels. Less tilt the further off (where a
     // pixel spans many waves) keeps the wobble while the reflection holds together.
     let ks = mix(0.5, 0.12, smoothstep(250.0, 2500.0, dist));
-    var Rs = reflect(V, normalize(upn + (N - upn) * ks));
+    var Rs = reflect(V, normalize(upn + (Nw - upn) * ks));
     Rs = normalize(Rs + upn * max(0.03 - dot(Rs, upn), 0.0));
     let hit = ssr(P, Rs, 0.5);
     refl = mix(refl, hit.rgb, hit.a);
@@ -313,25 +473,24 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // Light through the crests: looking toward the sun, the wave between the
   // eye and it glows green where it is thin and lit from behind.
   let hs = max(G.ocean[1].y * (st.x + st.y) * 0.5, 0.2);
-  let crest_h = clamp(hgt / hs + 0.45, 0.0, 1.0);
+  let crest_h = clamp((hgt + surf.h) / hs + 0.45, 0.0, 1.0);
   let toward = pow(max(dot(V, G.sun_dir.xyz), 0.0), 4.0);
   let sss = toward * crest_h * (0.3 + 0.7 * (1.0 - ndv)) * max(dot(G.sun_dir.xyz, upn), 0.0);
   under += (body * 8.0 + vec3f(0.01, 0.06, 0.05)) * l.sun * sss * 0.4 / PI;
 
   var col = mix(under, refl, clamp(F, 0.0, 1.0)) + spec + point_light(P, upn) * body * 4.0;
 
-  // Foam: surf line at the shore, whitecaps where the crests fold over.
+  // Foam: breakers along the shore, whitecaps where the crests fold over.
   let fa = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 37.0 + vec2f(0.012, 0.007) * t, t * 0.02), 0.0);
   let fb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 5.3 - vec2f(0.02, 0.03) * t, 0.4 + t * 0.03), 0.0);
   // The noise volume has no mips: fade each layer to its mean before the
   // pixel footprint outgrows its features, or it sparkles as white speckle.
   let lace = mix(fb.g * 0.6 + fb.b * 0.5, 0.55, smoothstep(0.12, 0.7, fp));
   let far_a = smoothstep(1.5, 6.0, fp);
-  let fa_r = mix(fa.r, 0.5, far_a);
   let fa_g = mix(fa.g, 0.5, far_a);
   let fnear = 1.0 - smoothstep(2500.0, 9000.0, dist);
-  let surge = 0.5 + 0.5 * sin(t * 0.7 + wd * 4.0 + fa_r * 6.0);
-  var foam = smoothstep(1.1, 0.0, wd / (0.5 + 0.9 * surge)) * smoothstep(0.35, 0.6, lace + fa_g * 0.25) * select(1.0, 0.25, wclass > 1.5);
+  // The breakers' foam, laced: solid on a fresh bore, broken up as it thins.
+  var foam = clamp(surf.foam * (0.45 + lace + (fa_g - 0.5) * 0.3) * 1.2, 0.0, 1.0);
   // Whitecaps (ocean.wgsl `foam`): foam put down where the crests fold (the
   // Jacobian of the sideways shift), built up, drifted downwind and faded,
   // its cover steered to what the wind whitens (Monahan). It is kept in the
