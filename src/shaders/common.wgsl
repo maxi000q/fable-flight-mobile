@@ -76,7 +76,8 @@ struct Globals {
 // Cloud shadow map, two cascades double-buffered (see cloud_sun).
 @group(0) @binding(16) var t_cshadow: texture_2d_array<f32>;
 // The ocean's three wave cascades (ocean.wgsl): layer c = (Dx, Dy, height,
-// Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy).
+// Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy); layer 6 the whitecaps on
+// cascade 0's grid (foam cover, fresh foam, fold threshold on the Jacobian, 0).
 @group(0) @binding(17) var t_ocean: texture_2d_array<f32>;
 
 // GPU particles (explosions, smoke, dust, spray) and their simulation constants.
@@ -517,7 +518,7 @@ fn wave_coord(p: vec3f) -> vec2f {
 fn ocean_coord(p: vec3f) -> vec2f {
   return vec2f(dot(p, G.east.xyz), dot(p, G.north.xyz)) + G.ocean[0].xy;
 }
-fn ocean_size(c: i32) -> f32 { return select(select(6.0, 40.0, c == 1), 250.0, c == 0); }
+fn ocean_size(c: i32) -> f32 { return select(select(6.0, 250.0 / 6.0, c == 1), 250.0, c == 0); }
 // Sea state: how much of each wave cascade (about 250 m, 40 m and 6 m across)
 // a stretch of water shows, by its class, latitude and how open it is (shore:
 // 0 by the coast, 1 out on open water). Short fetch - bays, lakes, rivers -

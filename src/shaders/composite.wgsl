@@ -82,7 +82,6 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // cells shrink under a pixel, or the gust pattern turns to sparkle far off.
   let g1r = mix(g1.r, 0.5, smoothstep(10.0, 45.0, fp));
   let g2g = mix(g2.g, 0.5, smoothstep(2.5, 10.0, fp));
-  let g2b = mix(g2.b, 0.5, smoothstep(2.5, 10.0, fp));
   let calm = 1.0 - smoothstep(1.5, 7.0, wind);
   let ruffle = smoothstep(0.28, 0.72, g1r * 0.65 + g2g * 0.45 - 0.02 + 0.2 * (1.0 - st.z) - 0.3 * calm);
   // Gusts raise the short waves most.
@@ -269,7 +268,6 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // Foam: surf line at the shore, whitecaps where the crests fold over.
   let fa = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 37.0 + vec2f(0.012, 0.007) * t, t * 0.02), 0.0);
   let fb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 5.3 - vec2f(0.02, 0.03) * t, 0.4 + t * 0.03), 0.0);
-  let gust = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 1900.0 + vec2f(0.002, 0.0) * t, 0.77), 0.0).r;
   // The noise volume has no mips: fade each layer to its mean before the
   // pixel footprint outgrows its features, or it sparkles as white speckle.
   let lace = mix(fb.g * 0.6 + fb.b * 0.5, 0.55, smoothstep(0.12, 0.7, fp));
@@ -279,22 +277,28 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let fnear = 1.0 - smoothstep(2500.0, 9000.0, dist);
   let surge = 0.5 + 0.5 * sin(t * 0.7 + wd * 4.0 + fa_r * 6.0);
   var foam = smoothstep(1.1, 0.0, wd / (0.5 + 0.9 * surge)) * smoothstep(0.35, 0.6, lace + fa_g * 0.25) * select(1.0, 0.25, wclass > 1.5);
-  // Whitecaps: the sea breaks where the sideways shift folds the surface
-  // (the Jacobian falls toward zero), from a moderate breeze up. They break
-  // along the crests, so they are drawn out across the wind; from afar a cap
-  // is part bubbles, part dark water, so it shows paler.
-  let capw = smoothstep(3.5, 9.0, wind) * step(wclass, 1.5);
-  let fw = textureSampleLevel(t_noise, s_repeat, vec3f(ww.x / 21.0 - t * 0.02, ww.y / 64.0, 0.55 + t * 0.015), 0.0).r;
-  let cap_n = mix(fw, 0.5, smoothstep(1.0, 4.0, fp));
-  let fold = 0.9 - J01;
-  let near_cap = smoothstep(0.1, 0.55, fold + (fa_r - 0.5) * 0.3 + (cap_n - 0.5) * 0.5 + (gust - 0.6) * 0.8 + (crest_h - 0.6) * 0.3) * smoothstep(0.42, 0.62, lace);
-  // Once the mips have smoothed the folds away, as much of the sea as the
-  // wind whitens on average, in patches with the gusts.
-  let far_cap = clamp(G.ocean[1].z * 2.5 * (0.4 + 1.2 * gust), 0.0, 1.0);
-  foam += mix(near_cap, far_cap, smoothstep(2.0, 5.0, lod[1])) * capw * mix(0.8, 0.45, far_a);
-  // Streaks of spent foam drawn out downwind of the whitecaps.
-  let streak = smoothstep(0.62, 0.85, g2b) * ruffle * capw * 0.3;
-  foam = max(foam, streak * smoothstep(0.4, 0.6, lace));
+  // Whitecaps (ocean.wgsl `foam`): foam put down where the crests fold (the
+  // Jacobian of the sideways shift), built up, drifted downwind and faded,
+  // its cover steered to what the wind whitens (Monahan). It is kept in the
+  // surface's own coordinates, so it rides the waves' orbits with the water.
+  let fz = textureSampleLevel(t_ocean, s_repeat, x0 / ocean_size(0), 6, lod[0]);
+  let capw = step(wclass, 1.5) * smoothstep(0.35, 0.95, 0.5 * (st.x + st.y));
+  // Spent foam breaks up into lace and streaks drawn out downwind: a
+  // threshold over noise stretched along the wind (in the surface's own
+  // coordinates too) that keeps the cover on average. Far off, where the
+  // pattern would sparkle, the mips' mean cover shows instead.
+  let wl = wc + (x0 - xo);
+  let wwl = vec2f(dot(wl, wdir) - 0.03 * wind * t, dot(wl, wn));
+  let sA = textureSampleLevel(t_noise, s_repeat, vec3f(wwl.x / 40.0, wwl.y / 12.0, 0.29), 0.0);
+  let sB = textureSampleLevel(t_noise, s_repeat, vec3f(wwl.x / 12.0, wwl.y / 4.0, 0.63), 0.0);
+  // (the noise volume has no mips: each layer goes to its mean before its
+  // texels shrink under a pixel)
+  let nc = (sA.r - 0.5) * 0.7 + (mix(sB.g, 0.55, smoothstep(0.04, 0.2, fp)) - 0.55) * 0.5;
+  let spent = mix(smoothstep(-0.1, 0.1, fz.r - 0.5 - nc * 2.2), fz.r, smoothstep(0.15, 0.8, fp));
+  // The breaking itself: solid white right on the folding crest, sharp at
+  // this pixel's own fold, where the foam is fresh.
+  let crest = fz.g * smoothstep(fz.b + 0.12, fz.b - 0.08, J01);
+  foam += max(spent, crest) * capw * mix(0.95, 0.75, far_a);
   foam = clamp(foam * fnear, 0.0, 1.0);
   // Foam is bubbles, not paint: holes and lace within it, close up.
   let bub = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2.1, 0.2 + t * 0.04), 0.0);

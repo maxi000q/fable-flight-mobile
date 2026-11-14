@@ -1,8 +1,12 @@
 //! Wind-driven ocean waves. The weather's wind (speed, direction) and the
 //! fetch shape a JONSWAP wind sea with Donelan-Banner directional spread, plus
-//! a long swell; three tiling cascades of it (about 250 m, 40 m and 6 m across,
+//! a long swell; three tiling cascades of it (about 250 m, 42 m and 6 m across,
 //! 256 x 256 each) are rebuilt every frame on the GPU by inverse FFT
 //! (ocean.wgsl) into height, sideways displacement (sharp crests) and slopes.
+//!
+//! Whitecaps are kept on the GPU too (ocean.wgsl `foam`): foam goes down where
+//! the crests fold (the Jacobian of the sideways shift), builds up, drifts
+//! downwind and decays, and its cover is steered to Monahan's W(U).
 //!
 //! Which cascades a stretch of water shows depends on its fetch (common.wgsl
 //! `sea_state`): the open ocean gets all three, the long swell included; bays
@@ -18,8 +22,10 @@ use std::f64::consts::PI;
 
 /// Texels across each cascade.
 pub const N: usize = 256;
-/// Tile sizes (m).
-pub const SIZES: [f64; 3] = [250.0, 40.0, 6.0];
+/// Tile sizes (m). Cascade 1 fits six times into cascade 0 exactly, so the
+/// whitecaps (kept on cascade 0's grid, from both) land on its crests in
+/// every tile (common.wgsl `ocean_size`).
+pub const SIZES: [f64; 3] = [250.0, 250.0 / 6.0, 6.0];
 /// Band edges (wavelength, m): cascade 0 holds the waves longer than the
 /// first, cascade 1 those down to the second, cascade 2 the rest.
 const BAND: [f64; 2] = [25.0, 4.0];
@@ -200,6 +206,8 @@ pub struct Ocean {
     sdir: DVec2,
     started: bool,
     spec: Spec,
+    /// game seconds since the last update (0 while paused)
+    dt: f64,
     /// time (s), wrapped at PERIOD
     t: f64,
     /// cascade 0's random numbers
@@ -234,6 +242,7 @@ impl Ocean {
             sdir: dir,
             started: false,
             spec: Spec::new(5.0, dir, dir, 0.8),
+            dt: 0.0,
             t: 0.0,
             noise0,
             field: vec![[0.0; 3]; M * M],
@@ -272,6 +281,7 @@ impl Ocean {
         let swell_hs = 0.7 + 0.6 * smoothstep(0.55, 0.85, sinlat.abs()) + 0.02 * self.wind;
         self.spec = Spec::new(self.wind, self.dir, self.sdir, swell_hs);
         self.t = time.rem_euclid(PERIOD);
+        self.dt = dt.max(0.0);
         self.cam = cam;
         self.east = east;
         self.north = north;
@@ -416,12 +426,13 @@ impl Ocean {
             sea: [self.wind as f32, s.wp as f32, s.alpha as f32, s.gamma as f32],
             swell: [s.swp as f32, s.salpha as f32, s.sgamma as f32, s.sbeta as f32],
             dir: [s.dir.x as f32, s.dir.y as f32, s.sdir.x as f32, s.sdir.y as f32],
-            t: [self.t as f32, (2.0 * PI / PERIOD) as f32, s.tail as f32, 0.0],
+            t: [self.t as f32, (2.0 * PI / PERIOD) as f32, s.tail as f32, self.dt as f32],
         }
     }
 
     /// Globals `ocean` (common.wgsl): offset and wind direction; wind,
-    /// significant wave height, whitecap cover; mean square slope per cascade
+    /// significant wave height, whitecap cover (what ocean.wgsl `foam_ctl`
+    /// aims the foam at); mean square slope per cascade
     /// and of the ripples below them.
     pub fn globals(&self) -> [[f32; 4]; 3] {
         let u = self.wind;
@@ -462,11 +473,21 @@ pub struct OceanGpu {
     p_rows: wgpu::ComputePipeline,
     p_cols: wgpu::ComputePipeline,
     p_mip: wgpu::ComputePipeline,
+    p_foam: wgpu::ComputePipeline,
+    p_ctl: wgpu::ComputePipeline,
     bg: wgpu::BindGroup,
     bg_mips: Vec<wgpu::BindGroup>,
-    /// the six-layer texture the shaders sample (common.wgsl `t_ocean`)
+    /// foam update, one per direction of the ping-pong between the two state buffers
+    bg_foam: [wgpu::BindGroup; 2],
+    bg_ctl: wgpu::BindGroup,
+    flip: std::cell::Cell<usize>,
+    /// the seven-layer texture the shaders sample (common.wgsl `t_ocean`):
+    /// six of waves, then the foam
     pub view: wgpu::TextureView,
 }
+
+/// Texture layers: six of waves, one of foam.
+const LAYERS: u32 = 7;
 
 pub const MIPS: u32 = 9;
 
@@ -475,6 +496,7 @@ impl OceanGpu {
         let m = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("ocean"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ocean.wgsl").into()) });
         let pipe = |e: &str| d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: None, module: &m, entry_point: Some(e), compilation_options: Default::default(), cache: None });
         let (p_rows, p_cols, p_mip) = (pipe("rows"), pipe("cols"), pipe("mip"));
+        let (p_foam, p_ctl) = (pipe("foam"), pipe("foam_ctl"));
         let ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("ocean u"), size: std::mem::size_of::<OceanU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let nz = noise();
         let noise_buf = d.create_buffer(&wgpu::BufferDescriptor { label: Some("ocean noise"), size: (nz.len() * 8) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -482,7 +504,7 @@ impl OceanGpu {
         let spec = d.create_buffer(&wgpu::BufferDescriptor { label: Some("ocean spectrum"), size: (3 * 4 * N * N * 8) as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let tex = d.create_texture(&wgpu::TextureDescriptor {
             label: Some("ocean"),
-            size: wgpu::Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: 6 },
+            size: wgpu::Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: LAYERS },
             mip_level_count: MIPS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -499,12 +521,25 @@ impl OceanGpu {
         let top = level(0);
         let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("ocean"), layout: &p_rows.get_bind_group_layout(0), entries: &[buf(0, &ub), buf(1, &noise_buf), buf(2, &spec)] });
         let bg_cols = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("ocean cols"), layout: &p_cols.get_bind_group_layout(0), entries: &[buf(0, &ub), buf(2, &spec), tv(3, &top)] });
+        // Foam: this frame's waves (layers 0-5 of level 0) in, layer 6 out.
+        let layers = |m: u32, base: u32, n: u32| tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), base_mip_level: m, mip_level_count: Some(1), base_array_layer: base, array_layer_count: Some(n), ..Default::default() });
+        let (waves, foam_out) = (layers(0, 0, 6), layers(0, 6, 1));
+        let state = |l: &str| d.create_buffer(&wgpu::BufferDescriptor { label: Some(l), size: (N * N * 8) as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let (fa, fb) = (state("foam a"), state("foam b"));
+        // ocean.wgsl `Ctl`: histogram, sum, threshold, log share.
+        let ctl = d.create_buffer(&wgpu::BufferDescriptor { label: Some("foam ctl"), size: 528, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        q.write_buffer(&ctl, 516, bytemuck::cast_slice(&[0.3f32, (0.003f32).ln()]));
+        let foam_bg = |src: &wgpu::Buffer, dst: &wgpu::Buffer| {
+            d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("ocean foam"), layout: &p_foam.get_bind_group_layout(0), entries: &[buf(0, &ub), tv(4, &foam_out), tv(5, &waves), buf(7, src), buf(8, dst), buf(9, &ctl)] })
+        };
+        let bg_foam = [foam_bg(&fa, &fb), foam_bg(&fb, &fa)];
+        let bg_ctl = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("foam ctl"), layout: &p_ctl.get_bind_group_layout(0), entries: &[buf(0, &ub), buf(9, &ctl)] });
         let mut bg_mips = vec![bg_cols];
         for m in 1..MIPS {
             let (src, dst) = (level(m - 1), level(m));
             bg_mips.push(d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("ocean mip"), layout: &p_mip.get_bind_group_layout(0), entries: &[tv(5, &src), tv(6, &dst)] }));
         }
-        Self { ub, p_rows, p_cols, p_mip, bg, bg_mips, view }
+        Self { ub, p_rows, p_cols, p_mip, p_foam, p_ctl, bg, bg_mips, bg_foam, bg_ctl, flip: std::cell::Cell::new(0), view }
     }
 
     /// Rebuild the waves for this frame.
@@ -517,11 +552,20 @@ impl OceanGpu {
         cp.set_pipeline(&self.p_cols);
         cp.set_bind_group(0, &self.bg_mips[0], &[]);
         cp.dispatch_workgroups(N as u32, 3, 1);
+        // Whitecaps from this frame's folds, then the threshold for the next.
+        let f = self.flip.get();
+        self.flip.set(f ^ 1);
+        cp.set_pipeline(&self.p_foam);
+        cp.set_bind_group(0, &self.bg_foam[f], &[]);
+        cp.dispatch_workgroups(N as u32 / 16, N as u32 / 16, 1);
+        cp.set_pipeline(&self.p_ctl);
+        cp.set_bind_group(0, &self.bg_ctl, &[]);
+        cp.dispatch_workgroups(1, 1, 1);
         cp.set_pipeline(&self.p_mip);
         for m in 1..MIPS {
             let s = ((N as u32) >> m).max(1);
             cp.set_bind_group(0, &self.bg_mips[m as usize], &[]);
-            cp.dispatch_workgroups(s.div_ceil(8), s.div_ceil(8), 6);
+            cp.dispatch_workgroups(s.div_ceil(8), s.div_ceil(8), LAYERS);
         }
     }
 }

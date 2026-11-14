@@ -6,7 +6,9 @@
 // `cols` transforms the columns and writes the result into one 6-layer
 // texture: layer c = (Dx, Dy, height, Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy)
 // for cascade c, the D terms sideways displacement (already scaled by the
-// choppiness) and its derivatives. `mip` builds the mip chain.
+// choppiness) and its derivatives. `foam` keeps the whitecaps (layer 6, see
+// there) and `foam_ctl` steers how much of the sea they cover. `mip` builds
+// the mip chain.
 const N = 256u;
 const GRAV = 9.81;
 const PI = 3.14159265;
@@ -21,7 +23,8 @@ struct OU {
   // xy direction the wind blows toward, zw the swell's (east, north)
   dir: vec4f,
   // x = time (s, wrapped at the repeat period), y = frequency quantum (2 pi /
-  // period), z = how much of the short-wave tail the wind raises (1 = all of it)
+  // period), z = how much of the short-wave tail the wind raises (1 = all of
+  // it), w = seconds since the last frame (0 while paused)
   t: vec4f,
 };
 @group(0) @binding(0) var<uniform> U: OU;
@@ -30,7 +33,8 @@ struct OU {
 // Rows transformed: [cascade][field][y][x].
 @group(0) @binding(2) var<storage, read_write> spec: array<vec2f>;
 @group(0) @binding(3) var out_t: texture_storage_2d_array<rgba16float, write>;
-// Mip chain: the level above, and the one being written.
+// Mip chain: the level above, and the one being written. (`foam` reads this
+// frame's waves, level 0, through mip_src too.)
 @group(0) @binding(5) var mip_src: texture_2d_array<f32>;
 @group(0) @binding(6) var mip_dst: texture_storage_2d_array<rgba16float, write>;
 
@@ -108,6 +112,133 @@ fn spectrum(c: u32, x: u32, y: u32) -> Z4 {
   o.c = ih * kv.x + ci(ih * kv.y);
   o.d = dxx + ci(dyy);
   return o;
+}
+
+// ------------------------------------------------------------------ foam
+// Whitecaps live on cascade 0's grid (250 m, about 1 m a texel), in the
+// surface's own (undisplaced) coordinates, so a patch rides the waves'
+// orbits as the water does. Each frame:
+//  - the crests that fold - where the Jacobian of the sideways shift of the
+//    two long cascades drops below a threshold - put foam down, building up
+//    over a few frames. The crest runs on downwind while the foam stays, so a
+//    breaker leaves a patch drawn out along its path;
+//  - fresh foam (the breaking itself) fades within a second, spent foam over
+//    several, drifting downwind with the wind's surface drift;
+//  - the threshold is the quantile of this frame's Jacobians that folds the
+//    share q of the sea; `foam_ctl` turns q until the foam's mean cover meets
+//    Monahan & O'Muircheartaigh's W = 3.84e-6 U^3.41.
+// Layer 6 then holds (foam cover 0..1, fresh foam 0..1, threshold, 0).
+const FN = 256u;
+const FOAM_BINS = 128u;
+const J_LO = -1.5;
+const J_HI = 1.5;
+struct Ctl {
+  hist: array<atomic<u32>, 128>,
+  // sum of the foam cover over the grid, x 255
+  sum: atomic<u32>,
+  // the fold threshold on the Jacobian, and log of the share it folds
+  bias: f32,
+  logq: f32,
+  pad: f32,
+};
+// Foam state (cover, fresh): last frame's and this frame's.
+@group(0) @binding(7) var<storage, read> foam_src: array<vec2f>;
+@group(0) @binding(8) var<storage, read_write> foam_dst: array<vec2f>;
+@group(0) @binding(9) var<storage, read_write> ctl: Ctl;
+@group(0) @binding(4) var foam_t: texture_storage_2d_array<rgba16float, write>;
+
+var<workgroup> wh: array<atomic<u32>, 128>;
+var<workgroup> wsum: atomic<u32>;
+
+fn foam_at(p: vec2i) -> vec2f {
+  let q = (p + vec2i(i32(FN))) % vec2i(i32(FN));
+  return foam_src[u32(q.y) * FN + u32(q.x)];
+}
+// Last frame's foam at texel coordinates p (bilinear, wrapping).
+fn foam_bilin(p: vec2f) -> vec2f {
+  let f = floor(p);
+  let t = p - f;
+  let i = vec2i(f);
+  return mix(mix(foam_at(i), foam_at(i + vec2i(1, 0)), t.x), mix(foam_at(i + vec2i(0, 1)), foam_at(i + vec2i(1, 1)), t.x), t.y);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn foam(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) li: u32) {
+  if (li < FOAM_BINS) { atomicStore(&wh[li], 0u); }
+  if (li == 0u) { atomicStore(&wsum, 0u); }
+  workgroupBarrier();
+  let x = id.x;
+  let y = id.y;
+  let dt = clamp(U.t.w, 0.0, 0.1);
+  let bias = ctl.bias;
+  // Cascade 0 here; cascade 1 (exactly six of its tiles across one of
+  // cascade 0's) over all 6 x 6 of its texels that this one covers, so the
+  // foam put down is the share of the cell that folds.
+  let a0 = textureLoad(mip_src, vec2u(x, y), 0, 0);
+  let b0 = textureLoad(mip_src, vec2u(x, y), 3, 0);
+  var inj = 0.0;
+  for (var k = 0u; k < 36u; k++) {
+    let p1 = vec2u(x * 6u + k % 6u, y * 6u + k / 6u) % vec2u(FN);
+    let a1 = textureLoad(mip_src, p1, 1, 0);
+    let b1 = textureLoad(mip_src, p1, 4, 0);
+    let dxx = b0.z + b1.z;
+    let dyy = b0.w + b1.w;
+    let dxy = a0.w + a1.w;
+    let J = (1.0 + dxx) * (1.0 + dyy) - dxy * dxy;
+    inj += smoothstep(bias + 0.06, bias - 0.06, J) / 36.0;
+    let bin = u32(clamp((J - J_LO) / (J_HI - J_LO) * f32(FOAM_BINS), 0.0, f32(FOAM_BINS) - 1.0));
+    atomicAdd(&wh[bin], 1u);
+  }
+  // The foam drifts downwind with the surface (about 3 % of the wind).
+  let L0 = U.casc[0].x;
+  let drift = U.dir.xy * (0.03 * U.sea.x) * dt * f32(FN) / L0;
+  var f = foam_bilin(vec2f(f32(x), f32(y)) - drift);
+  // Spent foam lasts longer in a stronger wind (bigger breakers, more air).
+  let tau = mix(3.5, 7.0, smoothstep(6.0, 18.0, U.sea.x));
+  let cover = f.x * exp(-dt / tau) + (1.0 - f.x) * (1.0 - exp(-dt * 8.0 * inj));
+  let fresh = max(f.y * exp(-dt / 0.6), inj);
+  f = clamp(vec2f(cover, fresh), vec2f(0.0), vec2f(1.0));
+  foam_dst[y * FN + x] = f;
+  textureStore(foam_t, vec2u(x, y), 0, vec4f(f, bias, 0.0));
+  atomicAdd(&wsum, u32(f.x * 255.0 + 0.5));
+  workgroupBarrier();
+  if (li < FOAM_BINS) {
+    let h = atomicLoad(&wh[li]);
+    if (h > 0u) { atomicAdd(&ctl.hist[li], h); }
+  }
+  if (li == 0u) { atomicAdd(&ctl.sum, atomicLoad(&wsum)); }
+}
+
+@compute @workgroup_size(1)
+fn foam_ctl() {
+  let n = f32(FN * FN);
+  let cover = f32(atomicLoad(&ctl.sum)) / 255.0 / n;
+  let u = max(U.sea.x, 0.0);
+  let W = min(3.84e-6 * pow(u, 3.41), 0.3);
+  let dt = clamp(U.t.w, 0.0, 0.1);
+  var logq = ctl.logq;
+  if (dt > 0.0) {
+    let err = clamp(log((W + 1e-4) / (cover + 1e-4)), -2.0, 2.0);
+    logq = clamp(logq + err * dt * 0.15, log(1e-5), log(0.3));
+  }
+  ctl.logq = logq;
+  // Threshold for next frame: the Jacobian below which the share q lies.
+  let want = exp(logq) * n * 36.0;
+  var acc = 0.0;
+  var bias = J_LO;
+  let bw = (J_HI - J_LO) / f32(FOAM_BINS);
+  for (var i = 0u; i < FOAM_BINS; i++) {
+    let h = f32(atomicLoad(&ctl.hist[i]));
+    if (acc + h >= want) {
+      bias = J_LO + (f32(i) + (want - acc) / max(h, 1.0)) * bw;
+      break;
+    }
+    acc += h;
+  }
+  // Only a surface that is really squeezed breaks.
+  ctl.bias = min(bias, 0.7);
+  for (var i = 0u; i < FOAM_BINS; i++) { atomicStore(&ctl.hist[i], 0u); }
+  atomicStore(&ctl.sum, 0u);
 }
 
 fn bitrev(x: u32) -> u32 { return reverseBits(x) >> 24u; }
