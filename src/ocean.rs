@@ -219,10 +219,15 @@ pub struct Ocean {
     east: DVec3,
     north: DVec3,
     off: DVec2,
-    /// significant wave height of the open ocean (m), and the mean square
-    /// slope in each cascade, with what is too short for any of them
+    /// significant wave height of the open ocean (m)
     pub hs: f64,
-    mss: [f64; 4],
+    /// Slope covariance (east-east, north-north, east-north) of the waves
+    /// each cascade's mip level no longer holds (`lost_slopes`), and of the
+    /// ripples too short for any cascade
+    lost: [[[f32; 4]; MIPS as usize]; 3],
+    ripple: [f32; 4],
+    /// the wind, directions and swell `lost` was worked out for
+    lost_for: [f64; 6],
 }
 
 impl Default for Ocean {
@@ -251,7 +256,9 @@ impl Ocean {
             north: DVec3::Y,
             off: DVec2::ZERO,
             hs: 0.0,
-            mss: [0.0; 4],
+            lost: [[[0.0; 4]; MIPS as usize]; 3],
+            ripple: [0.0; 4],
+            lost_for: [f64::NAN; 6],
         }
     }
 
@@ -287,36 +294,128 @@ impl Ocean {
         self.north = north;
         self.off = off;
         self.stats();
+        // The spectrum drifts slowly (the sea answers the wind over tens of
+        // seconds): redo the roughness only once it has moved.
+        let key = [self.wind, self.dir.x, self.dir.y, self.sdir.x, self.sdir.y, swell_hs];
+        let moved = key.iter().zip(&self.lost_for).enumerate().any(|(i, (a, b))| {
+            let tol = if i == 0 || i == 5 { 0.03 * a.abs().max(1.0) } else { 0.01 };
+            !((a - b).abs() <= tol)
+        });
+        if moved {
+            self.lost_for = key;
+            self.lost_slopes();
+        }
         self.cpu_field();
     }
 
-    /// Wave height and slope statistics, integrated over each cascade's band.
+    /// Significant wave height, integrated over the cascades' bands.
     fn stats(&mut self) {
         let mut m0 = 0.0;
-        for c in 0..4 {
-            let (lo, hi) = if c < 3 {
-                let (a, b) = band(c);
-                (a.max(2.0 * PI / SIZES[c]), b.min(127.0 * 2.0 * PI / SIZES[c]))
-            } else {
-                // Ripples too short for the finest cascade (capillary waves).
-                (127.0 * 2.0 * PI / SIZES[2], 1200.0)
-            };
+        for c in 0..3 {
+            let (a, b) = band(c);
+            let (lo, hi) = (a.max(2.0 * PI / SIZES[c]), b.min(127.0 * 2.0 * PI / SIZES[c]));
             let steps = 96;
             let (la, lb) = (lo.ln(), hi.ln());
-            let (mut s0, mut s2) = (0.0, 0.0);
             for i in 0..steps {
                 let k = (la + (lb - la) * (i as f64 + 0.5) / steps as f64).exp();
-                let dk = k * (lb - la) / steps as f64;
-                let e = self.spec.omni(k) * dk;
-                s0 += e;
-                s2 += e * k * k;
+                m0 += self.spec.omni(k) * k * (lb - la) / steps as f64;
             }
-            if c < 3 {
-                m0 += s0;
-            }
-            self.mss[c] = s2;
         }
         self.hs = 4.0 * m0.sqrt();
+    }
+
+    /// Roughness from the spectrum (Bruneton, Neyret & Holzschuch 2010, "Real-
+    /// time Realistic Ocean Lighting using Seamless Transitions from Geometry to
+    /// BRDF"): the slope variance of the waves a pixel can no longer resolve
+    /// becomes the width of the BRDF, so near water (sharp waves, a fine
+    /// glitter) and far water (a smooth sheet, a broad sun path) light alike.
+    ///
+    /// The shader reads each cascade's slopes at the mip that matches the
+    /// pixel footprint. Mip m is the mean of 2^m x 2^m texels, read back
+    /// bilinearly; a wave of phase step u (rad per texel, along each axis)
+    /// keeps the share of its slope variance
+    ///   D_m(u)^2 (2 + cos(2^m u)) / 3,  D_m(u) = sin(2^m u / 2) / (2^m sin(u / 2))
+    /// (box average, then the mean square of a linear blend between two of
+    /// its samples). What each level loses, summed over the cascade's modes as
+    /// the FFT holds them, is its slope covariance, per cascade and level.
+    /// The last level (one texel) keeps nothing, and the shader stops reading
+    /// a cascade there. Ripples shorter than the finest cascade's grid are
+    /// always lost.
+    fn lost_slopes(&mut self) {
+        const ML: usize = MIPS as usize;
+        let keep = |u: f64, m: usize| {
+            let s = (1u32 << m) as f64;
+            let h = (0.5 * u).sin();
+            let d = if m == 0 || h.abs() < 1e-9 { 1.0 } else { (0.5 * s * u).sin() / (s * h) };
+            d * d * (2.0 + (s * u).cos()) / 3.0
+        };
+        let h = N as i64 / 2;
+        // keep(u) for every grid step along an axis (the same in every cascade)
+        let kt: Vec<[f64; ML]> = (1 - h..h).map(|n| std::array::from_fn(|m| keep(2.0 * PI * n as f64 / N as f64, m))).collect();
+        for c in 0..3 {
+            let dk = 2.0 * PI / SIZES[c];
+            let (klo, khi) = band(c);
+            let mut tot = [0.0f64; 3];
+            let mut kept = [[0.0f64; 3]; ML];
+            for ny in 1 - h..h {
+                for nx in 1 - h..h {
+                    // Every mode near the centre of the spectrum; further out,
+                    // where it is smooth, every 2nd, 4th, 8th one standing in
+                    // for its neighbours (the mips that would tell them apart
+                    // hold almost none of them anyway).
+                    let r = nx.abs().max(ny.abs());
+                    let st = if r <= 16 { 1 } else if r <= 32 { 2 } else if r <= 64 { 4 } else { 8 };
+                    if nx % st != 0 || ny % st != 0 {
+                        continue;
+                    }
+                    let kv = DVec2::new(nx as f64, ny as f64) * dk;
+                    let k = kv.length();
+                    if k <= 0.0 || k < klo || k >= khi {
+                        continue;
+                    }
+                    // A mode's height variance is energy x dk^2 (h0(k) and
+                    // h0(-k) together, see ocean.wgsl `spectrum`).
+                    let e = self.spec.energy(kv, k) * dk * dk * (st * st) as f64;
+                    let v = [kv.x * kv.x * e, kv.y * kv.y * e, kv.x * kv.y * e];
+                    let (kx, ky) = (&kt[(nx + h - 1) as usize], &kt[(ny + h - 1) as usize]);
+                    for i in 0..3 {
+                        tot[i] += v[i];
+                    }
+                    for (m, kp) in kept.iter_mut().enumerate().take(ML - 1) {
+                        let f = kx[m] * ky[m];
+                        for i in 0..3 {
+                            kp[i] += v[i] * f;
+                        }
+                    }
+                }
+            }
+            for m in 0..ML {
+                let l = if m == ML - 1 { [0.0; 3] } else { kept[m] };
+                self.lost[c][m] = [(tot[0] - l[0]).max(0.0) as f32, (tot[1] - l[1]).max(0.0) as f32, (tot[2] - l[2]) as f32, 0.0];
+            }
+        }
+        // Ripples: everything outside the finest grid, up to capillary waves of
+        // a few millimetres.
+        let edge = (h as f64 - 0.5) * 2.0 * PI / SIZES[2];
+        let (la, lb) = (edge.ln(), 1200f64.ln());
+        let (nk, nt) = (48, 48);
+        let mut rp = [0.0f64; 3];
+        for i in 0..nk {
+            let k = (la + (lb - la) * (i as f64 + 0.5) / nk as f64).exp();
+            let dk = k * (lb - la) / nk as f64;
+            for j in 0..nt {
+                let th = 2.0 * PI * (j as f64 + 0.5) / nt as f64;
+                let kv = DVec2::new(th.cos(), th.sin()) * k;
+                if kv.x.abs().max(kv.y.abs()) <= edge {
+                    continue;
+                }
+                let e = self.spec.energy(kv, k) * k * dk * 2.0 * PI / nt as f64;
+                rp[0] += kv.x * kv.x * e;
+                rp[1] += kv.y * kv.y * e;
+                rp[2] += kv.x * kv.y * e;
+            }
+        }
+        self.ripple = [rp[0] as f32, rp[1] as f32, rp[2] as f32, 0.0];
     }
 
     /// Cascade 0 on the CPU grid, from the same spectrum and noise as the GPU.
@@ -432,17 +531,22 @@ impl Ocean {
 
     /// Globals `ocean` (common.wgsl): offset and wind direction; wind,
     /// significant wave height, whitecap cover (what ocean.wgsl `foam_ctl`
-    /// aims the foam at); mean square slope per cascade
-    /// and of the ripples below them.
-    pub fn globals(&self) -> [[f32; 4]; 3] {
+    /// aims the foam at); the ripples' slope covariance; then, per cascade
+    /// and mip level, the slope covariance that level loses (`lost_slopes`).
+    pub fn globals(&self) -> [[f32; 4]; OCEAN_G] {
         let u = self.wind;
         // Whitecap cover (Monahan & O'Muircheartaigh 1980).
         let wc = (3.84e-6 * u.max(0.0).powf(3.41)).min(0.3);
-        [
-            [self.off.x as f32, self.off.y as f32, self.dir.x as f32, self.dir.y as f32],
-            [u as f32, self.hs as f32, wc as f32, 1.0],
-            [self.mss[0] as f32, self.mss[1] as f32, self.mss[2] as f32, self.mss[3] as f32],
-        ]
+        let mut g = [[0f32; 4]; OCEAN_G];
+        g[0] = [self.off.x as f32, self.off.y as f32, self.dir.x as f32, self.dir.y as f32];
+        g[1] = [u as f32, self.hs as f32, wc as f32, 1.0];
+        g[2] = self.ripple;
+        for c in 0..3 {
+            for m in 0..MIPS as usize {
+                g[3 + c * MIPS as usize + m] = self.lost[c][m];
+            }
+        }
+        g
     }
 }
 
@@ -490,6 +594,9 @@ pub struct OceanGpu {
 const LAYERS: u32 = 7;
 
 pub const MIPS: u32 = 9;
+/// Rows of the globals' `ocean` (common.wgsl): three, then the lost slope
+/// covariance of each cascade at each mip level.
+pub const OCEAN_G: usize = 3 + 3 * MIPS as usize;
 
 impl OceanGpu {
     pub fn new(d: &wgpu::Device, q: &wgpu::Queue) -> Self {
@@ -593,13 +700,49 @@ mod tests {
             }
             let var = o.field.iter().map(|f| (f[2] as f64).powi(2)).sum::<f64>() / o.field.len() as f64;
             let hmax = o.field.iter().map(|f| f[2].abs()).fold(0.0, f32::max);
-            eprintln!("wind {wind}: Hs {:.2} m, long-wave rms {:.2} m (band {:.2}), max {hmax:.2}, mss {:?}", o.hs, var.sqrt(), m0.sqrt(), o.mss);
+            eprintln!("wind {wind}: Hs {:.2} m, long-wave rms {:.2} m (band {:.2}), max {hmax:.2}", o.hs, var.sqrt(), m0.sqrt());
             assert!(o.hs > last);
             assert!(var > m0 * 0.3 && var < m0 * 3.0);
             last = o.hs;
             // Floating: the height found through the displacement stays near the field's.
             let h = o.height(DVec3::new(10.0, 20.0, 0.0));
             assert!(h.abs() < 4.0 * m0.sqrt() + 0.5);
+        }
+    }
+
+    /// The roughness the mips hand to the BRDF grows level by level up to
+    /// the cascade's whole slope variance, matches the spectrum's, and the
+    /// total stays near Cox & Munk's measured mean square slope.
+    #[test]
+    fn lost_slopes() {
+        for wind in [2.0, 7.0, 14.0] {
+            let mut o = Ocean::new();
+            o.update(0.0, 10.0, wind, 270.0, 0.6, DVec3::ZERO, DVec3::X, DVec3::Y, DVec2::ZERO);
+            let t0 = std::time::Instant::now();
+            o.lost_slopes();
+            let dt = t0.elapsed();
+            let mut total = (o.ripple[0] + o.ripple[1]) as f64;
+            for c in 0..3 {
+                let l = &o.lost[c];
+                for m in 1..MIPS as usize {
+                    assert!(l[m][0] + l[m][1] >= (l[m - 1][0] + l[m - 1][1]) * 0.999, "cascade {c} level {m}: {:?}", l);
+                }
+                // Against the omnidirectional spectrum over the cascade's band.
+                let (a, b) = band(c);
+                let (lo, hi) = (a.max(2.0 * PI / SIZES[c]), b.min(127.5 * 2.0 * PI / SIZES[c]));
+                let mut mss = 0.0;
+                for i in 0..2000 {
+                    let k = lo + (hi - lo) * (i as f64 + 0.5) / 2000.0;
+                    mss += o.spec.omni(k) * k * k * (hi - lo) / 2000.0;
+                }
+                let all = (l[8][0] + l[8][1]) as f64;
+                eprintln!("wind {wind} cascade {c}: lost {:?} / all {all:.5} (spectrum {mss:.5})", l.iter().map(|v| format!("{:.5}", v[0] + v[1])).collect::<Vec<_>>());
+                assert!(all > mss * 0.6 && all < mss * 1.6);
+                total += all;
+            }
+            let cox = 0.003 + 0.00512 * wind;
+            eprintln!("wind {wind}: ripples {:?}, total mss {total:.4} (Cox-Munk {cox:.4}), {dt:?}", o.ripple);
+            assert!(total > cox * 0.3 && total < cox * 3.0);
         }
     }
 }

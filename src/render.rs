@@ -124,9 +124,9 @@ pub struct Globals {
     /// mid-level cloud: amount 0..1, height (m)
     pub alto: [f32; 4],
     /// the ocean (ocean.rs `Ocean::globals`): offset of its coordinates and
-    /// the wind direction; wind, wave height, whitecap cover; mean square
-    /// slope per cascade and of the ripples below them
-    pub ocean: [[f32; 4]; 3],
+    /// the wind direction; wind, wave height, whitecap cover; the ripples'
+    /// slope covariance; the slope covariance each cascade's mips lose
+    pub ocean: [[f32; 4]; crate::ocean::OCEAN_G],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl

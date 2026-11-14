@@ -50,8 +50,10 @@ struct Globals {
   alto: vec4f,       // mid-level cloud: amount 0..1, height (m)
   // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
   // toward (east, north); wind (m/s), significant wave height (m), whitecap
-  // cover, 1; mean square slope in each cascade and of the ripples below them.
-  ocean: array<vec4f, 3>,
+  // cover, 1; slope covariance (east-east, north-north, east-north) of the
+  // ripples shorter than any cascade; then at 3 + 9 c + m the slope covariance
+  // cascade c's mip level m no longer holds (see `ocean_lost`).
+  ocean: array<vec4f, 30>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -517,6 +519,14 @@ fn wave_coord(p: vec3f) -> vec2f {
 // multiple of every cascade's size (ocean.rs WRAP).
 fn ocean_coord(p: vec3f) -> vec2f {
   return vec2f(dot(p, G.east.xyz), dot(p, G.north.xyz)) + G.ocean[0].xy;
+}
+// Slope covariance (east-east, north-north, east-north) of the waves that
+// cascade c loses when read at mip level lv (ocean.rs `lost_slopes`).
+fn ocean_lost(c: i32, lv: f32) -> vec3f {
+  let l = clamp(lv, 0.0, 8.0);
+  let i = i32(floor(l));
+  let j = min(i + 1, 8);
+  return mix(G.ocean[3 + c * 9 + i].xyz, G.ocean[3 + c * 9 + j].xyz, l - f32(i));
 }
 fn ocean_size(c: i32) -> f32 { return select(select(6.0, 250.0 / 6.0, c == 1), 250.0, c == 0); }
 // Sea state: how much of each wave cascade (about 250 m, 40 m and 6 m across)

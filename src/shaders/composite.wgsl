@@ -51,6 +51,45 @@ fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
   return vec4f(0.0);
 }
 
+// The sun's disc in slope space: a mirror tilted by s turns the reflection by
+// 2 s, so the disc (radius about 0.0063, sky.wgsl) spans slopes of half
+// that; a uniform disc of radius r has variance r^2 / 4 per axis.
+const SUN_SLOPE2 = 2.5e-6;
+
+// Smith shadowing for a Gaussian slope distribution of variance s2 along the
+// direction's azimuth (Walter et al. 2007's rational fit), z = cosine to the normal.
+fn smith_lambda(z: f32, s2: f32) -> f32 {
+  let zc = clamp(z, 1e-3, 0.9999);
+  let a = zc / sqrt((1.0 - zc * zc) * 2.0 * max(s2, 1e-7));
+  if (a >= 1.6) { return 0.0; }
+  return (1.0 - 1.259 * a + 0.396 * a * a) / (3.535 * a + 2.181 * a * a);
+}
+// Slope variance of covariance cv along direction d's azimuth in the frame Tx, Ty.
+fn az_var(d: vec3f, Tx: vec3f, Ty: vec3f, cv: vec3f) -> f32 {
+  let x = dot(d, Tx);
+  let y = dot(d, Ty);
+  return (cv.x * x * x + 2.0 * cv.z * x * y + cv.y * y * y) / max(x * x + y * y, 1e-8);
+}
+// Light from direction Ls reflected toward the eye (view ray V) by facets
+// whose slopes, relative to the resolved normal N (frame Tx, Ty), spread with
+// covariance cv (Bruneton et al. 2010): Fresnel x slope density / (4 cos_v
+// cos^4 of the half vector), with Smith shadowing. Times irradiance.
+fn sea_glint(Ls: vec3f, V: vec3f, N: vec3f, Tx: vec3f, Ty: vec3f, cv: vec3f) -> f32 {
+  let H = normalize(Ls - V);
+  let zh = dot(H, N);
+  if (zh <= 0.01) { return 0.0; }
+  let zx = dot(H, Tx) / zh;
+  let zy = dot(H, Ty) / zh;
+  let det = max(cv.x * cv.y - cv.z * cv.z, 1e-12);
+  let q = (cv.y * zx * zx - 2.0 * cv.z * zx * zy + cv.x * zy * zy) / det;
+  let p = exp(-0.5 * q) / (2.0 * PI * sqrt(det));
+  let zl = max(dot(Ls, N), 0.01);
+  let zv = max(dot(-V, N), 0.01);
+  let fr = 0.02 + 0.98 * pow(1.0 - max(dot(-V, H), 0.0), 5.0);
+  let g = 1.0 + smith_lambda(zl, az_var(Ls, Tx, Ty, cv)) + smith_lambda(zv, az_var(-V, Tx, Ty, cv));
+  return fr * p / (4.0 * zv * zh * zh * zh * zh * g);
+}
+
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
   // Edge pixels average in the normals other geometry writes here: keep the
   // water parameters in range or the absorption maths goes negative.
@@ -107,12 +146,13 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   var sl = vec2f(0.0);   // dh/dx, dh/dy over the undisplaced surface
   var jd = vec3f(0.0);   // Dxx, Dyy, Dxy
   var jd01 = vec3f(0.0); // the same for the two longer cascades (whitecaps)
-  // Slope variance of everything too small to resolve here: it widens
-  // reflections and the sun's glitter instead. Each cascade's waves are lost
-  // to the mips over a range of levels (its band in octaves).
-  var sig2 = 0.0;
-  let lo_a = vec3f(3.7, 3.7, 0.0);
-  let lo_b = vec3f(7.0, 6.3, 6.4);
+  // Roughness from the spectrum (Bruneton et al. 2010): the slope covariance
+  // (east-east, north-north, east-north) of every wave the mips read here no
+  // longer hold - worked out from the spectrum per cascade and level
+  // (ocean.rs `lost_slopes`) - plus the ripples shorter than any cascade.
+  // It widens the BRDF by just what the resolved normal lost, so near and far
+  // water light alike and a pixel spanning many waves shows their mean glitter.
+  var cv = G.ocean[2].xyz * st.z * st.z;
   for (var c = 0; c < 3; c++) {
     let w = st[c];
     if (w <= 0.0) { continue; }
@@ -124,10 +164,10 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
       jd += vec3f(b.zw, a.w) * w;
       if (c < 2) { jd01 += vec3f(b.zw, a.w) * w; }
     }
-    sig2 += G.ocean[2][c] * w * w * clamp((lod[c] - lo_a[c]) / (lo_b[c] - lo_a[c]), 0.0, 1.0);
+    cv += ocean_lost(c, lod[c]) * (w * w);
   }
-  // Capillary ripples (shorter than any cascade) count once a pixel outgrows them.
-  sig2 += G.ocean[2].w * st.z * st.z * clamp(log2(fp / 0.004) / 3.6, 0.0, 1.0);
+  // The sun's disc, seen in a mirror, spans slopes of about its half radius.
+  cv += vec3f(SUN_SLOPE2, SUN_SLOPE2, 0.0);
   // Surface normal through the sideways shift: slopes over the moved surface.
   let jxx = 1.0 + jd.x;
   let jyy = 1.0 + jd.y;
@@ -136,18 +176,41 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let smag = length(slope);
   if (smag > 1.5) { slope *= 1.5 / smag; }
   let J01 = (1.0 + jd01.x) * (1.0 + jd01.y) - jd01.z * jd01.z;
-  let rough = clamp(pow(sig2 * 0.5, 0.25), 0.03, 0.36);
-  sig2 *= 0.5;
   let N = normalize(upn - e * slope.x - n * slope.y);
+  // Tangent frame on the resolved surface, east and north as near as may be.
+  let Tx = normalize(e - N * dot(e, N));
+  let Ty = cross(N, Tx);
+
+  // Slope variance along the direction we look and across it.
+  let vh = normalize(vec2f(dot(V, e), dot(V, n)) + vec2f(1e-6, 0.0));
+  let vc = vec2f(-vh.y, vh.x);
+  let sv2 = cv.x * vh.x * vh.x + 2.0 * cv.z * vh.x * vh.y + cv.y * vh.y * vh.y;
+  let sc2 = cv.x * vc.x * vc.x + 2.0 * cv.z * vc.x * vc.y + cv.y * vc.y * vc.y;
+  let sv = sqrt(max(sv2, 0.0));
+  let Ta = Tx * vh.x + Ty * vh.y;
+  let Tb = Tx * vc.x + Ty * vc.y;
 
   // Reflection: screen-space first, sky (with cloud glints) as the fallback.
   var R = reflect(V, N);
   let ru = dot(R, upn);
   if (ru < 0.03) { R = normalize(R + upn * (0.03 - ru)); }
   let ndv = max(dot(-V, N), 0.0);
-  let F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0) * (1.0 - rough * 1.6);
-  let sig = sqrt(sig2);
-  var refl = (sky_lut(R) + sky_lut(normalize(R + upn * sig * 1.3)) + sky_lut(normalize(R + upn * sig * 2.8))) / 3.0;
+  // Fresnel averaged over the unresolved facets (Bruneton's fit).
+  let F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0 * exp(-2.69 * sv)) / (1.0 + 22.7 * pow(sv, 1.5));
+  // The sky averaged over the facets' slope distribution: the Gaussian's
+  // mean and second moment matched by five reflections (centre 1/3; +-sqrt(3)
+  // sigma along and across the view 1/6 each). Along the view the lobe
+  // reaches up the sky (a grazing reflection's streak) and down to the
+  // horizon, which is where the lifted rays then look.
+  let dv = sqrt(3.0 * max(sv2, 0.0));
+  let dc = sqrt(3.0 * max(sc2, 0.0));
+  var refl = sky_lut(R) / 3.0;
+  for (var k = 0; k < 4; k++) {
+    let o = select(Tb * select(dc, -dc, k == 3), Ta * select(dv, -dv, k == 1), k < 2);
+    var Rk = reflect(V, normalize(N - o));
+    Rk = normalize(Rk + upn * max(0.03 - dot(Rk, upn), 0.0));
+    refl += sky_lut(Rk) / 6.0;
+  }
   let mid = G.cloud.y + 400.0;
   if (l.h < mid) {
     // The cloud layer is far away along a grazing reflection: a wave tilt of
@@ -157,29 +220,31 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     // reflect as smooth, wave-wobbled shapes, as they do on real water.
     let hc = max(mid - l.h, 100.0);
     let kc = clamp(1500.0 * cosv * cosv / hc, 0.0, 1.0);
-    let Rc0 = reflect(V, normalize(upn + (N - upn) * kc));
-    // Unresolved ripples smear the reflection upward, into a vertical streak
-    // (as the sky term above): sample the deck across that lobe and average.
-    // The haze between the water and a reflected cloud fades it toward the
-    // sky colour behind it, as it does for the clouds seen directly.
+    let Nc = normalize(upn + (N - upn) * kc);
+    // The unresolved facets smear the reflection along the view, into a
+    // vertical streak (as the sky above): three reflections across that lobe
+    // (centre 2/3, +-sqrt(3) sigma 1/6 each). The haze between the water and
+    // a reflected cloud fades it toward the sky colour behind it, as it does
+    // for the clouds seen directly.
     let ext = atm_ext(atm_density(0.5 * (l.h + mid)));
     let kext = dot(ext, vec3f(0.2126, 0.7152, 0.0722));
     var cov_c = 0.0;
     var tc0 = 0.0;
+    var Rc0 = reflect(V, Nc);
     for (var k = 0; k < 3; k++) {
-      let off = select(select(0.0, 1.3, k == 1), 2.8, k == 2);
-      var Rc = normalize(Rc0 + upn * sig * off);
+      let off = select(select(0.0, dv, k == 1), -dv, k == 2);
+      var Rc = reflect(V, normalize(Nc - Ta * off));
       Rc = normalize(Rc + upn * max(0.03 - dot(Rc, upn), 0.0));
       let tc = hc / max(dot(Rc, upn), 0.03);
-      if (k == 0) { tc0 = tc; }
+      if (k == 0) { tc0 = tc; Rc0 = Rc; }
       if (tc < 90000.0) {
         let cd = cloud_density(P - G.planet.xyz + Rc * tc, mid, true);
-        cov_c += (1.0 - exp(-cd * 7.0)) * (1.0 - smoothstep(40000.0, 90000.0, tc)) * exp(-tc * kext);
+        cov_c += select(1.0 / 6.0, 2.0 / 3.0, k == 0) * (1.0 - exp(-cd * 7.0)) * (1.0 - smoothstep(40000.0, 90000.0, tc)) * exp(-tc * kext);
       }
     }
     if (cov_c > 0.0) {
       let lc = light_at(P + Rc0 * min(tc0, 90000.0));
-      refl = mix(refl, (lc.sun * 0.05 + lc.amb * 1.3), cov_c / 3.0);
+      refl = mix(refl, (lc.sun * 0.05 + lc.amb * 1.3), cov_c);
     }
   }
   if (G.misc.z > 0.5) {
@@ -193,21 +258,11 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     refl = mix(refl, hit.rgb, hit.a);
   }
 
-  // Sun glitter.
-  let H = normalize(G.sun_dir.xyz - V);
-  let a2 = pow(rough, 4.0);
-  let ndh = max(dot(N, H), 0.0);
-  let dd = ndh * ndh * (a2 - 1.0) + 1.0;
-  let D = a2 / (PI * dd * dd);
-  var spec = min(D * F / (4.0 * max(ndv, 0.08)), 60.0) * max(dot(N, G.sun_dir.xyz), 0.0) * l.sun * 0.25;
-  // Moon glitter: a path of light across the waves.
+  // Sun and moon glitter: the facets' slope distribution (anisotropic
+  // Gaussian, the same covariance) as the BRDF.
+  var spec = sea_glint(G.sun_dir.xyz, V, N, Tx, Ty, cv) * l.sun;
   if (G.moon.w > 0.0) {
-    let Hm = normalize(G.moon.xyz - V);
-    let am = max(a2, 0.0004);
-    let ndm = max(dot(N, Hm), 0.0);
-    let dm = ndm * ndm * (am - 1.0) + 1.0;
-    let Dm = am / (PI * dm * dm);
-    spec += min(Dm * F / (4.0 * max(ndv, 0.08)), 60.0) * max(dot(N, G.moon.xyz), 0.0) * moon_light(upn, l.h) * 0.25;
+    spec += sea_glint(G.moon.xyz, V, N, Tx, Ty, cv) * moon_light(upn, l.h);
   }
 
   // What kind of water is this? Latitude, wclass and the satellite colour decide.
