@@ -163,7 +163,9 @@ fn baggage_door(L: vec3f) -> f32 {
 // ---------------------------------------------------------------- lettering
 
 // Stroke font: digits, N E S W and a point (glyphs 0-14; 15 is a space).
-var<private> GSEG: array<vec4f, 99> = array<vec4f, 99>(
+// (const, not var<private>: on Metal a private array is a per-pixel copy made
+// at the start of every invocation, which cost the aircraft ~7 ms a frame on an M4.)
+const GSEG = array<vec4f, 99>(
   vec4f(0.25, 0.0, 0.75, 0.0),
   vec4f(0.75, 0.0, 1.0, 0.4),
   vec4f(1.0, 0.4, 1.0, 1.6),
@@ -264,7 +266,7 @@ var<private> GSEG: array<vec4f, 99> = array<vec4f, 99>(
   vec4f(0.75, 0.0, 1.0, 2.0),
   vec4f(0.45, 0.08, 0.55, 0.08)
 );
-var<private> GSTART: array<u32, 17> = array<u32, 17>(0u, 8u, 10u, 16u, 27u, 30u, 38u, 49u, 51u, 65u, 76u, 79u, 83u, 94u, 98u, 99u, 99u);
+const GSTART = array<u32, 17>(0u, 8u, 10u, 16u, 27u, 30u, 38u, 49u, 51u, 65u, 76u, 79u, 83u, 94u, 98u, 99u, 99u);
 
 fn glyph_d(g: u32, p: vec2f) -> f32 {
   var d = 1e3;

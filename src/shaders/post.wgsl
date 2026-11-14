@@ -86,10 +86,25 @@ const TAA_SHARPEN = 0.8;
   let s = textureLoad(t_src, clamp(px + vec2i(0, 1), vec2i(0), dmax), 0).rgb;
   let w = textureLoad(t_src, clamp(px + vec2i(-1, 0), vec2i(0), dmax), 0).rgb;
   let e = textureLoad(t_src, clamp(px + vec2i(1, 0), vec2i(0), dmax), 0).rgb;
-  let lo = min(min(min(n, s), min(w, e)), c.rgb);
-  let hi = max(max(max(n, s), max(w, e)), c.rgb);
-  let sharp = c.rgb + (c.rgb - (n + s + w + e) * 0.25) * (TAA_SHARPEN * c.a);
-  return finish(clamp(sharp, lo, hi), in);
+  return finish(sharpen(c.rgb, n, s, w, e, TAA_SHARPEN * c.a), in);
+}
+// The same for a scene drawn smaller than the window (--render-scale): read
+// filtered, its own pixels apart, and sharpened a little even where still
+// (the stretch softens everything).
+const UP_SHARPEN = 0.5;
+@fragment fn fs_final_taa_up(in: FsIn) -> @location(0) vec4f {
+  let tx = 1.0 / vec2f(textureDimensions(t_src));
+  let c = textureSampleLevel(t_src, s_clamp, in.uv, 0.0);
+  let n = textureSampleLevel(t_src, s_clamp, in.uv + vec2f(0.0, -tx.y), 0.0).rgb;
+  let s = textureSampleLevel(t_src, s_clamp, in.uv + vec2f(0.0, tx.y), 0.0).rgb;
+  let w = textureSampleLevel(t_src, s_clamp, in.uv + vec2f(-tx.x, 0.0), 0.0).rgb;
+  let e = textureSampleLevel(t_src, s_clamp, in.uv + vec2f(tx.x, 0.0), 0.0).rgb;
+  return finish(sharpen(c.rgb, n, s, w, e, max(TAA_SHARPEN * c.a, UP_SHARPEN)), in);
+}
+fn sharpen(c: vec3f, n: vec3f, s: vec3f, w: vec3f, e: vec3f, k: f32) -> vec3f {
+  let lo = min(min(min(n, s), min(w, e)), c);
+  let hi = max(max(max(n, s), max(w, e)), c);
+  return clamp(c + (c - (n + s + w + e) * 0.25) * k, lo, hi);
 }
 
 // Final copy to the window.

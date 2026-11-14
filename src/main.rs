@@ -87,6 +87,10 @@ const PSHADOW_DEPTH: f32 = 1600.0;
 /// Moonlight relative to sunlight. Far brighter than the real ratio, so a
 /// moonlit night reads like a film's night scene instead of a black screen.
 const MOON_E: f32 = SUN_E * 0.0035;
+/// Default --render-scale on an integrated GPU (Apple silicon and the like):
+/// it shares memory bandwidth and power with the CPU, and the full-resolution
+/// scene is too much for it. The temporal AA and its sharpening hide most of it.
+const INTEGRATED_SCALE: f32 = 0.75;
 /// What a 3D tiles detail level costs, as measured over San Francisco (see
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
@@ -122,6 +126,9 @@ struct Args {
     weather_panel: bool,
     vsync: bool,
     taa: bool,
+    /// the 3D scene's resolution as a fraction of the window's (default: 1, or
+    /// INTEGRATED_SCALE on a GPU without memory of its own)
+    render_scale: Option<f32>,
     /// log the frame rate once a second (average and slowest frame)
     fps_log: bool,
     /// draw without showing anything (benchmarks and scripted shots with the screen off)
@@ -181,6 +188,7 @@ fn parse_args() -> Args {
         weather_panel: false,
         vsync: true,
         taa: true,
+        render_scale: None,
         fps_log: false,
         headless: false,
         offline: false,
@@ -324,6 +332,7 @@ fn parse_args() -> Args {
                 a.taa = false;
                 used = 1;
             }
+            "--render-scale" => a.render_scale = num(&v, i).map(|s| s as f32),
             "--headless" => {
                 a.headless = true;
                 used = 1;
@@ -368,7 +377,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -569,6 +578,7 @@ impl Game {
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         let mut r = r;
         r.headless = args.headless;
+        r.set_render_scale(args.render_scale.unwrap_or(if r.integrated { INTEGRATED_SCALE } else { 1.0 }));
         // Cached scans load offline too; missing ones keep the procedural layer.
         r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline));
         let google = Arc::new(gmaps::Google::load(args.google_key.clone()));
@@ -1936,8 +1946,9 @@ impl Game {
         }
 
         // ---- camera
-        let size = self.window.inner_size();
-        let (w, h) = (size.width.max(1) as f32, size.height.max(1) as f32);
+        // (in the 3D scene's pixels, which --render-scale may make fewer than the window's)
+        let (w, h) = self.r.render_size();
+        let (w, h) = (w as f32, h as f32);
         let mut fov = 60f32.to_radians();
         let (cam, dir, upv);
         if !(self.cam_mode == 1 && !self.crashed && !in_menu) {
@@ -2157,7 +2168,7 @@ impl Game {
             vol_e: [0.0; 4],
             vol_n: [0.0; 4],
             pshadow_vp: casc_vp[3],
-            pshadow: [PSHADOW_R * 2.0 / render::PLANE_SHADOW_RES as f32, 0.0012 / PSHADOW_DEPTH, render::PLANE_SHADOW_RES as f32 / 4096.0, if shadow_on && !self.crashed { 1.0 } else { 0.0 }],
+            pshadow: [PSHADOW_R * 2.0 / self.r.plane_shadow_res() as f32, 0.0012 / PSHADOW_DEPTH, self.r.plane_shadow_res() as f32 / 4096.0, if shadow_on && !self.crashed { 1.0 } else { 0.0 }],
             taa: [jitter.x * 0.5, -jitter.y * 0.5, if self.taa { 1.0 } else { 0.0 }, 0.0],
             plane_inv: [[0.0; 4]; 4],
             plane_prev: [[0.0; 4]; 4],
