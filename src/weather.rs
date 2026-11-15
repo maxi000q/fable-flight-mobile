@@ -40,6 +40,8 @@ pub struct Weather {
     pub live: bool,
     pub live_station: String,
     pub live_raw: String,
+    /// the clock follows the real time and date (see `real_clock`)
+    pub real_time: bool,
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -124,7 +126,7 @@ fn cube_face(q: DVec3) -> (u32, DVec3, DVec3, DVec3) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new() }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false }
     }
 
     /// Top of the cloud layer including any storm towers, metres.
@@ -419,13 +421,15 @@ impl Weather {
     }
 
     /// The start screen's time: local time of day and the date.
-    pub fn start_time(ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64) {
+    pub fn start_time(ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64, real_time: &mut bool) {
+        real_time_switch(ui, real_time);
+        let free = !*real_time;
         egui::Grid::new("start_time").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
             ui.label(t!("Local time", "Heure locale"));
-            add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v)));
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v))));
             ui.end_row();
             ui.label("Date");
-            add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| date_label(v)));
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| date_label(v))));
             ui.end_row();
         });
     }
@@ -446,20 +450,23 @@ impl Weather {
     }
 
     fn day_controls(&mut self, ui: &mut egui::Ui, utc: &mut f64, doy: &mut f64, lon: f64) {
+        real_time_switch(ui, &mut self.real_time);
+        let free = !self.real_time;
         section(ui, tr("DAY"), |ui| {
             ui.label(t!("Local time", "Heure locale"));
             let mut local = (*utc + lon / 15.0).rem_euclid(24.0);
             let hhmm = |v: f64, _: std::ops::RangeInclusive<usize>| format!("{:02}:{:02}", v as u32 % 24, (v.fract() * 60.0) as u32);
-            if add(ui, Slider::new(&mut local, 0.0..=23.99).custom_formatter(hhmm)).changed() {
+            if ui.add_enabled_ui(free, |ui| add(ui, Slider::new(&mut local, 0.0..=23.99).custom_formatter(hhmm))).inner.changed() {
                 *utc = (local - lon / 15.0).rem_euclid(24.0);
             }
             ui.end_row();
             ui.label("Date");
             let date = |v: f64, _: std::ops::RangeInclusive<usize>| date_label(v);
-            add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(date));
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(date)));
             ui.end_row();
             ui.label(t!("Clock speed", "Vitesse de l'horloge"));
-            add(ui, Slider::new(&mut self.time_rate, 0.0..=3600.0).logarithmic(true).smallest_positive(1.0).custom_formatter(|v, _| if v == 0.0 { t!("stopped", "arrêtée").into() } else { format!("{v:.0}×") }));
+            let rate = &mut self.time_rate;
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(rate, 0.0..=3600.0).logarithmic(true).smallest_positive(1.0).custom_formatter(|v, _| if v == 0.0 { t!("stopped", "arrêtée").into() } else { format!("{v:.0}×") })));
             ui.end_row();
             ui.label(t!("Moon", "Lune"));
             add(ui, Slider::new(&mut self.moon_age, 0.0..=29.5).custom_formatter(|v, _| tr(moon_phase(v)).into()));
@@ -525,6 +532,35 @@ impl Weather {
 
 use crate::i18n::{t, tr};
 use egui::{RichText, Slider};
+
+/// The "real time" switch above the clock's sliders.
+fn real_time_switch(ui: &mut egui::Ui, on: &mut bool) {
+    ui.checkbox(on, t!("Real time (the sun where you are, now)", "Heure réelle (le soleil là où vous êtes, maintenant)"));
+}
+
+/// The real time now: hours UTC and the day of the year (0 = 1 January,
+/// the 29th of February counted as the 28th), from the system clock.
+pub fn real_clock() -> (f64, f64) {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    clock_at(secs)
+}
+
+fn clock_at(secs: f64) -> (f64, f64) {
+    let days = (secs / 86_400.0).floor();
+    let hours = (secs - days * 86_400.0) / 3600.0;
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let dy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * dy + 2) / 153;
+    let d = dy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    const BEFORE: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let doy = (BEFORE[(m - 1) as usize] + d.min(if m == 2 { 28 } else { 31 }) - 1).min(364);
+    (hours, doy as f64)
+}
 
 /// "Jun 21", or "21 juin" in French.
 pub fn date_label(doy: f64) -> String {
@@ -601,6 +637,12 @@ mod tests {
         assert_eq!(moon_phase(14.8), "full");
         assert_eq!(compass(248.0), "W");
         assert_eq!(compass(350.0), "N");
+        // 2026-11-15 17:20 UTC, 2024-02-29 (leap day) and 2024-12-31 noon
+        let (h, d) = clock_at(1_794_763_200.0);
+        assert_eq!((month_day(d).as_str(), (h * 60.0).round()), ("Nov 15", 17.0 * 60.0 + 20.0));
+        assert_eq!(month_day(clock_at(1_709_208_000.0).1), "Feb 28");
+        assert_eq!(month_day(clock_at(1_735_646_400.0).1), "Dec 31");
+        assert_eq!(clock_at(0.0), (0.0, 0.0));
     }
 
     #[test]

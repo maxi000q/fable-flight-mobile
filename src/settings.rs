@@ -21,11 +21,13 @@ pub struct Settings {
     pub live_traffic: bool,
     /// real weather (see livewx.rs)
     pub live_weather: bool,
+    /// the clock follows the real time and date
+    pub real_time: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, taa: true, live_traffic: true, live_weather: true }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, taa: true, live_traffic: true, live_weather: true, real_time: true }
     }
 }
 
@@ -57,6 +59,7 @@ impl Settings {
             taa: b("taa", d.taa),
             live_traffic: b("live_traffic", d.live_traffic),
             live_weather: b("live_weather", d.live_weather),
+            real_time: b("real_time", d.real_time),
         }
     }
 
@@ -72,6 +75,7 @@ impl Settings {
             "taa": self.taa,
             "live_traffic": self.live_traffic,
             "live_weather": self.live_weather,
+            "real_time": self.real_time,
         })
     }
 
@@ -95,7 +99,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, taa: false, live_traffic: false, live_weather: false };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, taa: false, live_traffic: false, live_weather: false, real_time: false };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         // Missing or odd values fall back to the defaults.
         let j = serde_json::json!({ "volume": 7.0, "language": "xx" });

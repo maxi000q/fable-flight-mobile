@@ -752,6 +752,8 @@ impl Game {
         // Real weather, unless the command line sets the weather itself.
         let scripted = std::env::args().any(|a| matches!(a.as_str(), "--clouds" | "--storms" | "--alto" | "--wind" | "--haze"));
         wx.live = prefs.live_weather && !scripted;
+        let set_time = std::env::args().any(|a| matches!(a.as_str(), "--time" | "--day" | "--time-rate"));
+        wx.real_time = prefs.real_time && !set_time;
         // The spawn speed is through the air: start out moving with the wind,
         // or a headwind starts it off fast (and climbing it away).
         plane.wind = wx.steady(plane.pos, 300.0);
@@ -1380,8 +1382,11 @@ impl Game {
                 self.goto_open = true;
                 self.goto_text.clear();
             }
-            KeyCode::KeyT => self.utc = (self.utc + 0.5).rem_euclid(24.0),
-            KeyCode::KeyY => self.utc = (self.utc - 0.5).rem_euclid(24.0),
+            KeyCode::KeyT | KeyCode::KeyY => {
+                // Setting the time by hand leaves real time.
+                self.wx.real_time = false;
+                self.utc = (self.utc + if code == KeyCode::KeyT { 0.5 } else { -0.5 }).rem_euclid(24.0);
+            }
             KeyCode::KeyN => self.wx.clouds = (self.wx.clouds + 0.1).min(1.0),
             KeyCode::KeyM => self.wx.clouds = (self.wx.clouds - 0.1).max(0.0),
             KeyCode::F3 => self.wx.open = !self.wx.open,
@@ -1800,7 +1805,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -1936,6 +1941,10 @@ impl Game {
             let t = self.utc + dt * self.wx.time_rate / 3600.0;
             self.doy = (self.doy + (t / 24.0).floor()).rem_euclid(365.0);
             self.utc = t.rem_euclid(24.0);
+            if self.wx.real_time {
+                (self.utc, self.doy) = weather::real_clock();
+                self.wx.time_rate = 1.0;
+            }
             // The air the aircraft flies through, gusts and all.
             let (la, lo, h) = geo::pos_to_lla(self.plane.pos);
             let g = self.world.ground(la, lo);
@@ -2232,6 +2241,13 @@ impl Game {
             (cam, dir, upv) = self.menu.camera();
             // Keep the side of the planet you are looking at in daylight.
             self.utc = (12.6 - self.menu.lon / 15.0).rem_euclid(24.0);
+            // Real time: the start time is the time now at the chosen spot.
+            if self.wx.real_time {
+                let (utc, doy) = weather::real_clock();
+                let lon = self.menu.pick.map(|p| p.1).unwrap_or(self.menu.lon);
+                self.menu.hour = (utc + lon / 15.0).rem_euclid(24.0);
+                self.doy = doy;
+            }
             self.cam_pos = cam;
         } else if self.crashed {
             let cr = self.crash.as_ref().unwrap();
@@ -3127,7 +3143,7 @@ impl Game {
                         });
                         let when = format!("{} · {}", menu::hhmm(self.menu.hour), weather::date_label(self.doy));
                         menu::section(ui, "time", t!("Time", "Heure"), &when, false, |ui| {
-                            weather::Weather::start_time(ui, &mut self.menu.hour, &mut self.doy);
+                            weather::Weather::start_time(ui, &mut self.menu.hour, &mut self.doy, &mut self.wx.real_time);
                         });
                         padui::follow_focus(ui);
                     });
