@@ -19,6 +19,11 @@
 # How each piece moves is set in Rust by its name; each object records where
 # its hinge is in its own frame (custom properties "pivot", "axis", "angle").
 #
+# The gear wells are cut into the fuselage with boolean modifiers (cutters in
+# the "FA-18C well cutters" collection, not exported) and the gear doors are
+# patches of the skin itself. Every export ends with a gear check: a sweep of
+# the legs from up to down that names any part passing through the skin.
+#
 # --render writes preview pictures. --guides writes the three orthographic
 # views (top, bottom, left side) the paint is projected from, each with its
 # silhouette mask; assets/blender/fa18_paint.py turns painted versions of
@@ -73,18 +78,9 @@ MATS = {
     "glass": (7, 0, (0.10, 0.10, 0.10), 0),
     "frame": (15, 0, (0.07, 0.075, 0.08), 0),
     "cockpit": (10, 0, (0.03, 0.03, 0.034), 0),
-    "console": (15, 0, (0.055, 0.058, 0.06), 0),
-    "seat": (15, 0, (0.05, 0.055, 0.05), 0),
-    "seat_pad": (6, 0, (0.07, 0.085, 0.05), 0),
-    "handle": (0, 0, (0.75, 0.55, 0.02), 0),
-    "screen": (8, 0, (0.10, 0.95, 0.35), 8),
-    "suit": (15, 0, (0.10, 0.115, 0.07), 0),
-    "vest": (15, 0, (0.06, 0.07, 0.05), 0),
-    "helmet": (0, 0, (0.50, 0.51, 0.50), 0),
-    "visor": (0, 0, (0.012, 0.012, 0.016), 0),
-    "mask": (4, 0, (0.03, 0.03, 0.032), 0),
     "strut": (0, 0, (0.78, 0.78, 0.76), 0),
     "door_in": (0, 0, (0.74, 0.74, 0.72), 0),
+    "well": (0, 0, (0.62, 0.63, 0.60), 0),  # inside the gear wells
     "chrome": (3, 0, (0.85, 0.86, 0.88), 1),
     "steel": (3, 0, (0.32, 0.32, 0.33), 0),
     "rubber": (4, 0, (0.018, 0.018, 0.02), 0),
@@ -198,7 +194,7 @@ class Geo:
             j = (i + 1) % n
             self.face([a[i], b[i], b[j], a[j]], m)
 
-    def finish(self, name, smooth=38.0, pivot=None, axis=None, angle=0.0, recalc=True):
+    def finish(self, name, smooth=38.0, pivot=None, axis=None, angle=0.0, recalc=True, parent=None, coll=None):
         bm = self.bm
         if recalc:
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
@@ -215,13 +211,44 @@ class Geo:
             p.use_smooth = True
         me.set_sharp_from_angle(angle=math.radians(smooth))
         ob = bpy.data.objects.new(name, me)
-        COLL.objects.link(ob)
+        (coll or COLL).objects.link(ob)
         # The hinge, in this object's own (local) frame: moving or turning the
         # object in Blender carries its hinge along.
         ob["pivot"] = list(pivot or V((0, 0, 0)))
         ob["axis"] = list((axis or V((1, 0, 0))).normalized())
         ob["angle"] = float(angle)
+        if parent:
+            ob["parent"] = parent  # what it hangs from (as PIECES in Rust), for previews
         return ob
+
+
+def cutter(name, rings):
+    """A solid lofted through closed rings that a well is cut with: kept in its
+    own collection, out of the export. What it cuts takes its finish (well)."""
+    g = Geo()
+    g.loft(rings, "well")
+    ob = g.finish(name, smooth=30, coll=CUTS)
+    ob.hide_render = True
+    ob.display_type = "WIRE"
+    return ob
+
+
+def carve(ob, cutters, smooth=38.0):
+    """Cut these solids out of a piece's skin, leaving their walls inside it (the wells)."""
+    for c in cutters:
+        md = ob.modifiers.new("well", "BOOLEAN")
+        md.operation, md.solver, md.object = "DIFFERENCE", "EXACT", c
+        md.material_mode = "TRANSFER"
+        md.use_hole_tolerant = True
+    deps = bpy.context.evaluated_depsgraph_get()
+    me = bpy.data.meshes.new_from_object(ob.evaluated_get(deps))
+    ob.modifiers.clear()
+    old = ob.data
+    ob.data = me
+    bpy.data.meshes.remove(old)
+    for p in me.polygons:
+        p.use_smooth = True
+    me.set_sharp_from_angle(angle=math.radians(smooth))
 
 
 def frame_at(t, ref=None):
@@ -305,10 +332,10 @@ FUSE = [
     (4.00, 0.650, 0.68, -0.06, -0.65, 2.7),
     (3.00, 0.700, 0.70, -0.06, -0.67, 2.8),
     (2.00, 0.800, 0.70, -0.08, -0.70, 3.0),
-    (1.00, 0.920, 0.68, -0.10, -0.72, 3.1),
-    (-0.50, 1.010, 0.64, -0.11, -0.74, 3.2),
-    (-2.00, 1.070, 0.60, -0.12, -0.74, 3.2),
-    (-3.50, 1.090, 0.55, -0.12, -0.72, 3.2),
+    (1.00, 0.960, 0.68, -0.10, -0.72, 3.1),
+    (-0.50, 1.060, 0.64, -0.11, -0.74, 3.2),
+    (-2.00, 1.100, 0.60, -0.12, -0.74, 3.2),
+    (-3.50, 1.100, 0.55, -0.12, -0.72, 3.2),
     (-5.00, 1.070, 0.48, -0.10, -0.66, 3.0),
     (-6.20, 1.020, 0.40, -0.08, -0.58, 2.8),
     (-7.00, 0.950, 0.33, -0.06, -0.50, 2.6),
@@ -325,6 +352,12 @@ ENGINE_Z = -0.05
 def trough(y):
     """How deep the valley between the two engines is at station y: on top, underneath."""
     return 0.13 * smoothstep(-5.2, -7.2, y), 0.15 * smoothstep(-2.6, -6.8, y)
+
+
+def p_lower(y, p):
+    """The lower half's superellipse exponent: boxier under the intake ducts,
+    where the main wheels stow."""
+    return p + 1.6 * smoothstep(3.0, 1.6, y) * smoothstep(-4.8, -3.2, y)
 
 
 def tub_cut(y):
@@ -344,11 +377,13 @@ def fuse_ring(y, hw, top, mid, bot, p, n=RING_N, tub=0.0):
             angs[i] = lerp(angs[i], a, tub)
             angs[2 * q - i] = math.pi - angs[i]
     t_top, t_bot = trough(y)
+    pl = p_lower(y, p)
     pts = []
     for a in angs:
         c, s = math.cos(a), math.sin(a)
-        x = hw * math.copysign(abs(c) ** (2 / p), c)
-        f = abs(s) ** (2 / p)
+        e = p if s >= 0 else pl
+        x = hw * math.copysign(abs(c) ** (2 / e), c)
+        f = abs(s) ** (2 / e)
         between = math.exp(-(x / 0.22) ** 2) * f
         z = mid + (top - mid) * f - t_top * between if s >= 0 else mid - (mid - bot) * f + t_bot * between
         pts.append(V((x, y, z)))
@@ -362,6 +397,8 @@ def fuse_top(y):
 def fuse_z(y, x, upper=True):
     """Height of the fuselage skin at station y, x out from the centreline."""
     _, hw, top, mid, bot, p = table_at(FUSE, y)
+    if not upper:
+        p = p_lower(y, p)
     f = max(0.0, 1.0 - (min(abs(x), hw) / max(hw, 1e-6)) ** p) ** (1 / p)
     t_top, t_bot = trough(y)
     between = math.exp(-(x / 0.22) ** 2) * f
@@ -371,6 +408,8 @@ def fuse_z(y, x, upper=True):
 def fuse_hw(y, z):
     """Half width of the fuselage at station y, height z."""
     _, hw, top, mid, bot, p = table_at(FUSE, y)
+    if z < mid:
+        p = p_lower(y, p)
     f = min(1.0, abs(z - mid) / max((top - mid) if z >= mid else (mid - bot), 1e-6))
     return hw * max(0.0, 1.0 - f ** p) ** (1 / p)
 
@@ -399,7 +438,11 @@ def fuselage():
             belly_details(g)
         if name == "tail cone":
             tail_details(g)
-        g.finish(name)
+        ob = g.finish(name)
+        if name == "nose section":
+            carve(ob, [nose_well()])
+        if name == "fuselage":
+            carve(ob, [main_well(1), main_well(-1)])
 
     # The dorsal spine behind the canopy.
     g = Geo()
@@ -416,6 +459,40 @@ def fuselage():
     blade(g, V((0, 0.9, fuse_top(0.9) + 0.07)), 0.20, 0.17, 0.010)
     g.box(V((0, -1.6, fuse_top(-1.6) + 0.085)), (0.03, 0.05, 0.02), "strobe")
     g.finish("spine")
+
+
+# The gear wells: the nose well under the cockpit (half width, aft end, front
+# end, roof) and a main well each side under the intake duct (inboard edge,
+# front, back, roof; its outboard edge is where the skin is MAIN_WELL_Z high).
+NOSE_WELL = (0.25, 4.85, 6.62, 0.08)
+MAIN_WELL = (0.14, -0.05, -2.20, 0.0)
+MAIN_WELL_Z = -0.55
+MAIN_DOOR_SPLIT = -0.62  # where the strut door ends and the main door starts
+
+
+def nose_well():
+    hw, y0, y1, zt = NOSE_WELL
+    return cutter("nose well", [[V((-hw, y, -1.2)), V((hw, y, -1.2)), V((hw, y, zt)), V((-hw, y, zt))] for y in (y1, y0)])
+
+
+def main_well_out(y):
+    return fuse_hw(y, MAIN_WELL_Z)
+
+
+def main_well_x(y, z):
+    """The main well's outboard wall: straight up from the opening's edge (the
+    skin's facets round the lower corner leave no room to lean it out)."""
+    return main_well_out(y)
+
+
+def main_well(s):
+    xi, y0, y1, zt = MAIN_WELL
+    rings = []
+    for k in range(7):
+        y = lerp(y0, y1, k / 6)
+        xo = main_well_out(y)
+        rings.append([V((xi * s, y, -1.3)), V((xo * s, y, -1.3)), V((xo * s, y, MAIN_WELL_Z)), V((main_well_x(y, zt) * s, y, zt)), V((xi * s, y, zt))])
+    return cutter(("right" if s > 0 else "left") + " main well", rings)
 
 
 def blade(g, base, chord, height, t, down=False, m="skin"):
@@ -467,48 +544,96 @@ def tail_details(g):
 
 
 def intakes():
-    # station y, centre x, half width, half height
-    T = [(2.75, 1.08, 0.26, 0.36), (2.30, 1.08, 0.29, 0.39), (1.00, 1.06, 0.30, 0.40), (-0.50, 1.03, 0.27, 0.38), (-1.90, 0.95, 0.14, 0.30)]
-    ZC = -0.30
+    # station y, centre x, half width, half height, centre height. Aft of the
+    # lip the trunk climbs and narrows toward the engine face, fairing into the
+    # fuselage's side ahead of the main gear well.
+    T = [(2.75, 1.08, 0.26, 0.36, -0.36), (2.30, 1.08, 0.29, 0.39, -0.37), (1.30, 1.06, 0.30, 0.40, -0.37), (0.60, 0.99, 0.27, 0.37, -0.33), (0.08, 0.84, 0.19, 0.28, -0.25)]
 
-    def ring(s, y, cx, hw, hh, inset=0.0):
+    def ring(s, y, cx, hw, hh, zc, inset=0.0):
         # The lip is raked: its top is further forward than its bottom.
         rake = 0.20 * smoothstep(2.1, 2.75, y)
         out = []
-        for k in range(28):
-            a = 2 * math.pi * k / 28
+        for k in range(32):
+            a = 2 * math.pi * k / 32
             c, sn = math.cos(a), math.sin(a)
             dz = (hh - inset) * math.copysign(abs(sn) ** 0.55, sn)
-            out.append(V(((cx + (hw - inset) * math.copysign(abs(c) ** 0.55, c)) * s, y + rake * dz / hh, ZC + dz)))
+            out.append(V(((cx + (hw - inset) * math.copysign(abs(c) ** 0.55, c)) * s, y + rake * dz / hh, zc + dz)))
         return out
 
     for s, side in ((1, "right"), (-1, "left")):
         g = Geo()
-        rows = spline_rows(T, 0, len(T) - 1, 4)
+        rows = spline_rows(T, 0, len(T) - 1, 5)
         g.loft([ring(s, *r) for r in rows], "skin", False, True)
         # The lip, and the duct running back from it into the dark.
-        lip = ring(s, *T[0])
-        g.loft([lip, ring(s, *T[0], inset=0.028)], "skin", False, False)
-        y, cx, hw, hh = T[0]
-        g.loft([ring(s, y, cx, hw, hh, 0.028), ring(s, y - 0.5, cx, hw, hh, 0.035), ring(s, y - 1.5, cx - 0.03, hw, hh, 0.10)], "inlet", False, True)
-        # The splitter plate that keeps the fuselage's boundary layer out of the duct.
+        y, cx, hw, hh, zc = T[0]
+        g.loft([ring(s, *T[0]), ring(s, *T[0], inset=0.028)], "skin", False, False)
+        g.loft([ring(s, y, cx, hw, hh, zc, 0.028), ring(s, y - 0.5, cx, hw, hh, zc, 0.035), ring(s, y - 1.5, cx - 0.03, hw, hh, zc + 0.02, 0.10)], "inlet", False, True)
+        # The splitter plate that keeps the fuselage's boundary layer out of the
+        # duct, and the struts holding it off the fuselage.
         x = (cx - hw - 0.012) * s
-        g.plate([V((x, 3.25, ZC + 0.05)), V((x, 3.02, ZC + 0.40)), V((x, 2.35, ZC + 0.40)), V((x, 2.35, ZC - 0.40)), V((x, 2.60, ZC - 0.40))], V((1, 0, 0)), 0.008, "skin")
+        g.plate([V((x, 3.25, zc + 0.05)), V((x, 3.02, zc + 0.40)), V((x, 2.35, zc + 0.40)), V((x, 2.35, zc - 0.40)), V((x, 2.60, zc - 0.40))], V((1, 0, 0)), 0.008, "skin")
+        for zz in (zc + 0.22, zc - 0.18):
+            x0 = fuse_hw(2.55, zz) - 0.01
+            g.box(V(((x0 + cx - hw) / 2 * s, 2.50, zz)), (abs(cx - hw - x0) / 2 + 0.005, 0.12, 0.006), "skin")
         g.finish(side + " intake")
 
 
+# The leading-edge extension and the fillet it becomes along the wing root:
+# station y, how far out its edge is. Ahead of LEX_JOIN the edge is the LEX's
+# sharp one; behind it the edge lies on the wing's upper surface and the
+# surface is the fillet between the wing and the fuselage.
+LEX_EDGE = [(6.40, 0.30), (6.05, 0.42), (5.75, 0.50), (5.30, 0.62), (4.40, 0.80), (3.10, 1.02), (1.90, 1.28), (1.05, 1.50), (0.62, 1.63),
+            (0.30, 1.52), (-0.30, 1.40), (-1.20, 1.31), (-2.20, 1.25), (-2.95, 1.20)]
+LEX_JOIN = 0.62
+
+
+def wing_top(x, y):
+    """Height of the (right) wing's upper surface at (x, y)."""
+    le, c, _, up = wing_sect(1)(x)
+    xc = min(max((le.y - y) / c, 0.0), 1.0)
+    return le.z + c * max(naca_t(xc, W_T), 0.004) * up.z
+
+
+def lex_section(y, xe):
+    """The LEX's edge height ze, how high above it the surface meets the
+    fuselage (h), and the root's x there."""
+    if y >= LEX_JOIN:
+        ze = lerp(0.085, 0.03, smoothstep(0.6, 6.0, y))
+    else:
+        ze = wing_top(xe, y) - 0.006
+    h = 0.04 + 0.28 * smoothstep(6.3, 3.8, y) * smoothstep(-2.95, -1.0, y)
+    xr = min(fuse_hw(y, ze + h) - 0.015, xe - 0.02)
+    return ze, h, xr
+
+
+def lex_top(x, y):
+    """Height of the LEX/fillet's upper surface at (x, y), right side."""
+    xe = table_at(LEX_EDGE, y)[1]
+    ze, h, xr = lex_section(y, xe)
+    t = min(max((x - xr) / max(xe - xr, 1e-3), 0.0), 1.0)
+    return ze + 0.004 + h * (1 - t) ** 2.2
+
+
 def lexes():
-    # station y, how far out the sharp edge is
-    edge = [(6.05, 0.42), (5.75, 0.50), (5.30, 0.62), (4.40, 0.80), (3.10, 1.02), (1.90, 1.28), (1.05, 1.50), (0.60, 1.63)]
     for s, side in ((1, "right"), (-1, "left")):
         g = Geo()
         rings = []
-        for y, xe in spline_rows(edge, 0, len(edge) - 1, 4):
-            zc = lerp(0.12, 0.02, smoothstep(0.6, 6.0, y))
-            # thick where it meets the fuselage, a sharp edge outboard, flat underneath
-            rings.append([V((0.38 * s, y, zc + 0.055)), V((lerp(0.38, xe, 0.55) * s, y, zc + 0.034)), V((xe * s, y, zc + 0.005)), V((xe * s, y, zc - 0.005)), V((0.38 * s, y, zc - 0.035))])
+        for y, xe in spline_rows(LEX_EDGE, 0, len(LEX_EDGE) - 1, 4):
+            ze, h, xr = lex_section(y, xe)
+            wing = y < LEX_JOIN
+            # concave from the fuselage's side out to the sharp edge, flat underneath
+            top = [V((lerp(xr, xe, t), y, ze + 0.004 + h * (1 - t) ** 2.2)) for t in (0.0, 0.1, 0.22, 0.36, 0.52, 0.68, 0.84)]
+            zb = ze - (0.09 if wing else 0.05)
+            xb = min(fuse_hw(y, zb) - 0.015, xe - 0.03)
+            under = [V((xe, y, ze + 0.004)), V((xe, y, ze - 0.004)), V((lerp(xe, xb, 0.45), y, ze - (0.05 if wing else 0.012))), V((xb, y, zb))]
+            rings.append([M(p, s) for p in top + under])
         g.loft(rings, "skin")
-        g.finish(side + " lex", smooth=25)
+        # The fence on top of the LEX (added to the C to tame tail buffeting).
+        x = 1.16
+        y0, y1 = 1.86, 1.22
+        z0, z1 = lex_top(x, y0), lex_top(x, y1)
+        g.plate([V((x * s, y0, z0 - 0.02)), V((x * s, y1, z1 - 0.02)), V((x * s, y1 + 0.06, z1 + 0.13)), V((x * s, y0 - 0.22, z0 + 0.17))], V((1, 0, 0)), 0.005, "skin")
+        g.finish(side + " lex", smooth=30)
 
 
 def nozzles():
@@ -557,7 +682,8 @@ def plume():
     ob.display_type = "WIRE"
 
 
-# ---------------------------------------------------------------- canopy and cockpit
+# ---------------------------------------------------------------- canopy
+# (Everything inside the cockpit is built in Rust: src/aircraft/fa18/pit.rs.)
 # station y, half width at the sill, height of the top
 CANOPY = [(6.25, 0.40, 0.64), (6.00, 0.45, 0.80), (5.70, 0.50, 1.00), (5.40, 0.52, 1.12), (5.00, 0.53, 1.20), (4.50, 0.53, 1.22), (4.00, 0.52, 1.20), (3.50, 0.48, 1.12), (3.10, 0.42, 0.98), (2.70, 0.34, 0.80)]
 
@@ -576,78 +702,18 @@ def canopy():
     g = Geo()
     for yb in (5.55, 3.45):
         y, w, zt = table_at(CANOPY, yb)
-        tube(g, canopy_arc(y, w, zt, grow=0.012), 0.028, "frame", n=8, ref=V((0, 1, 0)))
+        tube(g, canopy_arc(y, w, zt, grow=0.012, n=40), 0.028, "frame", n=16, ref=V((0, 1, 0)))
     for s in (1, -1):
-        pts = [V((s * (r[1] + 0.01), r[0], fuse_top(r[0]) - 0.03)) for r in spline_rows(CANOPY, 0, len(CANOPY) - 1, 2)]
-        tube(g, pts, 0.03, "frame", n=8)
+        pts = [V((s * (r[1] + 0.01), r[0], fuse_top(r[0]) - 0.03)) for r in spline_rows(CANOPY, 0, len(CANOPY) - 1, 4)]
+        tube(g, pts, 0.03, "frame", n=16)
         # The sill: the canopy's rail standing on the fuselage, painted outside, black inside.
         rows = spline_rows(CANOPY, 0, len(CANOPY) - 1, 2)
         outer = [[V((s * (w + 0.018), y, fuse_z(y, w) - 0.04)), V((s * (w + 0.018), y, fuse_top(y) - 0.02)), V((s * (w - 0.022), y, fuse_top(y) - 0.02))] for y, w, _ in rows]
         inner = [[V((s * (w - 0.022), y, fuse_top(y) - 0.02)), V((s * (w - 0.022), y, fuse_z(y, w) - 0.04))] for y, w, _ in rows]
         g.strip(outer, "skin", toward=V((s * 8.0, 4.5, 6.0)))
         g.strip(inner, "cockpit", toward=V((0, 4.5, 0.8)))
-    g.finish("canopy frame")
+    g.finish("canopy frame", smooth=80)
 
-    cockpit()
-
-
-def cockpit():
-    g = Geo()
-    # The tub: walls down from the opening's edge, the floor, a bulkhead at each end.
-    rim = TUB_RIM
-    floor = lambda p: V((math.copysign(min(abs(p.x) - 0.03, 0.40), p.x), p.y, TUB_FLOOR))
-    mid = V((0, (TUB_Y[0] + TUB_Y[1]) / 2, 0.6))
-    g.strip([[r[0], floor(r[0])] for r in rim], "cockpit", toward=mid)
-    g.strip([[r[-1], floor(r[-1])] for r in rim], "cockpit", toward=mid)
-    g.strip([[floor(r[0]), floor(r[-1])] for r in rim], "cockpit", toward=mid)
-    for r in (rim[0], rim[-1]):
-        g.poly(list(r) + [floor(r[-1]), floor(r[0])], "cockpit", toward=mid)
-
-    # Side consoles, the instrument panel with its three displays, the glareshield.
-    for s in (1, -1):
-        g.box(V((s * 0.36, 4.75, 0.40)), (0.085, 0.80, 0.11), "console")
-    g.box(V((0, 5.52, 0.47)), (0.40, 0.035, 0.25), "console")
-    for x, z, w, h in ((-0.21, 0.55, 0.085, 0.085), (0.21, 0.55, 0.085, 0.085), (0.0, 0.40, 0.08, 0.08), (0.0, 0.615, 0.07, 0.035)):
-        g.box(V((x, 5.482, z)), (w, 0.004, h), "screen")
-    g.box(V((0, 5.76, 0.735)), (0.38, 0.27, 0.018), "cockpit")  # glareshield, low enough to see over
-    g.box(V((0, 5.70, 0.775)), (0.10, 0.07, 0.03), "cockpit")  # HUD projector
-    for x in (-0.09, 0.09):
-        g.box(V((x, 5.66, 0.86)), (0.008, 0.008, 0.07), "frame")  # HUD combiner posts
-    # Stick and throttles.
-    tube(g, [V((0, 4.93, TUB_FLOOR)), V((0, 4.90, 0.46))], 0.014, "frame", n=8)
-    g.box(V((0, 4.895, 0.50)), (0.022, 0.024, 0.05), "cockpit")
-    g.box(V((-0.34, 4.98, 0.545)), (0.035, 0.06, 0.035), "cockpit")
-
-    # The ejection seat: back, headrest, pan, cushions, the firing handle between the knees.
-    g.box(V((0, 4.13, 0.60)), (0.21, 0.05, 0.42), "seat")
-    g.box(V((0, 4.15, 1.045)), (0.13, 0.075, 0.075), "seat")
-    g.box(V((0, 4.38, 0.33)), (0.21, 0.24, 0.06), "seat")
-    g.box(V((0, 4.19, 0.66)), (0.17, 0.02, 0.30), "seat_pad")
-    g.box(V((0, 4.615, 0.43)), (0.06, 0.016, 0.035), "handle")
-    for x in (-0.145, 0.145):
-        g.box(V((x, 4.16, 1.14)), (0.012, 0.03, 0.03), "handle")  # canopy breakers
-
-    # The pilot.
-    g.box(V((0, 4.30, 0.60)), (0.17, 0.105, 0.20), "suit")  # torso
-    g.box(V((0, 4.30, 0.80)), (0.215, 0.09, 0.045), "suit")  # shoulders
-    g.box(V((0, 4.40, 0.62)), (0.145, 0.02, 0.15), "vest")  # survival vest and harness
-    tube(g, [V((0, 4.32, 0.83)), V((0, 4.33, 0.91))], 0.055, "suit", n=10)
-    head = V((0, 4.33, 0.985))
-    ball(g, head, 0.132, "helmet", n=18, squash=(0.95, 1.05, 1.0))
-    # Visor: a dark cap over the front of the helmet; the oxygen mask and its hose below it.
-    lathe(g, head + V((0, 0.012, 0.022)), V((0, 1, 0)), [(0.133 * math.sin(t), 0.133 * math.cos(t)) for t in (math.radians(a) for a in (0, 15, 30, 45, 60, 72))], "visor", n=18, caps=(False, False))
-    g.box(head + V((0, 0.125, -0.06)), (0.045, 0.03, 0.045), "mask")
-    tube(g, [head + V((0, 0.13, -0.10)), head + V((0.04, 0.10, -0.20)), V((0.07, 4.41, 0.70))], 0.018, "mask", n=8)
-    for s in (1, -1):
-        elbow = V((s * 0.275, 4.52, 0.565))
-        hand = V((0.03, 4.87, 0.51)) if s > 0 else V((-0.33, 4.92, 0.57))
-        tube(g, [V((s * 0.215, 4.31, 0.78)), elbow], 0.052, "suit", n=10)
-        tube(g, [elbow, hand], lambda t: 0.046 - 0.008 * t, "suit", n=10)
-        ball(g, hand, 0.045, "mask", n=10)
-        knee = V((s * 0.14, 4.84, 0.50))
-        tube(g, [V((s * 0.10, 4.36, 0.44)), knee], 0.072, "suit", n=10)
-        tube(g, [knee, V((s * 0.13, 5.22, 0.22))], 0.056, "suit", n=10)
-    g.finish("cockpit", smooth=30)
 
 
 # ---------------------------------------------------------------- lifting surfaces
@@ -657,15 +723,23 @@ def naca_t(x, t):
 
 
 def foil_ring(sect, t, a, b, m=14):
+    """A closed section from chord fraction a to b; t the thickness ratio, or a
+    function of the chord fraction (a root fillet)."""
     le, c, cdir, up = sect
+    tt = t if callable(t) else (lambda x: t)
     xs = [a + (b - a) * (1 - math.cos(math.pi * k / m)) / 2 for k in range(m + 1)]
-    upper = [le + cdir * (c * x) + up * max(c * naca_t(x, t), 0.004) for x in xs]
-    lower = [le + cdir * (c * x) - up * max(c * naca_t(x, t), 0.004) for x in reversed(xs)]
+    upper = [le + cdir * (c * x) + up * max(c * naca_t(x, tt(x)), 0.004) for x in xs]
+    lower = [le + cdir * (c * x) - up * max(c * naca_t(x, tt(x)), 0.004) for x in reversed(xs)]
     return upper + lower
 
 
-def surface(g, sect, u0, u1, a, b, t, m="skin", nu=6):
-    g.loft([foil_ring(sect(lerp(u0, u1, k / (nu - 1))), t, a, b) for k in range(nu)], m)
+def surface(g, sect, u0, u1, a, b, t, m="skin", nu=6, tk=None):
+    """`tk(u, x)`: how much thicker than t the section at u is at chord fraction x."""
+    rings = []
+    for k in range(nu):
+        u = lerp(u0, u1, k / (nu - 1))
+        rings.append(foil_ring(sect(u), (lambda x, u=u: t * tk(u, x)) if tk else t, a, b))
+    g.loft(rings, m)
 
 
 def hinge(sect, u, xc):
@@ -677,7 +751,7 @@ def hinge(sect, u, xc):
 W_X0, W_X1, W_LE0, W_SWEEP, W_C0, W_C1, W_Z0, W_ANH, W_T = 0.9, 5.75, 1.0, 0.503, 4.15, 1.65, 0.12, 0.052, 0.05
 FLAP = (1.3, 3.45)
 AIL = (3.5, 5.6)
-LEF = (1.3, 5.6)
+LEF = (1.62, 5.6)  # from where the LEX meets the leading edge
 
 
 def wing_sect(s):
@@ -686,6 +760,12 @@ def wing_sect(s):
         le = V((x * s, W_LE0 - W_SWEEP * (x - W_X0), W_Z0 - W_ANH * (x - W_X0)))
         return le, lerp(W_C0, W_C1, k), V((0, -1, 0)), V((W_ANH * s, 0, 1)).normalized()
     return f
+
+
+def wick(g, p, aft=V((0, -1, 0)), up=V((0, 0, 1))):
+    """A static discharger trailing from point p: a fine rod on a little base."""
+    g.box(p + aft * 0.02, (0.006, 0.025, 0.004), "skin", (up.cross(aft).normalized(), aft, up))
+    tube(g, [p + aft * 0.03, p + aft * 0.14], 0.0035, "rubber", n=5)
 
 
 def pair_axis(right_axis, s):
@@ -709,7 +789,8 @@ def wings():
     for s, side in ((1, "right"), (-1, "left")):
         ws = wing_sect(s)
         g = Geo()
-        surface(g, ws, W_X0, LEF[0], 0.0, 1.0, W_T, nu=3)
+        surface(g, ws, W_X0, FLAP[0], 0.0, 1.0, W_T, nu=3)
+        surface(g, ws, FLAP[0], LEF[0], 0.0, 0.75, W_T, nu=2)
         surface(g, ws, LEF[0], AIL[1], 0.15, 0.75, W_T, nu=10)
         surface(g, ws, FLAP[1], AIL[0], 0.75, 1.0, W_T, nu=2)
         surface(g, ws, AIL[1], W_X1, 0.0, 1.0, W_T, nu=3)
@@ -720,13 +801,21 @@ def wings():
         for name, (x0, x1), (a, b) in (("le flap", LEF, (0.0, 0.15)), ("flap", FLAP, (0.75, 1.0)), ("aileron", AIL, (0.75, 1.0))):
             g = Geo()
             surface(g, ws, x0, x1, a, b, W_T, nu=8)
+            if name == "aileron":
+                for xw in (4.75, 5.35):
+                    wick(g, hinge(ws, xw, 1.0))
             xc = 0.15 if name == "le flap" else 0.75
             p0, p1 = hinge(wing_sect(1), x0, xc), hinge(wing_sect(1), x1, xc)
             g.finish(side + " " + name, pivot=M(p0, s), axis=pair_axis((p1 - p0).normalized(), s))
 
-        # Wingtip launch rail with a Sidewinder on it.
+        # Wingtip launch rail with a Sidewinder on it: a slab with chamfered ends,
+        # the shoe the missile hangs from under it.
         g = Geo()
-        g.box(V((5.80 * s, -2.05, -0.15)), (0.045, 0.85, 0.05), "skin")
+        rings = []
+        for y, hw, top, bot in ((-0.95, 0.012, -0.12, -0.13), (-1.15, 0.045, -0.10, -0.19), (-1.30, 0.048, -0.10, -0.20), (-2.80, 0.048, -0.10, -0.20), (-2.95, 0.04, -0.11, -0.17)):
+            rings.append([V((5.80 * s - hw, y, top)), V((5.80 * s + hw, y, top)), V((5.80 * s + hw, y, bot)), V((5.80 * s - hw, y, bot))])
+        g.loft(rings, "skin")
+        g.box(V((5.86 * s, -2.05, -0.20)), (0.022, 0.70, 0.012), "steel")
         c = V((5.90 * s, -2.75, -0.20))
         lathe(g, c, V((0, 1, 0)), [(0.0, 0.0), (0.0635, 0.0), (0.0635, 2.62)], "missile", n=16)
         lathe(g, c, V((0, 1, 0)), [(0.0635, 2.62), (0.058, 2.72), (0.040, 2.80), (0.0, 2.86)], "seeker", n=16)
@@ -766,17 +855,23 @@ def tail():
     for s, side in ((1, "right"), (-1, "left")):
         g = Geo()
         surface(g, stab_sect(s), 0.85, 3.3, 0.0, 1.0, 0.04, nu=8)
+        for xw in (2.85, 3.22):
+            wick(g, hinge(stab_sect(s), xw, 1.0))
         pv = V((0.85, -6.15, -0.12))
         g.finish(side + " stabilator", pivot=M(pv, s), axis=pair_axis(V((1, 0, -0.033)).normalized(), s))
 
         fs = fin_sect(s)
         g = Geo()
-        surface(g, fs, 0.0, 0.6, 0.0, 0.7, 0.045, nu=6)
+        # Thickened toward its root ahead of the rudder: a fillet into the fuselage.
+        root = lambda u, x: 1.0 + 2.0 * smoothstep(0.16, -0.04, u) ** 2 * (1.0 - smoothstep(0.25, 0.68, x))
+        surface(g, fs, -0.06, 0.6, 0.0, 0.7, 0.045, nu=10, tk=root)
         surface(g, fs, 0.6, 1.0, 0.0, 1.0, 0.045, nu=5)
         # The antenna fairing along the fin's tip, and the formation light strip below it.
         le, c, cdir, out = fs(1.0)
         up = V((math.sin(FIN_CANT) * s, 0, math.cos(FIN_CANT)))
         tube(g, [le + cdir * (c * k) + up * 0.02 for k in (-0.12, 0.1, 0.5, 0.9, 1.12)], lambda t: 0.05 * (1.0 - (2 * t - 1) ** 4) + 0.006, "skin", n=10)
+        wick(g, le + cdir * (c * 1.1) + up * 0.02, up=up)
+        wick(g, le + cdir * (c * 0.98) + up * -0.05, up=up)
         le, c, cdir, out = fs(0.74)
         mid = le + cdir * (c * 0.42)
         for side_k in (1, -1):
@@ -805,21 +900,34 @@ def tail():
 
 
 # ---------------------------------------------------------------- landing gear (modelled down and locked)
-NOSE_PIVOT = V((0, 5.0, -0.50))
+# The nose leg swings forward into its well under the cockpit. Each main leg
+# swings aft while its lower part (oleo, trailing arm, axle) twists about the
+# strut, so the wheel ends up lying almost flat in the well under the intake
+# duct, as on the real aircraft. Everything stays inside the wells, which the
+# doors close over (they open first and shut last: see `anim` in Rust).
+NOSE_PIVOT = V((0, 5.02, -0.42))
 NOSE_AXLE = V((0, 4.80, -1.67))
 NOSE_R = 0.28
-MAIN_PIVOT = V((1.15, -0.25, -0.45))
-MAIN_AXLE = V((1.55, -0.60, -1.57))
+NOSE_STOWED_Z = -0.25  # height of the nose axle with the gear up
+MAIN_PIVOT = V((0.84, -0.24, -0.20))
+MAIN_KNEE = V((1.16, -0.36, -1.24))  # bottom of the strut, where the trailing arm hangs
+MAIN_AXLE = V((1.57, -0.60, -1.57))
+MAIN_ARM_X = 1.38  # the trailing arm runs aft and out to the inboard side of the wheel
 MAIN_R = 0.38
-# where each wheel centre ends up with the gear up
-NOSE_STOWED = V((0, 6.18, -0.32))
-MAIN_STOWED = V((0.85, -1.45, -0.35))
+MAIN_STOW_AT = V((0.56, -1.66, -0.36))  # where the main wheels stow, under the intake ducts
+MAIN_STOW_AXLE = V((0.30, 0.0, 1.0))  # and their axles: nearly upright, the wheels nearly flat
 
 
 def wheel(g, c, r, hw):
     lathe(g, c, V((1, 0, 0)), [(0.0, -hw * 0.85), (r * 0.55, -hw * 0.85), (r * 0.55, -hw), (r - 0.04, -hw), (r, -hw * 0.6), (r, hw * 0.6), (r - 0.04, hw), (r * 0.55, hw), (r * 0.55, hw * 0.85), (0.0, hw * 0.85)], "rubber", n=28)
     lathe(g, c, V((1, 0, 0)), [(0.0, -hw * 0.9), (r * 0.56, -hw * 0.9), (r * 0.56, hw * 0.9), (0.0, hw * 0.9)], "hub", n=20)
     lathe(g, c, V((1, 0, 0)), [(0.0, -hw * 1.02), (r * 0.16, -hw * 1.02), (r * 0.20, -hw * 0.9), (r * 0.20, hw * 0.9), (r * 0.16, hw * 1.02), (0.0, hw * 1.02)], "steel", n=12)
+    # Hub bolts round the flange.
+    for k in range(8):
+        a = 2 * math.pi * k / 8
+        for side in (-1, 1):
+            p = c + V((side * hw * 0.92, math.cos(a) * r * 0.36, math.sin(a) * r * 0.36))
+            g.box(p, (0.008, 0.012, 0.012), "steel")
 
 
 def stow(pivot, down, up):
@@ -832,86 +940,245 @@ def scissors(g, top, bottom, back, m="strut"):
     knee = (top + bottom) / 2 + back
     for a, b in ((top, knee), (knee, bottom)):
         tube(g, [a, b], 0.014, m, n=6)
+    g.box(knee, (0.03, 0.02, 0.02), m)
+
+
+def main_stow():
+    """How a (right) main leg stows: the strut's swing (axis, angle) and the lower
+    part's twist about the strut (angle). Searched for: the wheel lying as flat
+    as it can, its centre near MAIN_STOW_AT, in the well under the intake."""
+    global _STOW
+    if _STOW:
+        return _STOW
+    s = (MAIN_KNEE - MAIN_PIVOT).normalized()
+    want = MAIN_STOW_AXLE.normalized()
+    best = None
+    for el in range(-30, 31, 2):
+        for az in range(-20, 11, 2):
+            e, z = math.radians(el), math.radians(az)
+            s1 = V((math.sin(z) * math.cos(e), -math.cos(z) * math.cos(e), math.sin(e)))
+            ax = s.cross(s1).normalized()
+            sw = s.angle(s1)
+            rs = Matrix.Rotation(sw, 3, ax)
+            for d in range(-180, 180, 2):
+                r = rs @ Matrix.Rotation(math.radians(d), 3, s)
+                a1 = MAIN_PIVOT + r @ (MAIN_AXLE - MAIN_PIVOT)
+                score = abs((r @ V((1, 0, 0))).dot(want)) - 3.0 * (a1 - MAIN_STOW_AT).length
+                if best is None or score > best[0]:
+                    best = (score, ax, sw, s, math.radians(d))
+    _STOW = best[1:]
+    return _STOW
+
+
+_STOW = None
+
+
+def main_stowed(p):
+    """Where point p of the (right) main leg's lower part ends up with the gear up."""
+    ax, sw, s, tw = main_stow()
+    r = Matrix.Rotation(sw, 3, ax) @ Matrix.Rotation(tw, 3, s)
+    return MAIN_PIVOT + r @ (p - MAIN_PIVOT)
 
 
 def gear():
-    # Nose: retracts forward into the nose.
-    ax, ang = stow(NOSE_PIVOT, NOSE_AXLE, NOSE_STOWED)
-    g = Geo()
-    top = NOSE_PIVOT
+    # Nose: swings forward into the well under the cockpit.
+    l = (NOSE_AXLE - NOSE_PIVOT).length
+    dz = NOSE_STOWED_Z - NOSE_PIVOT.z
+    ax, ang = stow(NOSE_PIVOT, NOSE_AXLE, NOSE_PIVOT + V((0, math.sqrt(l * l - dz * dz), dz)))
     along = (NOSE_PIVOT - NOSE_AXLE).normalized()
-    low = NOSE_AXLE + along * 0.32
-    tube(g, [top, low], 0.065, "strut")
-    tube(g, [V((0, 4.25, -0.55)), V((0, 4.93, -1.05))], 0.035, "strut")
-    tube(g, [low + V((0, 0.02, 0.05)), V((0, 5.52, -1.60))], 0.028, "strut")  # launch bar
-    g.box(V((0, 4.99, -1.18)), (0.05, 0.04, 0.04), "landing")
-    g.box(V((0.085, 4.97, -0.98)), (0.03, 0.03, 0.03), "landing")  # taxi light
-    # The forward door rides on the strut.
-    fwd = V((0, 1, 0)) - along * along.y
-    fwd.normalize()
-    g.box(top - along * 0.42 + fwd * 0.10, (0.15, 0.008, 0.36), "door_in", (V((1, 0, 0)), fwd, along))
+    low = NOSE_AXLE + along * 0.34
+    g = Geo()
+    # The trunnion across the top, the strut, the steering collar.
+    tube(g, [NOSE_PIVOT + V((-0.17, 0, 0)), NOSE_PIVOT + V((0.17, 0, 0))], 0.045, "strut", n=10)
+    tube(g, [NOSE_PIVOT, low], 0.068, "strut", n=14)
+    lathe(g, NOSE_PIVOT - along * 0.62, -along, [(0.0, 0.0), (0.095, 0.0), (0.095, 0.12), (0.0, 0.12)], "strut", n=14)
+    # The launch bar, folded up against the front of the strut, and its actuator.
+    fwd = (V((0, 1, 0)) - along * along.y).normalized()
+    bar0 = low + fwd * 0.07 + along * 0.06
+    tube(g, [bar0, bar0 + along * 0.62 + fwd * 0.10], 0.024, "strut", n=8)
+    g.box(bar0 + along * 0.64 + fwd * 0.11, (0.05, 0.03, 0.025), "steel", (V((1, 0, 0)), fwd, along))
+    tube(g, [NOSE_PIVOT - along * 0.25 + fwd * 0.06, bar0 + along * 0.40 + fwd * 0.09], 0.016, "chrome", n=6)
+    # Landing and taxi lights on a bracket ahead of the strut.
+    g.box(NOSE_PIVOT - along * 0.78 + fwd * 0.11, (0.055, 0.03, 0.04), "strut", (V((1, 0, 0)), fwd, along))
+    g.box(NOSE_PIVOT - along * 0.78 + fwd * 0.142, (0.045, 0.004, 0.032), "landing", (V((1, 0, 0)), fwd, along))
+    g.box(NOSE_PIVOT - along * 0.66 + fwd * 0.11 + V((0.09, 0, 0)), (0.025, 0.025, 0.025), "landing", (V((1, 0, 0)), fwd, along))
+    # Hydraulic lines down the back of the strut.
+    for x in (-0.03, 0.03):
+        tube(g, [NOSE_PIVOT + V((x, -0.07, 0)) - along * 0.05, low + V((x, -0.075, 0))], 0.008, "steel", n=5)
     g.finish("nose leg", pivot=NOSE_PIVOT, axis=ax, angle=ang)
 
     down = (NOSE_AXLE - NOSE_PIVOT).normalized()
     g = Geo()
-    tube(g, [low + along * 0.08, NOSE_AXLE], 0.05, "chrome")
+    tube(g, [low + along * 0.10, NOSE_AXLE], 0.052, "chrome", n=12)
+    g.box(NOSE_AXLE + along * 0.04, (0.07, 0.05, 0.05), "strut")
     tube(g, [NOSE_AXLE + V((-0.22, 0, 0)), NOSE_AXLE + V((0.22, 0, 0))], 0.03, "strut")
-    scissors(g, low + V((0, -0.05, 0)), NOSE_AXLE + along * 0.06 + V((0, -0.04, 0)), V((0, -0.13, 0)))
-    g.finish("nose fork", pivot=NOSE_AXLE, axis=down)
+    scissors(g, low + V((0, -0.06, 0)), NOSE_AXLE + along * 0.06 + V((0, -0.05, 0)), V((0, -0.13, 0)))
+    g.finish("nose fork", pivot=NOSE_AXLE, axis=down, parent="nose leg")
 
     g = Geo()
     for x in (-0.13, 0.13):
         wheel(g, NOSE_AXLE + V((x, 0, 0)), NOSE_R, 0.075)
-    g.finish("nose wheel", pivot=NOSE_AXLE, axis=V((1, 0, 0)))
+    g.finish("nose wheel", pivot=NOSE_AXLE, axis=V((1, 0, 0)), parent="nose fork")
 
-    # Mains: swing aft and in under the intakes.
+    # Mains.
+    ax, sw, sax, tw = main_stow()
+    s_dir = (MAIN_KNEE - MAIN_PIVOT).normalized()
+    mid = MAIN_PIVOT + (MAIN_KNEE - MAIN_PIVOT) * 0.52
+    arm_end = V((MAIN_ARM_X, MAIN_AXLE.y, MAIN_AXLE.z))
     for s, side in ((1, "right"), (-1, "left")):
-        ax, ang = stow(MAIN_PIVOT, MAIN_AXLE, MAIN_STOWED)
+        # The strut's outer cylinder, the trunnion it swings on, the retraction
+        # actuator's lug.
         g = Geo()
-        a = M(MAIN_AXLE, s)
-        strut = (MAIN_PIVOT - MAIN_AXLE).normalized()
-        knee = M(MAIN_AXLE + strut * 0.12, s)
-        tube(g, [M(MAIN_PIVOT, s), knee], 0.08, "strut")
-        tube(g, [M(V((1.0, 0.40, -0.50)), s), M(V((1.42, -0.45, -1.10)), s)], 0.04, "strut")
-        tube(g, [M(V((0.80, -0.75, -0.48)), s), M(MAIN_AXLE + strut * 0.55, s)], 0.03, "strut")  # side brace
-        tube(g, [knee, a + V((-0.10 * s, 0, 0))], 0.06, "chrome")
-        scissors(g, M(MAIN_AXLE + strut * 0.50 + V((0, -0.07, 0)), s), a + V((-0.10 * s, -0.06, 0.02)), V((0, -0.16, 0)))
-        # The strut door rides on the leg, outboard of it.
-        sd = M(strut, s)
-        out = V((s, 0, 0)) - sd * (sd.x * s)
-        out.normalize()
-        g.box(M(MAIN_AXLE + strut * 0.62, s) + out * 0.12, (0.008, 0.17, 0.40), "door_in", (out, sd.cross(out), sd))
-        g.finish(side + " main leg", pivot=M(MAIN_PIVOT, s), axis=pair_axis(ax, s), angle=ang)
+        tube(g, [M(MAIN_PIVOT + V((0, 0.16, 0.02)), s), M(MAIN_PIVOT + V((0, -0.16, -0.02)), s)], 0.05, "strut", n=10)
+        tube(g, [M(MAIN_PIVOT, s), M(mid, s)], 0.088, "strut", n=14)
+        lathe(g, M(mid, s), M(-s_dir, s), [(0.0, 0.0), (0.105, 0.0), (0.105, 0.07), (0.0, 0.07)], "strut", n=14)
+        lug = MAIN_PIVOT + s_dir * 0.22 + V((0, -0.10, 0))
+        g.box(M(lug, s), (0.03, 0.05, 0.05), "strut")
+        for x in (-0.035, 0.035):
+            tube(g, [M(MAIN_PIVOT + V((x, -0.09, 0)), s), M(mid + V((x, -0.10, 0)), s)], 0.009, "steel", n=5)
+        g.finish(side + " main leg", pivot=M(MAIN_PIVOT, s), axis=pair_axis(ax, s), angle=sw)
+
+        # The lower part, which twists as the leg swings up: the oleo, the
+        # trailing arm and its shock link, the axle and brake.
+        g = Geo()
+        tube(g, [M(mid - s_dir * 0.05, s), M(MAIN_KNEE, s)], 0.062, "chrome", n=12)
+        sd = M(s_dir, s)
+        bx = (V((1, 0, 0)) - sd * sd.x).normalized()
+        g.box(M(MAIN_KNEE, s), (0.06, 0.06, 0.07), "strut", (bx, sd.cross(bx), sd))
+        tube(g, [M(MAIN_KNEE, s), M(arm_end, s)], 0.055, "strut", n=10)
+        tube(g, [M(mid.lerp(MAIN_KNEE, 0.45) + V((0.0, -0.07, 0)), s), M(MAIN_KNEE.lerp(arm_end, 0.7) + V((0, 0, 0.05)), s)], 0.032, "strut", n=8)
+        tube(g, [M(arm_end + V((-0.02, 0, 0)), s), M(MAIN_AXLE + V((0.13, 0, 0)), s)], 0.04, "steel", n=10)
+        lathe(g, M(MAIN_AXLE + V((-0.115, 0, 0)), s), V((s, 0, 0)), [(0.0, 0.0), (0.17, 0.0), (0.17, 0.05), (0.0, 0.05)], "steel", n=16)
+        scissors(g, M(mid + s_dir * 0.08 + V((0, 0.07, 0)), s), M(MAIN_KNEE + V((0, 0.07, 0.04)), s), M(V((0.02, 0.15, 0)), s))
+        g.finish(side + " main strut", pivot=M(MAIN_PIVOT, s), axis=pair_axis(sax, s), angle=tw, parent=side + " main leg")
 
         g = Geo()
-        wheel(g, a + V((0.02 * s, 0, 0)), MAIN_R, 0.14)
-        g.finish(side + " main wheel", pivot=a, axis=V((1, 0, 0)))
+        wheel(g, M(MAIN_AXLE, s), MAIN_R, 0.14)
+        g.finish(side + " main wheel", pivot=M(MAIN_AXLE, s), axis=V((1, 0, 0)), parent=side + " main strut")
+    a1 = main_stowed(MAIN_AXLE)
+    print(f"main gear: swing {math.degrees(sw):.0f} deg, twist {math.degrees(tw):.0f} deg, wheel stowed at {tuple(round(c, 3) for c in a1)}, axle {tuple(round(c, 2) for c in main_stowed(MAIN_AXLE + V((1, 0, 0))) - a1)}")
 
 
-def door(name, h0, h1, d_open, d_closed, outside):
-    """A gear door hinged along h0..h1, modelled open (its free edge `d_open` from
-    the hinge); it closes to `d_closed`, just inside the skin. Painted on the
-    face toward `outside`, white on the other."""
+def skin_door(name, s, x0, x1, y0, y1, hinge_x, open_angle, nx=10, ny=12, t=0.014):
+    """A gear door cut from the skin itself (x0..x1 out from the centreline on
+    side s, stations y0..y1), so that shut it lies flush in its opening; hinged
+    along the line x = hinge_x. Modelled open: it turns by open_angle about the
+    hinge, its free edge going down. x1 may be a function of y (the edge of an
+    opening that widens)."""
+    xe = x1 if callable(x1) else (lambda y: x1)
+    ys = [lerp(y0, y1, k / ny) for k in range(ny + 1)]
+    outer = [[V((s * x, y, fuse_z(y, x, upper=False) - 0.002)) for x in (lerp(x0, xe(y), (1 - math.cos(math.pi * k / nx)) / 2) for k in range(nx + 1))] for y in ys]
+
+    def inward(p):
+        mid = table_at(FUSE, p.y)[3]
+        return p + (V((0, p.y, mid)) - p).normalized() * t
+
+    inner = [[inward(p) for p in row] for row in outer]
     g = Geo()
-    g.plate([h0, h1, h1 + d_open, h0 + d_open], outside, 0.008, "skin", m_back="door_in")
-    ax, ang = stow(h0, h0 + d_open, h0 + d_closed)
-    along = (h1 - h0).normalized()
-    g.finish(name, smooth=20, pivot=h0, axis=along if along.dot(ax) > 0 else -along, angle=ang)
+    vo = [[g.bm.verts.new(p) for p in row] for row in outer]
+    vi = [[g.bm.verts.new(p) for p in row] for row in inner]
+    for j in range(ny):
+        for i in range(nx):
+            g.face([vo[j][i], vo[j][i + 1], vo[j + 1][i + 1], vo[j + 1][i]], "skin")
+            g.face([vi[j][i], vi[j + 1][i], vi[j + 1][i + 1], vi[j][i + 1]], "door_in")
+    rim = [(j, 0) for j in range(ny)] + [(ny, i) for i in range(nx)] + [(j, nx) for j in range(ny, 0, -1)] + [(0, i) for i in range(nx, 0, -1)]
+    for (ja, ia), (jb, ib) in zip(rim, rim[1:] + rim[:1]):
+        g.face([vo[ja][ia], vo[jb][ib], vi[jb][ib], vi[ja][ia]], "door_in")
+    h0 = V((s * hinge_x, y0, fuse_z(y0, hinge_x, upper=False)))
+    h1 = V((s * hinge_x, y1, fuse_z(y1, hinge_x, upper=False)))
+    axis = (h1 - h0).normalized()
+    xf = x0 + xe((y0 + y1) / 2) - hinge_x
+    free = V((s * xf, (y0 + y1) / 2, fuse_z((y0 + y1) / 2, xf, upper=False)))
+    rot = Matrix.Translation(h0) @ Matrix.Rotation(open_angle, 4, axis) @ Matrix.Translation(-h0)
+    if (rot @ free).z > free.z:
+        axis = -axis
+        rot = Matrix.Translation(h0) @ Matrix.Rotation(open_angle, 4, axis) @ Matrix.Translation(-h0)
+    for v in g.bm.verts:
+        v.co = rot @ v.co
+    # A hinge bracket or two along the hinge line, inside.
+    for f in (0.2, 0.8):
+        hp = h0.lerp(h1, f)
+        g.box(hp + V((0, 0, 0.03)), (0.02, 0.03, 0.03), "well")
+    g.finish(name, smooth=30, pivot=h0, axis=axis, angle=-open_angle, recalc=False)
 
 
 def doors():
+    hw, ny0, ny1, _ = NOSE_WELL
+    xi, my0, my1, _ = MAIN_WELL
+    gap = 0.005
     for s, side in ((1, "right"), (-1, "left")):
-        # Nose: one each side of the well, hanging down beside the leg.
-        z = lambda y: fuse_z(y, 0.26, upper=False) + 0.006
-        door(side + " nose door", V((0.26 * s, 6.40, z(6.40))), V((0.26 * s, 5.05, z(5.05))), V((0.05 * s, 0, -0.25)), V((-0.255 * s, 0, -0.015)), V((s, 0, 0)))
-        # Mains: hinged inboard under the intake, hanging between the leg and the belly.
-        door(side + " main door", V((0.84 * s, 0.30, -0.672)), V((0.84 * s, -1.20, -0.672)), V((-0.04 * s, 0, -0.28)), V((0.283 * s, 0, 0.0)), V((-s, 0, 0)))
+        # Nose: a pair meeting on the centreline, hinged at the well's sides.
+        skin_door(side + " nose door", s, gap, hw - gap, ny1 - gap, ny0 + gap, hw, math.radians(86))
+        # Mains, hinged along the inboard edge: a short door beside the strut that
+        # stays open, and the long one behind it that shuts again once the leg
+        # is down (Rust `anim`).
+        xo = lambda y: main_well_out(y) - gap
+        skin_door(side + " strut door", s, xi + gap, xo, my0 - gap, MAIN_DOOR_SPLIT + gap, xi, math.radians(92), nx=14, ny=5)
+        skin_door(side + " main door", s, xi + gap, xo, MAIN_DOOR_SPLIT - gap, my1 + gap, xi, math.radians(92), nx=14)
+
+
+def check_gear():
+    """Sweep the gear from up to down (as Rust `anim` moves it: the legs and the
+    main struts' twist over 0.15..0.85) and report any gear vertex inside the
+    fuselage's skin but outside the wells, or, stowed, not tucked in behind
+    the doors. Run on every export: a hand edit that makes the gear poke
+    through the skin shows up here."""
+    obs = {o.name: o for o in COLL.all_objects}
+
+    def local(n, g):
+        o = obs[n]
+        a = o.get("angle", 0.0)
+        if abs(a) < 1e-6 or not (n.endswith(" leg") or n.endswith("main strut")):
+            return Matrix.Identity(4)
+        a *= 1 - smoothstep(0.15, 0.85, g)
+        p = V(o["pivot"])
+        return Matrix.Translation(p) @ Matrix.Rotation(a, 4, V(o["axis"])) @ Matrix.Translation(-p)
+
+    def world(n, g):
+        par = obs[n].get("parent")
+        return (world(par, g) if par else Matrix.Identity(4)) @ local(n, g)
+
+    def depth(p):
+        """How far inside the skin p is (negative: outside)."""
+        if not FUSE[-1][0] < p.y < FUSE[0][0]:
+            return -1.0
+        return min(p.z - fuse_z(p.y, p.x, False), fuse_z(p.y, p.x, True) - p.z, fuse_hw(p.y, p.z) - abs(p.x))
+
+    def in_well(p):
+        hw, y0, y1, zt = NOSE_WELL
+        if abs(p.x) < hw and y0 < p.y < y1 and p.z < zt:
+            return True
+        xi, y0, y1, zt = MAIN_WELL
+        return xi < abs(p.x) < main_well_x(p.y, p.z) and y1 < p.y < y0 and p.z < zt
+
+    gear = [n for n in obs if "door" not in n and any(k in n for k in ("leg", "strut", "wheel", "fork"))]
+    bad = 0
+    for k in range(21):
+        g = k / 20
+        for n in gear:
+            m = world(n, g) @ obs[n].matrix_world
+            worst, at = 0.0, None
+            for v in obs[n].data.vertices:
+                p = m @ v.co
+                d = depth(p)
+                e = 0.0
+                if d > 0.0 and not in_well(p):
+                    e = 1.0  # inside the fuselage, out of its well
+                if g == 0.0 and d < 0.018:
+                    e = max(e, 0.018 - d)  # stowed: inside the skin, clear of the shut doors
+                if e > worst:
+                    worst, at = e, v.co
+            if worst > 0.005:
+                bad += 1
+                what = "out of its well" if worst >= 1.0 else f"{worst * 100:.0f} cm outside the skin"
+                print(f"  gear check: {n} at gear {g:.2f}: {what} (vertex at {tuple(round(c, 2) for c in at)} as modelled)")
+    print("gear check:", "clear of the skin all the way up and down" if not bad else f"{bad} clashes")
 
 
 # ---------------------------------------------------------------- export
 # Every piece the game looks for (PIECES in src/aircraft/fa18/mod.rs); other objects are ignored.
-EXPECTED = ["radome", "nose section", "fuselage", "tail cone", "spine", "canopy", "canopy frame", "cockpit", "speedbrake", "tail light", "nose leg", "nose fork", "nose wheel", "afterburner"] + [
-    f"{s} {n}" for s in ("left", "right") for n in ("intake", "lex", "nozzle", "wing", "le flap", "flap", "aileron", "tip rail", "nav light", "stabilator", "fin", "rudder", "main leg", "main wheel", "nose door", "main door")]
+EXPECTED = ["radome", "nose section", "fuselage", "tail cone", "spine", "canopy", "canopy frame", "speedbrake", "tail light", "nose leg", "nose fork", "nose wheel", "afterburner"] + [
+    f"{s} {n}" for s in ("left", "right") for n in ("intake", "lex", "nozzle", "wing", "le flap", "flap", "aileron", "tip rail", "nav light", "stabilator", "fin", "rudder", "main leg", "main strut", "main wheel", "nose door", "strut door", "main door")]
 
 
 def game_mat(m):
@@ -1026,7 +1293,7 @@ def render_guides(outdir):
     sc.world = world
     sh = sc.display.shading
     # Gear up and nothing on the rails: only what the paint goes on.
-    hidden = [o for o in COLL.all_objects if any(k in o.name for k in ("leg", "wheel", "fork", "door", "tip rail", "afterburner"))]
+    hidden = [o for o in COLL.all_objects if any(k in o.name for k in ("leg", "strut", "wheel", "fork", "door", "tip rail", "afterburner"))]
     for o in hidden:
         o.hide_render = True
     cam, cam_data = camera()
@@ -1057,18 +1324,23 @@ def render_guides(outdir):
 
 
 def main():
-    global COLL
+    global COLL, CUTS
     if EXPORT_ONLY:
         # Export the .blend that is open, edits and all, without rebuilding anything.
         COLL = bpy.data.collections.get("FA-18C")
         if COLL is None:
             raise SystemExit("fa18 export: no 'FA-18C' collection in this file (open assets/blender/fa18.blend)")
         export(os.path.join(ASSETS, "fa18.bin.gz"))
+        check_gear()
     else:
         for ob in list(bpy.data.objects):
             bpy.data.objects.remove(ob, do_unlink=True)
+        for c in list(bpy.data.collections):
+            bpy.data.collections.remove(c)
         COLL = bpy.data.collections.new("FA-18C")
         bpy.context.scene.collection.children.link(COLL)
+        CUTS = bpy.data.collections.new("FA-18C well cutters")
+        bpy.context.scene.collection.children.link(CUTS)
         make_materials()
         fuselage()
         intakes()
@@ -1081,7 +1353,9 @@ def main():
         doors()
         plume()
         os.makedirs(os.path.join(ASSETS, "blender"), exist_ok=True)
+        bpy.context.preferences.filepaths.save_version = 0  # no fa18.blend1 beside it
         export(os.path.join(ASSETS, "fa18.bin.gz"))
+        check_gear()
         bpy.ops.wm.save_as_mainfile(filepath=os.path.join(ASSETS, "blender", "fa18.blend"))
     if RENDER:
         render_previews(RENDER)

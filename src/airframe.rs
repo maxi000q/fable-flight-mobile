@@ -53,6 +53,13 @@ pub mod pat {
     pub const LEGEND: f32 = 14.0; // printed panel legend, button face or scale: extra = style + 16 * string (b747::deck)
     pub const FLEECE: f32 = 15.0; // sheepskin seat cover
     pub const SPINNER: f32 = 16.0; // a jet engine's spinner (747: the swirl)
+    // 17 is the Hornet's painted skin (fa18.py); the rest are its cockpit (fa18/pit.rs):
+    pub const PIT: f32 = 18.0; // painted cockpit structure: orange peel, scuffs, grime
+    pub const MESH: f32 = 19.0; // open-weave seat cushion fabric (uv in metres)
+    pub const WEBBING: f32 = 20.0; // harness webbing: uv = (across, along) in metres
+    pub const NONSLIP: f32 = 21.0; // gritty floor coating
+    pub const STRIPE: f32 = 22.0; // yellow and black hazard stripes: extra = pitch (m); negative: rings along uv.y
+    pub const HOSE: f32 = 23.0; // corrugated hose: ribs along uv.y
 }
 /// Light ids (vertex `mat.w` on LAMP); keep in step with plane.wgsl.
 pub mod lamp {

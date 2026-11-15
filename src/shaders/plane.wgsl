@@ -28,6 +28,8 @@ const M_SATIN = 15u; const M_PROPDISC = 16u; const M_PLUME = 17u;
 const P_FUSE = 1u; const P_WING = 2u; const P_CTRL = 3u; const P_COWL = 4u; const P_TAIL = 5u; const P_TREAD = 6u;
 const P_LINING = 7u; const P_SEAT = 8u; const P_CARPET = 9u; const P_PANEL = 10u; const P_PLACARD = 11u; const P_KNURL = 12u;
 const P_NACELLE = 13u; const P_LEGEND = 14u; const P_FLEECE = 15u; const P_SPINNER = 16u; const P_HORNET = 17u;
+// The Hornet's cockpit (aircraft/fa18/pit.rs, pit18.wgsl).
+const P_PIT = 18u; const P_MESH = 19u; const P_WEBBING = 20u; const P_NONSLIP = 21u; const P_STRIPE = 22u; const P_HOSE = 23u;
 
 // The Hornet's paint (assets/fa18_paint.jpg): it seen from above, from below
 // and from the left, one layer each.
@@ -667,7 +669,34 @@ fn relief(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
       h += 0.0004 * nz(L * 60.0).g * (1.0 - smoothstep(0.0005, 0.002, px));
     }
     case 9u: { h += 0.0015 * nz(L * 45.0).r * (1.0 - smoothstep(0.001, 0.004, px)); }
-    case 10u: { h += 0.0002 * nz(L * 160.0).r * (1.0 - smoothstep(0.0003, 0.0012, px)); }
+    case 18u: { // cockpit paint: orange peel
+      h += 0.00010 * nz(L * 110.0).r * (1.0 - smoothstep(0.0002, 0.0009, px));
+    }
+    case 19u: { // open-weave mesh fabric: raised threads round small holes
+      let q = uv / 0.0026;
+      let f = abs(fract(q) - 0.5) * 2.0;
+      let thread = max(smoothstep(0.55, 0.9, f.x), smoothstep(0.55, 0.9, f.y));
+      let fade = 1.0 - smoothstep(0.0003, 0.0012, px);
+      h += 0.0004 * thread * fade + 0.0012 * nz(L * 18.0).g;
+      dirt += (1.0 - thread) * 0.7 * fade;
+    }
+    case 20u: { // webbing: a twill weave, stitching along both edges
+      let tw = sin((uv.y + uv.x * 0.6) * 2400.0);
+      let fade = 1.0 - smoothstep(0.0002, 0.0008, px);
+      h += 0.00012 * tw * fade;
+      let st = step(0.5, fract(uv.y / 0.004)) * line(abs(abs(uv.x) - 0.017), 0.0006);
+      h -= 0.0002 * st * fade;
+      dirt += st * 0.5 * fade;
+    }
+    case 21u: { // anti-skid grit
+      h += 0.0005 * nz(L * 190.0).r * (1.0 - smoothstep(0.0003, 0.0012, px));
+    }
+    case 23u: { // corrugated hose
+      let r = sin(uv.y * 6.2831853 / 0.0065);
+      h += 0.0011 * r * (1.0 - smoothstep(0.0006, 0.0025, px));
+      dirt += smoothstep(0.6, 1.0, -r) * 0.4;
+    }
+    case 10u: { h += select(0.0002, 0.00006, kind() == 2u) * nz(L * 160.0).r * (1.0 - smoothstep(0.0003, 0.0012, px)); }
     case 12u: { h += 0.00025 * sin((L.x + L.y * 1.3 + L.z * 0.7) * 2600.0) * (1.0 - smoothstep(0.0002, 0.0008, px)); }
     case 6u: { // tyre tread: circumferential grooves
       var c = vec3f(sign(L.x) * 1.25, -1.31, 0.30);
@@ -779,6 +808,14 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
         redline = 365.0;
         nd[0] = vec4f(dial(P0.x, 60.0, 450.0, a0, a1), 0.86, 0.035, 0.18);
       }
+      if (kind() == 2u) {
+        // The Hornet's standby airspeed: 50 to 850 kt.
+        a0 = rad(10.0); vmin = 50.0; vmax = 850.0; tn = 32.0; tper = 4.0;
+        ln = 8.0; lfirst = 100.0; lstep = 100.0; ldiv = 10.0;
+        arcs[0] = vec4f(0.0); arcs[1] = vec4f(0.0); arcs[2] = vec4f(0.0);
+        redline = -1e9;
+        nd[0] = vec4f(dial(P0.x, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
+      }
     }
     case 2u: { // altimeter: hundreds, thousands, ten thousands, pressure window
       a0 = 0.0; a1 = rad(360.0); vmax = 10.0; tn = 50.0; tper = 5.0;
@@ -796,6 +833,16 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
       a0 = rad(-260.0); a1 = rad(80.0); vmin = -2000.0; vmax = 2000.0; tn = 40.0; tper = 5.0;
       ln = 9.0; lfirst = -2000.0; lstep = 500.0; ldiv = 100.0;
       nd[0] = vec4f(dial(P0.z, vmin, vmax, a0, a1), 0.86, 0.035, 0.18); nn = 1;
+      if (kind() == 2u) {
+        vmin = -6000.0; vmax = 6000.0; lfirst = -6000.0; lstep = 2000.0; ln = 7.0; ldiv = 1000.0; tn = 24.0; tper = 4.0;
+        nd[0] = vec4f(dial(P0.z, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
+      }
+    }
+    case 21u: { // the Hornet's brake accumulator pressure, psi x 1000
+      a0 = rad(-120.0); a1 = rad(120.0); vmin = 0.0; vmax = 4.0; tn = 8.0; tper = 2.0;
+      ln = 5.0; lfirst = 0.0; lstep = 1.0; lr = 0.58; lh = 0.2;
+      arcs[0] = vec4f(2.0, 3.2, 0.88, 0.95); arc_col[0] = vec3f(0.05, 0.4, 0.08);
+      nd[0] = vec4f(dial(3.0, vmin, vmax, a0, a1), 0.84, 0.045, 0.15); nn = 1;
     }
     case 6u: { // tachometer with its hour meter
       a0 = rad(-135.0); a1 = rad(135.0); vmax = 3500.0; tn = 35.0; tper = 5.0;
@@ -1249,6 +1296,31 @@ fn surface(in: VOut) -> Shaded {
         albedo = mix(albedo, vec3f(0.12, 0.09, 0.03), bugs * 0.7);
         ssr = 1.0;
       }
+      if (pt == P_PIT) {
+        // The Hornet's cockpit grey: satin, worn where boots and elbows go,
+        // grimier low down, scuffed through to lighter primer here and there.
+        rough = 0.55 + 0.12 * fine.g;
+        albedo *= 0.9 + 0.2 * nz(L * 3.1).r;
+        albedo *= mix(0.7, 1.0, sat((L.y - FLOOR18) / 0.35));
+        let sc = smoothstep(0.80, 0.9, nz(vec3f(L.x * 34.0, L.y * 34.0, L.z * 5.0)).r) * smoothstep(0.45, 0.7, nz(L * 4.3).b);
+        albedo = mix(albedo, albedo * 1.8 + vec3f(0.03), sc * 0.6);
+        rough = mix(rough, 0.4, sc);
+        albedo = mix(albedo, albedo * 0.6, smoothstep(0.62, 0.85, nz(L * 9.0).g) * 0.4);
+      }
+      if (pt == P_NONSLIP) {
+        rough = 0.92;
+        spec_k = 0.4;
+        albedo *= 0.8 + 0.4 * nz(L * 60.0).r;
+        albedo = mix(albedo, vec3f(0.06, 0.055, 0.05), smoothstep(0.5, 0.8, nz(L * 7.0).g) * 0.5);
+      }
+      if (pt == P_STRIPE) {
+        // Yellow and black: diagonal on a face, rings along a tube or strap.
+        let w = in.mat.w;
+        let t = select(in.uv.x + in.uv.y, in.uv.y, w < 0.0) / max(abs(w), 1e-4);
+        let blk = smoothstep(0.47, 0.53, abs(fract(t) - 0.5) * 2.0 + 0.0);
+        albedo = mix(albedo, vec3f(0.012), blk) * (0.85 + 0.25 * fine.r);
+        rough = 0.35 + 0.15 * fine.g;
+      }
       if (kind() == 1u && (id == 1u || pt == P_SPINNER)) {
         let fn_ = skin747(Fin(albedo, rough, metal), pt, L, in.Nl, in.uv, in.wear, px);
         albedo = fn_.c;
@@ -1316,6 +1388,8 @@ fn surface(in: VOut) -> Shaded {
         albedo = mix(albedo, lg.col, lg.a);
         rough = mix(rough, 0.35, lg.a);
         emit = (lg.glow * mix(0.0, 0.004, night) + lg.lit * mix(0.05, 0.012, night)) * G.sun_dir.w;
+        // (The Hornet's panels are edge-lit in NVG green.)
+        if (kind() == 2u) { emit *= vec3f(0.55, 1.0, 0.62); }
       }
       if (pt == P_LINING && kind() == 1u) {
         // The flight deck's lining: matte, stippled plastic.
@@ -1328,6 +1402,12 @@ fn surface(in: VOut) -> Shaded {
         albedo *= 0.92 + 0.12 * nz(L * 37.0).r;
         albedo = mix(albedo, albedo * 0.7, smoothstep(0.62, 0.85, nz(L * 6.0).g) * 0.5);
       }
+      if (pt == P_PANEL && kind() == 2u) {
+        // Black lacquered panels: satin, dusty where they face up, rubbed shiny here and there.
+        rough = 0.45 + 0.12 * fine.g - 0.12 * smoothstep(0.75, 0.92, nz(L * 23.0).r);
+        albedo *= 0.94 + 0.12 * nz(L * 41.0).r;
+        albedo = mix(albedo, vec3f(0.055, 0.054, 0.052), smoothstep(0.55, 0.85, nz(L * 13.0).g) * sat(in.Nl.y * 2.0) * 0.18);
+      }
       if (pt == P_PLACARD) {
         let t = fract(in.uv * vec2f(220.0, 340.0));
         let txt = step(0.3, t.y) * step(t.y, 0.72) * step(0.45, nz(vec3f(in.uv * 300.0, 0.5)).r);
@@ -1338,6 +1418,15 @@ fn surface(in: VOut) -> Shaded {
       rough = 0.95;
       spec_k = 0.15;
       albedo *= cav * (0.9 + 0.2 * fine.r);
+      if (pt == P_MESH) {
+        // Olive mesh: the holes dark, the weave faded by the sun unevenly.
+        albedo *= (1.0 - rel.y * 0.55) * (0.85 + 0.3 * nz(L * 3.7).g);
+        albedo = mix(albedo, albedo * vec3f(1.15, 1.1, 1.25), smoothstep(0.5, 0.8, nz(L * 1.3).r) * 0.5);
+      }
+      if (pt == P_WEBBING) {
+        albedo *= (1.0 - rel.y * 0.4) * (0.9 + 0.2 * nz(L * 9.0).r);
+        spec_k = 0.3;
+      }
       if (pt == P_FLEECE) {
         // Sheepskin: tufts of wool, lighter at their tips.
         let tuft = nz(L * 70.0);
@@ -1369,15 +1458,6 @@ fn surface(in: VOut) -> Shaded {
       if (ch == 5u) { emit *= 0.6 + 0.4 * smoothstep(1.0, 0.0, length(in.uv)); }
       albedo = in.col.rgb * 0.15;
       if (ch == 9u) { albedo = vec3f(0.40, 0.43, 0.27); rough = 0.4; }
-      if (ch == 8u && kind() == 2u) {
-        // The Hornet's displays: rows of green symbology on a dark screen, a frame round each.
-        let cell = vec2f(L.x * 105.0, L.y * 62.0);
-        let row = step(0.22, fract(cell.y)) * step(fract(cell.y), 0.62);
-        let word = step(0.52, hash2(floor(cell) + 7.0)) * step(hash2(floor(cell * vec2f(0.25, 1.0)) + 3.0), 0.8);
-        let fade = 1.0 - smoothstep(0.0015, 0.006, px);
-        emit *= mix(0.30, 0.05 + 1.5 * row * word, fade);
-        albedo = vec3f(0.006, 0.010, 0.008);
-      }
       ssr = 0.5;
     }
     case 9u: { // instrument face under glass
@@ -1469,7 +1549,13 @@ fn surface(in: VOut) -> Shaded {
       albedo = vec3f(0.01);
       rough = 0.05;
       let did = u32(in.mat.w + 0.5);
-      if (did >= 20u) {
+      if (did >= 40u) {
+        // The Hornet's DDIs, AMPCD, UFC windows and IFEI (pit18.wgsl).
+        emit = display18(did, in.uv, duv) * G.sun_dir.w * mix(0.06, 0.009, night);
+        albedo = vec3f(0.010, 0.012, 0.012);
+        rough = 0.1;
+        ssr = 0.3;
+      } else if (did >= 20u) {
         // The 747's CRTs: bright enough by day, turned down at night.
         emit = display747(did, in.uv, duv) * G.sun_dir.w * mix(0.07, 0.01, night);
         albedo = vec3f(0.012, 0.014, 0.016);
@@ -1555,7 +1641,7 @@ fn surface(in: VOut) -> Shaded {
   var inside = step(abs(L.x), 0.58) * step(-1.42, L.z) * step(L.z, 1.5) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL);
   if (kind() == 1u) { inside = step(abs(L.x), 2.2) * step(-29.0, L.z) * step(L.z, -22.4) * step(1.9, L.y) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE); }
   // The Hornet's cockpit tub, under its canopy.
-  if (kind() == 2u) { inside = step(abs(L.x), 0.5) * step(-6.1, L.z) * step(L.z, -3.1) * step(0.1, L.y) * select(0.0, 1.0, pt != P_HORNET); }
+  if (kind() == 2u) { inside = step(abs(L.x), 0.56) * step(-6.2, L.z) * step(L.z, -3.1) * step(0.0, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   // (The baked occlusion already counts only the sky seen through the
   // windows; the eye adapts to the dimmer cabin, main.rs / cockpit.rs.)
   let amb_ao = mix(ao * ao * (3.0 - 2.0 * ao), 0.06 + 0.94 * ao, inside);
@@ -1650,6 +1736,8 @@ const GS_Z = -1.30; // cabin::PANEL_Z
     let _b = back;
     return vec4f(col * lit * alpha, alpha);
   }
+  // The Hornet's HUD combiner: the symbology, focused at infinity.
+  if (kind() == 2u && in.L.y > 0.86 && abs(in.L.x) < 0.1 && in.L.z > -5.3 && in.L.z < -5.15) { return hud18(in, px); }
   let d = window(in.L);
   let cov = 1.0 - smoothstep(-px, px, d);
   if (cov <= 0.0) { discard; }
@@ -1661,6 +1749,7 @@ const GS_Z = -1.30; // cabin::PANEL_Z
   let eye_l = -(ml * O.model[3].xyz);
   var in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > -0.5 && eye_l.y < 0.85 && eye_l.z > -1.3 && eye_l.z < 1.6;
   if (kind() == 1u) { in_cabin = from_inside && abs(eye_l.x) < 1.6 && eye_l.y > 2.2 && eye_l.y < 4.8 && eye_l.z > -28.5 && eye_l.z < -22.5; }
+  if (kind() == 2u) { in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > 0.2 && eye_l.y < 1.5 && eye_l.z > -6.3 && eye_l.z < -2.6; }
   let wind = abs(in.Nl.x) < 0.5;
   let tb = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), wind);
   let bb = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.454, 0.891), wind);
@@ -1669,7 +1758,10 @@ const GS_Z = -1.30; // cabin::PANEL_Z
   var env = l.amb * 0.035;
   if (!from_inside) { env = env_reflect(in.P, R, l.upn, true); }
   // A sheet has two faces, and from inside both mirror the cabin.
-  if (in_cabin) { env = select(cabin_mirror(in.L, ml * R, l, ml * Ls), deck_mirror(in.L, ml * R, l, ml * Ls), kind() == 1u) * 2.0 / (1.0 + F); }
+  if (in_cabin) {
+    env = select(cabin_mirror(in.L, ml * R, l, ml * Ls), deck_mirror(in.L, ml * R, l, ml * Ls), kind() == 1u) * 2.0 / (1.0 + F);
+    if (kind() == 2u) { env = pit_mirror(in.L, ml * R, l, ml * Ls) * 2.0 / (1.0 + F); }
+  }
   let H = normalize(Ls - V);
   let ndl = max(dot(N, Ls), 0.0);
   let glint = l.sun * ggx(max(dot(N, H), 0.0), 0.02) * vis(max(ndv, 1e-3), ndl, 0.02) * ndl * sh * (0.04 + 0.96 * pow(1.0 - max(dot(-V, H), 0.0), 5.0));
@@ -1783,6 +1875,8 @@ const GS_Z = -1.30; // cabin::PANEL_Z
     if (wind && L.z < -0.95 && kind() == 0u) { tint *= mix(vec3f(1.0), vec3f(0.62, 0.72, 0.69), smoothstep(0.64, 0.77, L.y)); }
     // The 747's laminated, electrically heated glass: a faint green-blue, deeper toward the frame.
     if (kind() == 1u) { tint = mix(vec3f(0.93, 0.965, 0.955), vec3f(0.80, 0.88, 0.86), 1.0 - smoothstep(0.0, 0.05, -d)); }
+    // The Hornet's stretched acrylic canopy: a faint warm tint.
+    if (kind() == 2u) { tint = vec3f(0.95, 0.95, 0.91); }
     let edge = 1.0 - smoothstep(0.0, 0.08, -d);
     let curve = select(0.0, smoothstep(0.12, 0.45, abs(in.Nl.x)), wind);
     // (The 747's laminated glass is far flatter than formed acrylic: a faint waviness only.)

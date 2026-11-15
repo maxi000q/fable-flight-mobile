@@ -787,9 +787,12 @@ impl Game {
             let tat = oat + (oat + 273.15) * 0.2 * mach * mach;
             let x = ((p.n1 - 0.2) / 0.82).clamp(0.0, 1.2);
             let running = (p.n1 / 0.15).clamp(0.0, 1.0);
-            let egt = oat + (440.0 - oat + 200.0 * x.powf(1.4)) * running;
-            let ff = (550.0 + 8200.0 * x * x) * running;
-            let fuel = (110_000.0 - self.time * ff * 4.0 / 3600.0).max(0.0);
+            // (The Hornet's two F404s: hotter and thirstier for their size, 4.9 t of fuel inside.)
+            let hornet = self.spec.id == 2;
+            let egt = if hornet { oat + (400.0 - oat + 380.0 * x.powf(1.4)) * running } else { oat + (440.0 - oat + 200.0 * x.powf(1.4)) * running };
+            let ff = if hornet { (280.0 + 4300.0 * x * x) * running } else { (550.0 + 8200.0 * x * x) * running };
+            let (full, n_eng) = if hornet { (4_900.0, 2.0) } else { (110_000.0, 4.0) };
+            let fuel = (full - self.time * ff * n_eng / 3600.0).max(0.0);
             let u = p.pos.normalize();
             let gs = (p.vel - u * p.vel.dot(u)).length() * 1.94384;
             return [

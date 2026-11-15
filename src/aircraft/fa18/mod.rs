@@ -8,6 +8,9 @@
 //!
 //!   blender -b --factory-startup --python assets/blender/fa18.py -- assets
 //!
+//! The cockpit inside is built here in Rust (`pit.rs`), like the 747's flight
+//! deck, so its panels can carry legends and live displays.
+//!
 //! Its paint is a picture too (`assets/fa18_paint.jpg`, see
 //! `assets/blender/fa18_paint.py`), projected onto the skin by plane.wgsl;
 //! so are its exhaust plume (the "afterburner" piece, shells the shader lights
@@ -20,6 +23,8 @@ use crate::airframe::*;
 use crate::render::PartVertex;
 use std::collections::HashMap;
 use std::io::Read;
+
+mod pit;
 
 const KT: f64 = 1.0 / 1.94384;
 
@@ -39,10 +44,10 @@ const FUSE: [[f32; 6]; 19] = [
     [4.00, 0.650, 0.68, -0.06, -0.65, 2.7],
     [3.00, 0.700, 0.70, -0.06, -0.67, 2.8],
     [2.00, 0.800, 0.70, -0.08, -0.70, 3.0],
-    [1.00, 0.920, 0.68, -0.10, -0.72, 3.1],
-    [-0.50, 1.010, 0.64, -0.11, -0.74, 3.2],
-    [-2.00, 1.070, 0.60, -0.12, -0.74, 3.2],
-    [-3.50, 1.090, 0.55, -0.12, -0.72, 3.2],
+    [1.00, 0.960, 0.68, -0.10, -0.72, 3.1],
+    [-0.50, 1.060, 0.64, -0.11, -0.74, 3.2],
+    [-2.00, 1.100, 0.60, -0.12, -0.74, 3.2],
+    [-3.50, 1.100, 0.55, -0.12, -0.72, 3.2],
     [-5.00, 1.070, 0.48, -0.10, -0.66, 3.0],
     [-6.20, 1.020, 0.40, -0.08, -0.58, 2.8],
     [-7.00, 0.950, 0.33, -0.06, -0.50, 2.6],
@@ -94,10 +99,6 @@ pub fn wing_sect(x: f32) -> Sect {
 /// The pilot's eye, under the canopy's highest point.
 const EYE: Vec3 = Vec3::new(0.0, 1.0, -4.55);
 
-/// Looking well down from the seat, the view is of the cockpit; anywhere else it is out through the canopy.
-fn sees_inside(_eye: Vec3, d: Vec3) -> bool {
-    d.y < -0.42
-}
 
 // ---------------------------------------------------------------- the model
 
@@ -176,7 +177,6 @@ const PIECES: &[(&str, usize, Role, Option<&str>)] = &[
     ("right nozzle", G_TAIL, Role::Other, None),
     ("canopy", G_ENGINE, Role::Other, None),
     ("canopy frame", G_ENGINE, Role::Other, None),
-    ("cockpit", G_ENGINE, Role::Other, None),
     ("left wing", G_LWING, Role::Other, None),
     ("right wing", G_RWING, Role::Other, None),
     ("left le flap", G_LWING, Role::Other, None),
@@ -201,11 +201,15 @@ const PIECES: &[(&str, usize, Role, Option<&str>)] = &[
     ("nose fork", G_GEAR, Role::Gear(0), Some("nose leg")),
     ("nose wheel", G_GEAR, Role::Gear(0), Some("nose fork")),
     ("left main leg", G_GEAR, Role::Gear(1), None),
-    ("left main wheel", G_GEAR, Role::Gear(1), Some("left main leg")),
+    ("left main strut", G_GEAR, Role::Gear(1), Some("left main leg")),
+    ("left main wheel", G_GEAR, Role::Gear(1), Some("left main strut")),
     ("right main leg", G_GEAR, Role::Gear(2), None),
-    ("right main wheel", G_GEAR, Role::Gear(2), Some("right main leg")),
+    ("right main strut", G_GEAR, Role::Gear(2), Some("right main leg")),
+    ("right main wheel", G_GEAR, Role::Gear(2), Some("right main strut")),
     ("left nose door", G_ENGINE, Role::Other, None),
     ("right nose door", G_ENGINE, Role::Other, None),
+    ("left strut door", G_FUSE, Role::Other, None),
+    ("right strut door", G_FUSE, Role::Other, None),
     ("left main door", G_FUSE, Role::Other, None),
     ("right main door", G_FUSE, Role::Other, None),
     // The exhaust plume: drawn after everything else, in the transparent pass.
@@ -213,7 +217,10 @@ const PIECES: &[(&str, usize, Role, Option<&str>)] = &[
 ];
 
 /// How a piece moves. Hinges point so that a positive angle puts a trailing
-/// edge down (the rudders: to the right); the gear is modelled down and locked.
+/// edge down (the rudders: to the right); the gear is modelled down and locked,
+/// its doors open. A piece's `angle` is how far it turns to stow: the legs
+/// swing up, the main struts' lower parts twist to lay the wheels flat, the
+/// doors shut.
 fn anim(name: &str, stow: f32) -> Anim {
     let left = name.starts_with("left");
     let s = if left { -1.0 } else { 1.0 };
@@ -233,8 +240,11 @@ fn anim(name: &str, stow: f32) -> Anim {
         Anim::hinge(Drive::new(Input::Rudder, 0.52))
     } else if name == "speedbrake" {
         Anim::hinge(Drive::new(Input::Spoiler(0.0), -1.1))
-    } else if name.ends_with(" leg") {
+    } else if name.ends_with(" leg") || name.ends_with("main strut") {
         gear()
+    } else if name.ends_with("main door") {
+        // open for the leg to pass, shut again behind it either way
+        Anim::hinge(Drive::new(Input::Gear, -stow).pulse(0.0, 0.18, 0.88, 1.0).offset(stow))
     } else if name.ends_with(" door") {
         // open before the legs come down, shut once they are up
         Anim::hinge(Drive::new(Input::Gear, -stow).smooth(0.0, 0.2).offset(stow))
@@ -263,6 +273,24 @@ pub fn build() -> Model {
         at.insert(name, k);
     }
     bake_ao(&mut b.pieces, &AoBake { vox: 0.06, reach: 3.0, rays: 24, open: &|_, _| false });
+    // The cockpit gets its own, much finer bake, shut in by the nose's skin
+    // and the canopy's frame; the light comes in through the glass.
+    let mut c = Builder::default();
+    pit::build(&mut c);
+    let n_pit = c.pieces.len();
+    for name in ["nose section", "canopy frame"] {
+        if let Some(k) = b.pieces.iter().position(|p| p.name == name) {
+            let mut skin = b.pieces[k].mesh.clone();
+            skin.i = skin.i.chunks(3).filter(|t| t.iter().all(|&i| { let z = skin.v[i as usize].pos[2]; z > -6.6 && z < -2.6 })).flatten().copied().collect();
+            c.fixed("skin (occluder)", G_ENGINE, skin);
+        }
+    }
+    bake_ao(&mut c.pieces, &AoBake { vox: 0.012, reach: 1.6, rays: 48, open: &|_, _| false });
+    let off = b.pieces.len();
+    for mut p in c.pieces.into_iter().take(n_pit) {
+        p.parent = p.parent.map(|i| i + off);
+        b.pieces.push(p);
+    }
     Model::finish(b.pieces)
 }
 
@@ -316,7 +344,7 @@ pub static SPEC: Spec = Spec {
         stab_tip: DVec3::new(3.25, -0.2, 7.6),
     },
     eye: EYE,
-    sees_inside,
+    sees_inside: pit::sees_inside,
     contacts: &[
         ([0.0, -0.03, -8.9], Part::Nose),
         ([0.0, -0.40, -7.7], Part::Nose),
