@@ -135,6 +135,9 @@ pub struct Globals {
     pub shore_vp: [[f32; 4]; 4],
     /// field valid, metres per texel, farthest distance kept (m), side of the square (m)
     pub shore: [f32; 4],
+    /// churned white water where a crash went into it, two each: centre
+    /// (camera-relative) + radius (m, 0 = none); strength 0..1, age (s), seed
+    pub foam: [[f32; 4]; 16],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl

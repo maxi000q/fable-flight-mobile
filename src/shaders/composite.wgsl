@@ -520,11 +520,35 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let crest = fz.g * smoothstep(fz.b + 0.12, fz.b - 0.08, J01);
   foam += max(spent, crest) * capw * mix(0.95, 0.75, far_a);
   foam = clamp(foam * fnear, 0.0, 1.0);
+  // White water churned up where a crash went in (main.rs, Crash::foam):
+  // a solid boil at first that soon breaks up into lace and streaks as it
+  // spreads and fades, over water turned pale green by the air in it.
+  var aer = 0.0;
+  for (var i = 0; i < 8; i++) {
+    let f = G.foam[2 * i];
+    if (f.w <= 0.0) { continue; }
+    let fg = G.foam[2 * i + 1];
+    let dp = P - f.xyz;
+    let d = length(dp - upn * dot(dp, upn)) / f.w;
+    if (d >= 1.4) { continue; }
+    let q = vec2f(dot(dp, e), dot(dp, n)) + fg.z * 131.0;
+    let nA = textureSampleLevel(t_noise, s_repeat, vec3f(q / max(f.w * 0.7, 3.0), 0.23 + fg.y * 0.003), 0.0);
+    let nB = textureSampleLevel(t_noise, s_repeat, vec3f(q / 5.3, 0.57 + fg.y * 0.006), 0.0);
+    let nC = textureSampleLevel(t_noise, s_repeat, vec3f(q / 1.7, 0.11 + fg.y * 0.01), 0.0);
+    let body = smoothstep(1.0, 0.35, d + (nA.r - 0.5) * 0.9);
+    let lc = mix(nB.g * 0.55 + nC.b * 0.45 + (nA.g - 0.5) * 0.5, 0.5, smoothstep(0.15, 0.9, fp));
+    let fresh = exp(-fg.y / 2.5);
+    let k = body * fg.x * (0.42 + 0.58 * fresh);
+    aer = max(aer, body * fg.x);
+    foam = max(foam, clamp(k * (1.0 + 0.9 * fresh) - (1.0 - lc) * (1.0 - k) * 1.8, 0.0, 1.0) * fnear);
+  }
   // Foam is bubbles, not paint: holes and lace within it, close up.
   let bub = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2.1, 0.2 + t * 0.04), 0.0);
   let bub2 = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 0.55, 0.6), 0.0);
   let holes = smoothstep(0.3, 0.65, bub.r * 0.6 + bub2.g * 0.5);
   foam *= mix(1.0, 0.45 + 0.7 * holes, 1.0 - smoothstep(0.04, 0.2, fp));
+  // (bubbles just under the surface: the water pale and milky green)
+  col = mix(col, vec3f(0.12, 0.26, 0.25) * (l.sun * (0.3 + 0.7 * mu) / PI + l.amb), aer * 0.55 * fnear);
   col = mix(col, vec3f(0.78, 0.8, 0.8) * (0.85 + 0.3 * bub2.b) * (l.sun * (0.4 + 0.6 * mu) / PI + l.amb), foam);
   return max(col, vec3f(0.0));
 }

@@ -40,7 +40,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (vn < 0.0) {
       if (kind == 1) { p.vel = (p.vel - up * vn * 1.4) * 0.55; }
       else if (kind == 9) { p.vel = select(vec3f(0.0), (p.vel - up * vn * 1.3) * 0.3, vn < -2.0); }
-      else if (kind == 3) { p.age = p.life; }
+      else if (kind == 3 || kind == 10) { p.age = p.life; }
       else if (kind == 6) { p.vel = vec3f(0.0); }
       else { p.vel -= up * vn; }
     }

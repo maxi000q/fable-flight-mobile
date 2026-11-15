@@ -1845,7 +1845,7 @@ impl Game {
                     for (p, v) in self.plane.splashes.drain(..) {
                         if self.rng.f() < 0.25 {
                             let r = &mut self.rng;
-                            femit.push((p, render::Particle { vel: (v.as_vec3() + r.dir() * 2.0).into(), life: r.range(0.6, 1.6), size0: r.range(0.2, 0.5), size1: r.range(1.0, 2.5), kind: crash::SPRAY, drag: 0.5, seed: r.f(), alpha: 0.5, ..Default::default() }));
+                            femit.push((p, render::Particle { vel: (v.as_vec3() + r.dir() * 2.0).into(), life: r.range(1.0, 2.5), size0: r.range(0.15, 0.35), size1: r.range(0.5, 1.2), kind: crash::DROPS, drag: r.range(0.2, 0.8), seed: r.f(), alpha: r.range(0.3, 0.55), ..Default::default() }));
                         }
                     }
                 }
@@ -2015,10 +2015,14 @@ impl Game {
                 for p in &cr.booms {
                     a.boom(p * (0.35 + 0.65 * near));
                 }
+                for p in &cr.splashes {
+                    a.event(audio::Event::Splash(p * (0.35 + 0.65 * near)));
+                }
                 let f = if cr.water { 0.0 } else { (cr.light().min(12.0) / 12.0) * near };
                 fire = (f + self.destr.rumble.min(1.0) * near) * scale as f32;
             }
             cr.booms.clear();
+            cr.splashes.clear();
         }
         for (pos, mut p) in femit {
             p.pos = (pos - self.fx_anchor).as_vec3().into();
@@ -2087,13 +2091,28 @@ impl Game {
             let mut target = cr.debris.first().filter(|d| !d.sunk).map(|d| d.pos).unwrap_or(street) * 0.5 + street * 0.5 + cr.up * 6.0;
             // (an airliner's fireball is a few hundred metres across: further back)
             let mut dist = (70.0 + 34.0 * cr.power as f64) * (cr.size as f64).sqrt() + self.cam_dist;
+            // (into the water there is no fireball to take in: once the
+            // spray has come down, closer, to see the wreck afloat)
+            if cr.water {
+                let settle = ((cr.time - 4.0) / 8.0).clamp(0.0, 1.0);
+                let k = settle * settle * (3.0 - 2.0 * settle);
+                dist = (38.0 + 14.0 * cr.power as f64) * (cr.size as f64).sqrt() * (1.0 - 0.7 * k) + self.cam_dist * (1.0 - 0.5 * k);
+            }
             let (mut centre, mut rise) = (street, 18.0 + dist * 0.24);
             // An airliner's wreck slides a long way: watch the middle of the
             // trail it leaves, and the fireball over it.
             if let Some(w) = cr.wreck_centre() {
                 let w = w - cr.up * (w - street).dot(cr.up);
-                target = w * 0.6 + street * 0.4 + cr.up * (6.0 * (cr.size as f64).sqrt());
-                centre = w * 0.5 + street * 0.5;
+                if cr.water {
+                    // Afloat: watch the wreck from low over the water as it
+                    // drifts off from the splash.
+                    target = w * 0.85 + street * 0.15 + cr.up * (1.5 * (cr.size as f64).sqrt());
+                    centre = w * 0.8 + street * 0.2;
+                    rise = (6.0 + dist * 0.18) * (cr.size as f64).sqrt().min(2.0);
+                } else {
+                    target = w * 0.6 + street * 0.4 + cr.up * (6.0 * (cr.size as f64).sqrt());
+                    centre = w * 0.5 + street * 0.5;
+                }
             }
             // A tower coming down: back off and watch all of it from the side.
             if let Some((mid, hgt)) = self.destr.focus().filter(|f| (f.0 - cr.site).length() < 800.0) {
@@ -2324,6 +2343,7 @@ impl Game {
             ocean: self.world.ocean.globals(),
             shore_vp: [[0.0; 4]; 4],
             shore: [0.0; 4],
+            foam: [[0.0; 4]; 16],
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -2366,13 +2386,17 @@ impl Game {
             for (i, (p, rad)) in cr.scorch.iter().take(8).enumerate() {
                 g.scorch[i] = v4(cr.site + p.as_dvec3() - cam, (*rad * grow) as f64);
             }
+            for (i, (p, rad, k, age, seed)) in cr.foam().into_iter().take(8).enumerate() {
+                g.foam[2 * i] = v4(cr.site + p.as_dvec3() - cam, rad as f64);
+                g.foam[2 * i + 1] = [k, age, seed, 0.0];
+            }
             if self.crashed || cr.time < 240.0 {
                 for (i, d) in cr.debris.iter().enumerate() {
                     if d.sunk {
                         continue;
                     }
                     let m = Mat4::from_scale_rotation_translation(Vec3::splat(d.scale), d.rot.as_quat(), (d.pos - cam).as_vec3()) * Mat4::from_translation(-d.origin);
-                    objs.push(DrawObj { mesh: d.mesh, model: m, tint: [1.0, 1.0, 1.0, d.char], glow: [if d.burn > 0.0 { if d.rigid { 0.35 } else { 1.0 } } else { 0.25 }, self.spec.id as f32, 0.0, i as f32 * 0.37], cast: 0b11, cut: true, tear: [d.tear[0].gpu(), d.tear[1].gpu()], dmg: [d.tear[0].mode, d.tear[1].mode, 0.6, d.jag], ..DrawObj::DEFAULT });
+                    objs.push(DrawObj { mesh: d.mesh, model: m, tint: [1.0, 1.0, 1.0, d.char], glow: [if d.burn > 0.0 { if d.rigid { 0.35 } else { 1.0 } } else if cr.water { 0.0 } else { 0.25 }, self.spec.id as f32, 0.0, i as f32 * 0.37], cast: 0b11, cut: true, tear: [d.tear[0].gpu(), d.tear[1].gpu()], dmg: [d.tear[0].mode, d.tear[1].mode, 0.6, d.jag], ..DrawObj::DEFAULT });
                 }
             }
         }

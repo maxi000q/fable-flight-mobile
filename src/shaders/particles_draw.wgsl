@@ -30,6 +30,12 @@ struct VOut {
     let axis = p.vel / max(sp, 0.001);
     let side = normalize(cross(axis, normalize(center)));
     W = center + axis * c.y * (size + sp * 0.03) + side * c.x * size;
+  } else if (i32(p.kind + 0.5) == 10) {
+    // Thrown water: a clump of drops drawn out along its flight.
+    let sp = length(p.vel);
+    let axis = p.vel / max(sp, 0.001);
+    let side = normalize(cross(axis, normalize(center)));
+    W = center + axis * c.y * (size * 1.6 + sp * 0.045) + side * c.x * size;
   } else if (is_puff(i32(p.kind + 0.5))) {
     // A ball of gas, ray marched in the fragment shader: the quad only has to
     // cover its silhouette, so it is put on the near side and sized to the
@@ -179,8 +185,8 @@ fn puff(in: VOut, kind: i32, z: f32) -> vec4f {
     } else {
       d = clamp(remap(d, fbm * 0.3 * erode, 1.0, 0.0, 1.0), 0.0, 1.0);
     }
-    // Real smoke edges are abrupt.
-    d = smoothstep(0.0, 0.25, d);
+    // Real smoke edges are abrupt; spray and mist thin out softly.
+    d = select(smoothstep(0.0, 0.25, d), d * d * (3.0 - 2.0 * d), kind == 5);
     if (d <= 0.002) { continue; }
     var sig = sig0 * d * 2.4;
     // Toward the sun: the rest of the smoke, plus this puff's own body.
@@ -254,6 +260,19 @@ fn puff(in: VOut, kind: i32, z: f32) -> vec4f {
     let sky = sky_lut(normalize(ll.upn + S.cam_r.xyz * (fract(seed * 5.1) - 0.5)));
     let c = vec3f(0.5, 0.58, 0.6) * ll.amb * 0.6 + sky * 0.25 + ll.sun * flash * 0.6;
     return vec4f(c * fadeo * in.a.w, 0.45 * fadeo * in.a.w);
+  }
+  if (kind == 10) {
+    // Thrown water: a broken-up streak of drops, white where the sun is on
+    // it and glowing when seen toward the sun (drops scatter forward).
+    let nz = textureSampleLevel(t_noise, s_repeat, vec3f(in.uv * vec2f(0.35, 0.12) + seed * 7.0, seed + in.b.z * 0.2), 0.0);
+    let f = (1.0 - in.uv.x * in.uv.x) * (1.0 - r * r) * smoothstep(0.25, 0.7, nz.r * 0.7 + nz.g * 0.5);
+    let ll = light_at(in.W);
+    let cs = max(dot(normalize(in.W), G.sun_dir.xyz), 0.0);
+    let fwd = 0.35 + 2.6 * pow(cs, 6.0);
+    let c = vec3f(0.86, 0.9, 0.93) * (ll.sun * fwd / PI + ll.amb * 1.1);
+    let a = clamp(f * in.a.w * (1.0 - smoothstep(0.6, 1.0, k)) * smoothstep(0.0, 0.03, k) * soft * near, 0.0, 1.0);
+    if (a < 0.003) { discard; }
+    return vec4f(c * a, a);
   }
   if (kind == 6) {
     // Leaf: a small opaque fleck, lit like foliage.

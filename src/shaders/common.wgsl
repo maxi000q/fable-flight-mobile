@@ -60,6 +60,9 @@ struct Globals {
   ocean: array<vec4f, 30>,
   shore_vp: mat4x4f, // camera-relative to the shore distance field (shore.rs)
   shore: vec4f,      // field valid, metres per texel, farthest distance kept (m), side of the square (m)
+  // Churned white water where a crash went in, two each: centre (camera-relative)
+  // + radius (m, 0 = none); strength 0..1, age (s), seed.
+  foam: array<vec4f, 16>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;

@@ -112,6 +112,8 @@ pub enum Event {
     Clunk(f32),
     /// ploughing through a tree
     Crunch(f32),
+    /// something big going into the water (~0.2 .. 2)
+    Splash(f32),
 }
 
 #[derive(Default)]
@@ -1003,6 +1005,19 @@ impl Synth {
                 let v = Voice::new(0.6, r.range(-0.5, 0.5), Bus::Mid).pulses(160.0, 15.0, true, 0.9 * s).res([r.range(800.0, 1100.0), r.range(2200.0, 3000.0)], [3.0, 4.0], [0.4, 0.25]).noise(4200.0, 3000.0, 0.7, 0.8 * s, 0.25).tone(70.0, 45.0, 0.5 * s, 0.06);
                 self.push(v);
             }
+            Event::Splash(s) => {
+                let s = s.min(2.0);
+                let pn = r.range(-0.3, 0.3);
+                // The slap: a dull thump with a burst of torn water.
+                let slap = Voice::new(1.4, pn, Bus::Mid).tone(r.range(42.0, 55.0), 28.0, 0.9 * s, 0.2).noise(1100.0, 240.0, 0.6, 2.4 * s, 0.3);
+                // The sheet thrown up roaring as it breaks into spray.
+                let sheet = Voice::new(2.6, -pn, Bus::Mid).noise(2400.0, 650.0, 0.5, 1.3 * s, 0.8);
+                // Then it rains back down: a hiss and a patter of drops.
+                let rain = Voice::new(3.6, pn * 0.5, Bus::Mid).delay(r.range(0.7, 1.1) * s.sqrt()).noise(5200.0, 2600.0, 0.6, 0.55 * s, 1.6).pulses(900.0, 60.0, true, 0.5 * s).res([r.range(2600.0, 3400.0), r.range(5000.0, 6500.0)], [2.5, 3.0], [0.12, 0.08]);
+                for v in [slap, sheet, rain] {
+                    self.push(v);
+                }
+            }
         }
     }
 
@@ -1273,7 +1288,7 @@ mod tests {
         p.warn = Warn { stall: 1.0, pull_up: true, overspeed: 1.0, gear: true, ..Default::default() };
         for cabin in [0.0, 1.0] {
             p.cabin = cabin;
-            let ev = [Event::Boom(2.0), Event::Snap(2.0), Event::Bump(3.0), Event::Touch(8.0), Event::Clunk(1.0), Event::Crunch(2.0)];
+            let ev = [Event::Boom(2.0), Event::Snap(2.0), Event::Bump(3.0), Event::Touch(8.0), Event::Clunk(1.0), Event::Crunch(2.0), Event::Splash(2.0)];
             let x = render(p, &ev, 1.5);
             assert!(x.iter().all(|s| s[0].is_finite() && s[1].is_finite() && s[0].abs() <= 1.0 && s[1].abs() <= 1.0));
         }
@@ -1354,6 +1369,7 @@ mod tests {
             ("structural failure", Params { cabin: 1.0, ..f }, vec![Event::Snap(1.0)], 2.0),
             ("tree strike", f, vec![Event::Crunch(1.0)], 2.0),
             ("crash", Params { live: 0.0, fire: 0.8, ..f }, vec![Event::Boom(1.5)], 5.0),
+            ("crash into water", Params { live: 0.0, ..f }, vec![Event::Splash(1.5)], 5.0),
         ];
         let mut out: Vec<i16> = Vec::new();
         for (name, p, ev, secs) in scenes {
