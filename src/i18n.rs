@@ -117,6 +117,10 @@ fn fr(en: &str) -> Option<&'static str> {
         "Settings" => "Réglages",
         "Controls" => "Commandes",
         "Bindings" => "Assignations",
+        "Radio" => "Radios",
+        "navigation instruments (VOR, ILS, ADF)" => "instruments de navigation (VOR, ILS, ADF)",
+        "OBS course left / right" => "OBS : course à gauche / à droite",
+        "altimeter to the QNH" => "caler l'altimètre au QNH",
 
         // ---- controls list: headings
         "FLYING" => "PILOTAGE",

@@ -32,6 +32,8 @@ pub struct Target {
     pub wind: f64,
     pub wind_from: Option<f64>,
     pub gusts: f64,
+    /// sea-level pressure, hPa (None: not reported)
+    pub qnh: Option<f64>,
     /// what it came from, for the weather panel: "EBBR" or "Open-Meteo",
     /// and the report itself (the raw METAR)
     pub station: String,
@@ -68,6 +70,8 @@ impl LiveWx {
     pub fn step(&mut self, src: &Arc<Sources>, wx: &mut Weather, at: Option<(f64, f64)>, dt: f64) {
         if !wx.live {
             self.settled = false;
+            // Hand-set weather: the standard atmosphere.
+            wx.qnh = 1013.25;
             return;
         }
         let got = {
@@ -106,6 +110,9 @@ impl LiveWx {
         wx.haze = mix(wx.haze, t.haze);
         wx.wind += (t.wind - wx.wind) * k;
         wx.gusts += (t.gusts - wx.gusts) * k;
+        if let Some(q) = t.qnh {
+            wx.qnh += (q - wx.qnh) * k;
+        }
         if let Some(from) = t.wind_from {
             let d = (from - wx.wind_from + 540.0).rem_euclid(360.0) - 180.0;
             wx.wind_from = (wx.wind_from + d * k).rem_euclid(360.0);
@@ -239,6 +246,7 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
         wind,
         wind_from,
         gusts: gust.map(|g| ((g - wind) / 8.0).clamp(0.0, 1.0)).unwrap_or(0.1),
+        qnh: m["altim"].as_f64().filter(|q| (850.0..1100.0).contains(q)),
         station,
         raw,
     })
@@ -275,7 +283,7 @@ fn haze(vis_km: Option<f64>, foggy: bool) -> f32 {
 /// Open-Meteo's model where there is no METAR near.
 fn open_meteo(src: &Sources, (lat, lon): (f64, f64)) -> Result<Target, String> {
     let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={lat:.3}&longitude={lon:.3}&current=temperature_2m,dew_point_2m,cloud_cover_low,cloud_cover_mid,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code&wind_speed_unit=ms"
+        "https://api.open-meteo.com/v1/forecast?latitude={lat:.3}&longitude={lon:.3}&current=temperature_2m,dew_point_2m,cloud_cover_low,cloud_cover_mid,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,weather_code,pressure_msl&wind_speed_unit=ms"
     );
     let j = get_json(src, &url)?;
     from_open_meteo(&j).ok_or_else(|| "unreadable Open-Meteo answer".to_string())
@@ -310,6 +318,7 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
         wind,
         wind_from: f("wind_direction_10m"),
         gusts: f("wind_gusts_10m").map(|g| ((g - wind) / 8.0).clamp(0.0, 1.0)).unwrap_or(0.1),
+        qnh: f("pressure_msl").filter(|q| (850.0..1100.0).contains(q)),
         station: "Open-Meteo".into(),
         raw: String::new(),
     })
@@ -321,9 +330,9 @@ mod tests {
 
     #[test]
     fn metar() {
-        let m = serde_json::json!({"icaoId":"EGLL","rawOb":"METAR EGLL 151720Z 24015G28KT 9999 -TSRA FEW012 BKN025CB OVC080 12/10 Q1002","elev":25,"wdir":240,"wspd":15,"wgst":28,"visib":"6+","wxString":"-TSRA","clouds":[{"cover":"FEW","base":1200},{"cover":"BKN","base":2500},{"cover":"OVC","base":8000}]});
+        let m = serde_json::json!({"icaoId":"EGLL","rawOb":"METAR EGLL 151720Z 24015G28KT 9999 -TSRA FEW012 BKN025CB OVC080 12/10 Q1002","altim":1002,"elev":25,"wdir":240,"wspd":15,"wgst":28,"visib":"6+","wxString":"-TSRA","clouds":[{"cover":"FEW","base":1200},{"cover":"BKN","base":2500},{"cover":"OVC","base":8000}]});
         let t = from_metar(&m).unwrap();
-        assert_eq!(t.station, "EGLL");
+        assert_eq!((t.station.as_str(), t.qnh), ("EGLL", Some(1002.0)));
         assert_eq!(t.wind_from, Some(240.0));
         assert!((t.wind - 15.0 / 1.94384).abs() < 1e-6);
         assert!(t.gusts > 0.8);
