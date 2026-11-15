@@ -1,5 +1,6 @@
 //! The cabin: lining and carpet, the instrument panel with its gauges, radios,
 //! switches and breakers, the moving controls, seats and belts, and the glass.
+use super::*;
 use crate::airframe::*;
 use glam::{Mat3, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -559,7 +560,7 @@ fn controls(b: &mut Builder) {
         y.rbox(&mt(mat::PLASTIC, 0.08, 0.08, 0.08), c + Vec3::new(-0.115, 0.06, 0.028), Vec3::new(0.004, 0.008, 0.004), 0.002, Quat::IDENTITY);
         y.screw(&SCREW_BLACK, c + Vec3::new(0.04, -0.055, 0.0285), Vec3::Z, 0.0022, xs);
         y.screw(&SCREW_BLACK, c + Vec3::new(-0.04, -0.055, 0.0285), Vec3::Z, 0.0022, xs + 1.0);
-        b.add("yoke", G_FUSE, y, Anim::Yoke, c, Vec3::Z, None);
+        b.add("yoke", G_FUSE, y, Anim::turn_slide(Drive::new(Input::Roll, -0.6), Drive::new(Input::Pitch, 0.06), Vec3::Z), c, Vec3::Z, None);
         // The shaft collar where it comes through the panel.
         let mut col = Mesh::default();
         col.lathe(&BLACK, Vec3::new(xs, -0.06, PANEL_Z), Vec3::Z, &[[0.03, 0.0], [0.03, 0.004], [0.016, 0.008], [0.013, 0.008]], 24, false);
@@ -575,32 +576,32 @@ fn controls(b: &mut Builder) {
             p.rbox(&ALU, pc + Vec3::new(0.0, 0.0, 0.008), Vec3::new(0.034, 0.06, 0.005), 0.004, tilt);
             p.rbox(&RUBBER.pat(pat::KNURL), pc + Vec3::new(0.0, -0.005, 0.0145), Vec3::new(0.03, 0.04, 0.0025), 0.002, tilt);
             p.tube(&CHROME, &[pc + Vec3::new(0.0, 0.05, 0.0), pc + Vec3::new(0.0, 0.10, -0.08)], &|_| 0.005, 8, true);
-            b.add("pedal", G_FUSE, p, Anim::Pedal(dx.signum()), pv, Vec3::X, None);
+            b.add("pedal", G_FUSE, p, Anim::hinge(Drive::new(Input::Yaw, dx.signum() * 0.2)), pv, Vec3::X, None);
         }
     }
     // Throttle.
     let mut t = Mesh::default();
     t.tube(&CHROME, &[Vec3::new(0.0, -0.195, PANEL_Z - 0.09), Vec3::new(0.0, -0.195, PANEL_Z + 0.02)], &|_| 0.005, 12, false);
     t.lathe(&KNOB, Vec3::new(0.0, -0.195, PANEL_Z + 0.02), Vec3::Z, &[[0.005, 0.0], [0.017, 0.006], [0.019, 0.02], [0.017, 0.027], [0.0, 0.028]], 22, true);
-    b.add("throttle", G_FUSE, t, Anim::Throttle, Vec3::ZERO, Vec3::Z, None);
+    b.add("throttle", G_FUSE, t, Anim::slide(Drive::new(Input::Throttle, -0.06).offset(0.06), Vec3::Z), Vec3::ZERO, Vec3::Z, None);
     // Gear handle: a lever with a wheel-shaped knob.
     let mut g = Mesh::default();
     let gp = Vec3::new(-0.09, -0.185, PANEL_Z);
     g.tube(&CHROME, &[gp, gp + Vec3::Z * 0.05], &|_| 0.004, 8, false);
     g.lathe(&mt(mat::PLASTIC, 0.85, 0.85, 0.83), gp + Vec3::new(0.0, -0.007, 0.05), Vec3::Y, &[[0.0, 0.0], [0.013, 0.0], [0.015, 0.003], [0.015, 0.011], [0.013, 0.014], [0.0, 0.014]], 20, false);
-    b.add("gear handle", G_FUSE, g, Anim::GearHandle, gp, Vec3::X, None);
+    b.add("gear handle", G_FUSE, g, Anim::hinge(Drive::new(Input::GearHandle, 0.45)), gp, Vec3::X, None);
     // Flap lever with its airfoil-shaped knob.
     let mut fl = Mesh::default();
     let fp = Vec3::new(0.15, -0.195, PANEL_Z - 0.01);
     fl.tube(&CHROME, &[fp, fp + Vec3::Z * 0.035], &|_| 0.0035, 8, false);
     let foil: Vec<Vec2> = (0..20).map(|k| { let a = k as f32 / 20.0 * TAU; Vec2::new(0.016 * a.cos(), 0.006 * a.sin() * (1.0 - 0.5 * a.cos())) }).collect();
     fl.slab(&PAINT_WHITE, &foil, &[], fp + Vec3::new(0.0, 0.0, 0.045), Vec3::X, Vec3::Y, 0.01);
-    b.add("flap lever", G_FUSE, fl, Anim::FlapLever, fp, Vec3::X, None);
+    b.add("flap lever", G_FUSE, fl, Anim::hinge(Drive::new(Input::FlapLever, 0.7).offset(-0.35)), fp, Vec3::X, None);
     // Elevator trim wheel.
     let mut w = Mesh::default();
     let wc = Vec3::new(0.0, -0.40, PANEL_Z + 0.0);
     w.lathe(&BLACK.pat(pat::KNURL), wc - Vec3::X * 0.008, Vec3::X, &[[0.0, 0.0], [0.058, 0.0], [0.062, 0.004], [0.062, 0.012], [0.058, 0.016], [0.0, 0.016]], 40, false);
-    b.add("trim wheel", G_FUSE, w, Anim::TrimWheel, wc, Vec3::X, None);
+    b.add("trim wheel", G_FUSE, w, Anim::hinge(Drive::new(Input::Trim, 9.0)), wc, Vec3::X, None);
 }
 
 // ---------------------------------------------------------------- glass

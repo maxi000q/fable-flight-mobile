@@ -272,7 +272,7 @@ mod tests {
     use super::*;
 
     fn level(hdg: f64) -> Plane {
-        Plane::spawn(37.8f64.to_radians(), -122.4f64.to_radians(), 1000.0, hdg.to_radians(), 50.0)
+        Plane::spawn(&crate::aircraft::c172::SPEC, 37.8f64.to_radians(), -122.4f64.to_radians(), 1000.0, hdg.to_radians(), 50.0)
     }
 
     #[test]

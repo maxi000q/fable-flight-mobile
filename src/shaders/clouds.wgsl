@@ -450,20 +450,23 @@ fn cloud_at(pos: vec2f, d: f32) -> vec4f {
 
 // Cloud shadow map (render.rs CloudShadow, read by cloud_sun): per texel, a ray along
 // the sun from a point on the cloud base, with the optical depth it crosses in three
-// height bands (cumulative) and how closed the deck is there.
-const CS_RES = 1024.0;
+// height bands (cumulative) and how closed the deck is there. The map being drawn
+// is G.cs[6..12] (see cloud_sun).
 fn cs_band(h: f32) -> vec3f {
-  let f = sqrt(clamp((h - G.cs[7].x) / (G.cs[7].y - G.cs[7].x), 0.0, 1.0)) * 3.0;
+  let f = sqrt(clamp((h - G.cs[9].x) / (G.cs[9].y - G.cs[9].x), 0.0, 1.0)) * 3.0;
   return select(select(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 0.0), f < 2.0), vec3f(1.0, 0.0, 0.0), f < 1.0);
 }
 fn cshadow_ray(px: vec2f, ext: f32) -> vec4f {
-  let base = G.cs[7].x;
+  let base = G.cs[9].x;
   let rg = G.planet.w;
   let R = rg + base;
-  let loc = (px / CS_RES * 2.0 - 1.0) * ext;
-  let qn = normalize(G.cs[4].xyz + (G.cs[5].xyz * loc.x + G.cs[6].xyz * loc.y) / R);
-  let q = qn * R;
-  let sun = G.sun_dir.xyz;
+  let loc = (px / CS_RES * 2.0 - 1.0) * ext + G.cs[9].zw;
+  let qn = normalize(G.cs[6].xyz + (G.cs[7].xyz * loc.x + G.cs[8].xyz * loc.y) / R);
+  // The clouds as they were when this map was begun: its later slices are drawn
+  // while the clouds drift on, and the lookups make up for the drift since.
+  let dq = G.cs[11].xyz - G.weather.xyz;
+  let q = qn * R + dq;
+  let sun = G.cs[10].xyz;
   var closed = smoothstep(0.45, 0.95, cloud_weather_m(q, 0u).cov);
   if (dot(qn, sun) <= 0.0) { return vec4f(0.0, 0.0, 0.0, closed); }
   var b = vec3f(0.0);
@@ -471,20 +474,25 @@ fn cshadow_ray(px: vec2f, ext: f32) -> vec4f {
   let smask = storm_mask(q, sun, 120000.0);
   let lid = select(base + G.cloud.z, G.cloud.w, smask != 0u);
   let tl = min(ray_sphere(q, sun, rg + lid).y, 120000.0);
-  // The column weather changes slowly along the ray: look it up every other step.
-  let n = 32;
+  // Long slanting rays (a low sun) take more steps, so the puffs they cross are not
+  // skipped over. A per-texel offset along the ray turns the steps' banding into
+  // fine noise, which the lookup's smooth filter averages away; it is tied to the
+  // texel, which stays put on the ground from map to map, so it does not shimmer.
+  let n = i32(clamp(tl / 300.0, 32.0, 56.0));
   let dt = tl / f32(n);
+  let jit = ign(px);
+  // The column weather changes slowly along the ray: look it up every other step.
   var wx = Weather(0.0, 0.0, 0.0, 0.0, vec4f(0.0), 0.0, 0.0);
   for (var i = 0; i < n; i++) {
-    let p = q + sun * (dt * (f32(i) + 0.5));
+    let p = q + sun * (dt * (f32(i) + jit));
     let h = length(p) - rg;
     if ((i & 1) == 0) { wx = cloud_weather_m(q + sun * (dt * (f32(i) + 1.0)), smask); }
     let d = cloud_shape(p, h, wx, false);
     if (d > 0.0) { b += cs_band(h) * (d * dt); }
   }
-  // The mid-level layer: one crossing of its lens.
+  // The mid-level layer (which drifts half as fast again): one crossing of its lens.
   if (G.alto.x > 0.0) {
-    let pa = q + sun * ray_sphere(q, sun, rg + G.alto.y).y;
+    let pa = q + sun * ray_sphere(q, sun, rg + G.alto.y).y + dq * 0.5;
     let aa = alto_amount(pa);
     if (aa > 0.0) {
       let ln = alto_lens(pa, aa, 0.0);
@@ -495,5 +503,5 @@ fn cshadow_ray(px: vec2f, ext: f32) -> vec4f {
   b *= SIGMA;
   return vec4f(b.x, b.x + b.y, b.x + b.y + b.z, closed);
 }
-@fragment fn fs_cshadow_in(in: FsIn) -> @location(0) vec4f { return cshadow_ray(in.pos.xy, G.cs[4].w); }
-@fragment fn fs_cshadow_out(in: FsIn) -> @location(0) vec4f { return cshadow_ray(in.pos.xy, G.cs[5].w); }
+@fragment fn fs_cshadow_in(in: FsIn) -> @location(0) vec4f { return cshadow_ray(in.pos.xy, G.cs[6].w); }
+@fragment fn fs_cshadow_out(in: FsIn) -> @location(0) vec4f { return cshadow_ray(in.pos.xy, G.cs[7].w); }

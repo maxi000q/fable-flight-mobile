@@ -338,8 +338,11 @@ const FINE: f32 = 0.32;
 pub struct Hitter {
     pub right: DVec3,
     pub up: DVec3,
-    /// span station each wing ends at (left, right); airframe::SPAN = whole
+    /// span station each wing ends at (left, right); `Spec::span` = whole
     pub span: [f32; 2],
+    /// the aircraft's head-on outline and full span
+    pub shape: &'static crate::aircraft::Hole,
+    pub full: f32,
     /// stabiliser halves (1 or 0) and how much of the fin is left
     pub stab: [f32; 2],
     pub fin: f32,
@@ -361,23 +364,33 @@ impl Hitter {
     /// the aircraft (it tears more than its own shape on the way in).
     fn sdf(&self, p: Vec2) -> f32 {
         const K: f32 = 1.2;
+        let h = self.shape;
         let (x, y) = (p.x / K, p.y / K);
         let ax = x.abs();
         let side = (x > 0.0) as usize;
         // Fuselage, engine and all: a rounded box, the widest part of the hole.
-        let q = Vec2::new(ax, y + 0.04).abs() - Vec2::new(0.82, 0.92) + Vec2::splat(0.5);
-        let fus = q.max(Vec2::ZERO).length() + q.x.max(q.y).min(0.0) - 0.5;
-        // Wing: thin, a slight dihedral, tapering towards the tip.
+        let [fw, fh, fy, fr] = h.fus;
+        let q = Vec2::new(ax, y - fy).abs() - Vec2::new(fw, fh) + Vec2::splat(fr);
+        let fus = q.max(Vec2::ZERO).length() + q.x.max(q.y).min(0.0) - fr;
+        // Wing: thin, a slight dihedral, tapering towards the tip, and any engine pods under it.
         let end = self.span[side];
-        let wing = if end > 0.7 {
-            let t = (ax / crate::airframe::SPAN).min(1.0);
-            ((y - 0.72 - 0.03 * ax).abs() - (0.36 - 0.12 * t)).max(ax - end)
+        let [wy, dih, t0, t1] = h.wing;
+        let mut wing = if end > 0.13 * self.full {
+            let t = (ax / self.full).min(1.0);
+            ((y - wy - dih * ax).abs() - (t0 + (t1 - t0) * t)).max(ax - end)
         } else {
             1e3
         };
-        let stab = if self.stab[side] > 0.5 { ((y - 0.2).abs() - 0.2).max(ax - 1.75) } else { 1e3 };
-        let ft = 0.3 + 1.55 * self.fin;
-        let fin = if self.fin > 0.1 { (ax - (0.2 - 0.06 * ((y - 0.3) / 1.5).clamp(0.0, 1.0))).max((y - (0.3 + ft) * 0.5).abs() - (ft - 0.3) * 0.5) } else { 1e3 };
+        for [px, py, pr] in h.pods {
+            if pr > 0.0 && px < end {
+                wing = wing.min(Vec2::new(ax - px, y - py).length() - pr);
+            }
+        }
+        let [sy, st, ss] = h.stab;
+        let stab = if self.stab[side] > 0.5 { ((y - sy).abs() - st).max(ax - ss) } else { 1e3 };
+        let [f0, fh2, fw0, fw1] = h.fin;
+        let ft = f0 + fh2 * self.fin;
+        let fin = if self.fin > 0.1 { (ax - (fw0 + (fw1 - fw0) * ((y - f0) / fh2).clamp(0.0, 1.0))).max((y - (f0 + ft) * 0.5).abs() - (ft - f0) * 0.5) } else { 1e3 };
         fus.min(wing).min(stab).min(fin) * K
     }
 }

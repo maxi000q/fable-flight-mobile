@@ -5,7 +5,8 @@
 //! cuts any piece along it (see `tear_d` in plane.wgsl), so the stump left on
 //! the aircraft and the part fluttering down are the same mesh seen from the
 //! two sides of the same tear, with the same ragged edge.
-use crate::airframe::{self, Piece, AILERON, GROUPS, G_ENGINE, G_FUSE, G_LWING, G_PROP, G_RWING, G_TAIL, SPAN};
+use crate::aircraft::{Spec, MAX_GEAR};
+use crate::airframe::{Piece, Role, G_ENGINE, G_FUSE, G_LWING, G_RWING, G_TAIL, N_GROUPS};
 use crate::crash::{Rng, GRIT, SPARK};
 use crate::geo;
 use crate::render::{DrawObj, Particle};
@@ -91,7 +92,9 @@ impl Fold {
 /// Everything that can be wrong with the airframe.
 #[derive(Clone, Copy, Debug)]
 pub struct Damage {
-    /// span station each wing now ends at (SPAN = whole), left then right
+    /// the aircraft it is
+    pub spec: &'static Spec,
+    /// span station each wing now ends at (`Spec::span` = whole), left then right
     pub wing: [f32; 2],
     /// the break each wing stump ends in (NONE with a shorter `wing`: a straight cut there)
     pub wing_tear: [Tear; 2],
@@ -114,14 +117,14 @@ pub struct Damage {
     pub prop: f32,
     /// engine health: below 1 it leaks oil and loses power, at 0 it has seized
     pub engine: f32,
-    /// nose, left main, right main still attached
-    pub gear: [bool; 3],
+    /// each landing gear leg still attached (see `Spec::gear`)
+    pub gear: [bool; MAX_GEAR],
     /// oil film over the windshield
     pub oil: f32,
     /// a crack in the windshield: body-frame z and y of its centre, and its size
     pub crack: [f32; 3],
     /// scrapes and dents, by breakable group
-    pub scuff: [f32; GROUPS.len()],
+    pub scuff: [f32; N_GROUPS],
     /// how hard the airframe is shaking (camera, HUD)
     pub vibe: f32,
     /// smoke pouring from the engine, 0..1
@@ -133,10 +136,11 @@ pub struct Damage {
     pub flap_stress: f32,
 }
 
-impl Default for Damage {
-    fn default() -> Self {
+impl Damage {
+    pub fn new(spec: &'static Spec) -> Self {
         Self {
-            wing: [SPAN; 2],
+            spec,
+            wing: [spec.span; 2],
             wing_tear: [Tear::NONE; 2],
             fold: [Fold::default(); 2],
             tail: Tear::NONE,
@@ -149,10 +153,10 @@ impl Default for Damage {
             fin: 1.0,
             prop: 1.0,
             engine: 1.0,
-            gear: [true; 3],
+            gear: [true; MAX_GEAR],
             oil: 0.0,
             crack: [0.0; 3],
-            scuff: [0.0; GROUPS.len()],
+            scuff: [0.0; N_GROUPS],
             vibe: 0.0,
             smoke: 0.0,
             smoke_black: false,
@@ -163,9 +167,6 @@ impl Default for Damage {
     }
 }
 
-fn side_of(name: &str) -> usize {
-    if name.starts_with("left") { 0 } else { 1 }
-}
 fn sgn(side: usize) -> f32 {
     if side == 0 { -1.0 } else { 1.0 }
 }
@@ -182,21 +183,18 @@ fn halves(h: [f32; 2], d: f32) -> Tear {
 impl Damage {
     /// Pieces that are no longer there at all.
     pub fn hidden(&self, p: &Piece) -> bool {
-        if self.tail.is_some() && p.group == G_TAIL && p.name != "tail cone" {
+        if self.tail.is_some() && p.group == G_TAIL && p.role != Role::TailCone {
             return true;
         }
-        match p.name {
-            "left aileron" | "right aileron" => self.aileron[side_of(p.name)] <= 0.0,
-            "left flap" | "right flap" => self.flap[side_of(p.name)] <= 0.0,
-            "rudder" => self.rudder <= 0.0,
-            "spinner" | "blades" | "prop disc" => self.prop <= 0.0,
-            "nose leg" | "nose fork" | "nose wheel" | "upper torque link" | "lower torque link" => !self.gear[0],
-            "left main leg" | "left main wheel" => !self.gear[1],
-            "right main leg" | "right main wheel" => !self.gear[2],
+        match p.role {
+            Role::Aileron(s) => self.aileron[s as usize] <= 0.0,
+            Role::Flap(s) => self.flap[s as usize] <= 0.0,
+            Role::Rudder => self.rudder <= 0.0,
+            Role::Prop => self.prop <= 0.0,
+            Role::Gear(i) => !self.gear[i as usize],
             // Internal structure only shows once the skin over it is torn.
-            "left wing structure" => self.wing[0] >= SPAN,
-            "right wing structure" => self.wing[1] >= SPAN,
-            "tail structure" => self.stab[0] > 0.5 && self.stab[1] > 0.5 && self.fin >= 1.0,
+            Role::WingStructure(s) => self.wing[s as usize] >= self.spec.span,
+            Role::TailStructure => self.stab[0] > 0.5 && self.stab[1] > 0.5 && self.fin >= 1.0,
             _ => false,
         }
     }
@@ -204,40 +202,42 @@ impl Damage {
     /// The breaks that cut a piece as it is drawn on the aircraft.
     pub fn tears_for(&self, p: &Piece) -> [Tear; 2] {
         let mut t = [Tear::NONE; 2];
-        let structure = p.name.ends_with("structure");
+        let tl = &self.spec.tail;
+        let structure = matches!(p.role, Role::WingStructure(_) | Role::TailStructure);
         // Spars poke out a little past the torn skin.
-        let stick = if structure { 0.12 } else { 0.0 };
+        let stick = if structure { 0.12 * self.spec.span / 5.5 } else { 0.0 };
         match p.group {
             G_LWING | G_RWING => {
                 let s = if p.group == G_RWING { 1 } else { 0 };
                 t[0] = self.stump(s).grow(stick);
             }
             G_TAIL if self.tail.is_some() => {
-                if p.name == "tail cone" {
+                if p.role == Role::TailCone {
                     t[0] = self.tail;
                 }
             }
-            G_TAIL => match p.name {
-                "elevator" => t[0] = halves(self.elevator, 0.12),
-                "stabiliser" | "tail structure" => {
-                    t[0] = halves(self.stab, 0.34 + stick);
+            G_TAIL => match p.role {
+                Role::Elevator => t[0] = halves(self.elevator, tl.elev_root),
+                Role::Stab | Role::TailStructure => {
+                    t[0] = halves(self.stab, tl.stab_root + stick);
                     if self.fin < 1.0 {
-                        t[1] = Tear::new(Vec3::Y, 0.27 + 1.53 * self.fin + stick, 1.0);
+                        t[1] = Tear::new(Vec3::Y, tl.fin_y0 + tl.fin_h * self.fin + stick, 1.0);
                     }
                 }
-                "rudder" => {
+                Role::Rudder => {
                     if self.rudder < 1.0 {
-                        t[0] = Tear::new(Vec3::Y, 0.22 + 1.57 * self.rudder, 1.0);
+                        t[0] = Tear::new(Vec3::Y, tl.rudder_y0 + tl.rudder_h * self.rudder, 1.0);
                     }
                 }
                 _ => {}
             },
-            G_PROP => {
-                if (p.name == "blades" || p.name == "prop disc") && self.prop > 0.0 && self.prop < 1.0 {
-                    t[0] = Tear::new(Vec3::Y, airframe::PROP_HUB.y + 0.42, 1.0);
+            _ => {
+                if let (Role::Prop, crate::aircraft::Engine::Piston(pe)) = (p.role, &self.spec.engine) {
+                    if self.prop > 0.0 && self.prop < 1.0 {
+                        t[0] = Tear::new(Vec3::Y, pe.blade_break_y, 1.0);
+                    }
                 }
             }
-            _ => {}
         }
         t
     }
@@ -246,7 +246,7 @@ impl Damage {
     pub fn stump(&self, s: usize) -> Tear {
         if self.wing_tear[s].is_some() {
             self.wing_tear[s]
-        } else if self.wing[s] < SPAN {
+        } else if self.wing[s] < self.spec.span {
             Tear::new(Vec3::new(sgn(s), 0.0, 0.0), self.wing[s], 1.0)
         } else {
             Tear::NONE
@@ -265,15 +265,16 @@ impl Damage {
     }
 
     /// Wing area outboard of span station `b` on one side (m²).
-    pub fn wing_lost(b: f32) -> f32 {
-        let chord = |s: f32| 1.65 - 0.5 * ((s - 2.55) / (SPAN - 2.55)).clamp(0.0, 1.0);
-        let b = b.clamp(0.0, SPAN);
-        let n = 12;
-        (0..n).map(|k| chord(b + (SPAN - b) * (k as f32 + 0.5) / n as f32)).sum::<f32>() * (SPAN - b) / n as f32
+    pub fn wing_lost(&self, b: f32) -> f32 {
+        let span = self.spec.span;
+        let b = b.clamp(0.0, span);
+        let n = 16;
+        (0..n).map(|k| (self.spec.wing_sect)(b + (span - b) * (k as f32 + 0.5) / n as f32).c).sum::<f32>() * (span - b) / n as f32
     }
-    /// How much of an aileron is still on a wing that ends at `b`.
-    pub fn aileron_frac(b: f32) -> f32 {
-        ((b - AILERON[0]) / (AILERON[1] - AILERON[0])).clamp(0.0, 1.0)
+    /// How much of the ailerons is still on a wing that ends at `b`.
+    pub fn aileron_frac(&self, b: f32) -> f32 {
+        let [a0, a1] = self.spec.aileron;
+        ((b - a0) / (a1 - a0)).clamp(0.0, 1.0)
     }
 
     /// What is wrong, one line each, for the HUD.
@@ -283,10 +284,10 @@ impl Damage {
             let lr = if s == 0 { "L" } else { "R" };
             if self.fold[s].on {
                 r.push(format!("{lr} WING BUCKLED, HANGING"));
-            } else if self.wing[s] < SPAN {
-                r.push(format!("{lr} WING  -{:.1} m", SPAN - self.wing[s]));
+            } else if self.wing[s] < self.spec.span {
+                r.push(format!("{lr} WING  -{:.1} m", self.spec.span - self.wing[s]));
             }
-            if self.wing[s] < airframe::TANK[1] {
+            if self.wing[s] < self.spec.tank[1] {
                 r.push(format!("{lr} TANK RUPTURED"));
             }
             if self.aileron[s] <= 0.0 {
@@ -314,19 +315,20 @@ impl Damage {
         } else if self.rudder < 1.0 {
             r.push(format!("RUDDER {:.0}%", self.rudder * 100.0));
         }
-        if self.prop <= 0.0 {
+        let jet = self.spec.is_jet();
+        if self.prop <= 0.0 && !jet {
             r.push("PROPELLER GONE".into());
-        } else if self.prop < 1.0 {
+        } else if self.prop < 1.0 && !jet {
             r.push("PROP BLADE BROKEN".into());
         }
         if self.engine <= 0.0 {
-            r.push("ENGINE DEAD".into());
+            r.push(if jet { "ENGINES DEAD" } else { "ENGINE DEAD" }.into());
         } else if self.engine < 1.0 {
-            r.push(format!("ENGINE {:.0}%  OIL LEAK", self.engine * 100.0));
+            r.push(if jet { format!("ENGINES {:.0}%", self.engine * 100.0) } else { format!("ENGINE {:.0}%  OIL LEAK", self.engine * 100.0) });
         }
-        for (g, name) in self.gear.iter().zip(["NOSE GEAR GONE", "L MAIN GEAR GONE", "R MAIN GEAR GONE"]) {
+        for (g, leg) in self.gear.iter().zip(self.spec.gear) {
             if !g {
-                r.push(name.into());
+                r.push(format!("{} GONE", leg.name));
             }
         }
         if self.oil > 0.25 {
@@ -367,22 +369,25 @@ impl Damage {
                 "nosegear" => self.gear[0] = v > 0.5,
                 "lgear" => self.gear[1] = v > 0.5,
                 "rgear" => self.gear[2] = v > 0.5,
+                "lbodygear" => self.gear[3] = v > 0.5,
+                "rbodygear" => self.gear[4] = v > 0.5,
                 "oil" => self.oil = v,
                 "crack" => self.crack = [-1.45, 0.45, 0.22 * v],
-                "scuff" => self.scuff = [v; GROUPS.len()],
+                "scuff" => self.scuff = [v; N_GROUPS],
                 // An angled break at that station, or a buckled wing hanging there
                 // (random shape, seeded by the station), or the tail broken off at z.
                 "lsnap" | "rsnap" | "lfold" | "rfold" => {
                     let s = if k.trim().starts_with('l') { 0 } else { 1 };
                     let mut rng = Rng(v.to_bits() as u64 * 7919 + 1 + s as u64);
-                    let tear = wing_break(s, v, rng.range(-0.5, 0.5), rng.range(-0.2, 0.2), rng.range(0.06, 0.3), &Tear::NONE);
+                    let ks = self.spec.span / 5.5;
+                    let tear = wing_break(self.spec, s, v, rng.range(-0.5, 0.5) * ks, rng.range(-0.2, 0.2), rng.range(0.06, 0.3) * ks.sqrt(), &Tear::NONE);
                     self.wing[s] = v;
                     self.wing_tear[s] = tear;
                     if k.trim().ends_with("fold") {
-                        self.fold[s] = fold_at(s, v, tear, Tear::NONE, SPAN, rng.f() < 0.5, 2500.0);
+                        self.fold[s] = fold_at(self.spec, s, v, tear, Tear::NONE, self.spec.span, rng.f() < 0.5, 2500.0 * ks * ks * ks);
                     }
                 }
-                "tail" => self.tail = tail_break(v, 0.1, -0.1, 0.2),
+                "tail" => self.tail = tail_break(self.spec, v, 0.1, -0.1, 0.2),
                 other => log::warn!("unknown damage item {other}"),
             }
         }
@@ -391,8 +396,8 @@ impl Damage {
 
 /// A point on wing `s` (body frame): span station, fraction of the chord back
 /// from the leading edge, and which skin (+1 upper, -1 lower, 0 the mean line).
-pub fn wing_pt(s: usize, station: f32, xc: f32, skin: f32) -> Vec3 {
-    let k = airframe::wing_sect(station.clamp(0.0, SPAN));
+pub fn wing_pt(spec: &Spec, s: usize, station: f32, xc: f32, skin: f32) -> Vec3 {
+    let k = (spec.wing_sect)(station.clamp(0.0, spec.span));
     let half = 0.06 * k.c * k.tf * (1.0 - (2.0 * xc - 0.6).powi(2)).max(0.15);
     let p = k.le + k.cdir * (k.c * xc) + k.up * (half * skin + 0.02 * k.c);
     Vec3::new(p.x * sgn(s), p.y, p.z)
@@ -402,10 +407,11 @@ pub fn wing_pt(s: usize, station: f32, xc: f32, skin: f32) -> Vec3 {
 /// across the chord (a diagonal snap), `ty` through the thickness, `jag` is
 /// how ragged it is. It is kept wholly inboard of the break `prev` the wing
 /// already ends in (straightened if it has to be).
-pub fn wing_break(s: usize, station: f32, tz: f32, ty: f32, jag: f32, prev: &Tear) -> Tear {
+pub fn wing_break(spec: &Spec, s: usize, station: f32, tz: f32, ty: f32, jag: f32, prev: &Tear) -> Tear {
     let sg = sgn(s);
-    let k = airframe::wing_sect(station.clamp(0.0, SPAN));
-    let mid = wing_pt(1, station, 0.45, 0.0);
+    let k = (spec.wing_sect)(station.clamp(0.0, spec.span));
+    let mid = wing_pt(spec, 1, station, 0.45, 0.0);
+    let sc = spec.span / 5.5;
     let make = |tz: f32| {
         let n = Vec3::new(sg, ty, tz).normalize();
         let p = Vec3::new(sg * station, mid.y, mid.z);
@@ -415,9 +421,9 @@ pub fn wing_break(s: usize, station: f32, tz: f32, ty: f32, jag: f32, prev: &Tea
     for _ in 0..5 {
         let t = make(tz);
         // Where it crosses the leading and trailing edges must still be on the wing.
-        let fits = [k.le.z - 0.05, k.le.z + k.c + 0.05].iter().all(|&z| {
+        let fits = [k.le.z - 0.05 * sc, k.le.z + k.c + 0.05 * sc].iter().all(|&z| {
             let x = (t.d - t.n.y * mid.y - t.n.z * z) / t.n.x;
-            prev.keeps(Vec3::new(x + sg * 0.2, mid.y, z))
+            prev.keeps(Vec3::new(x + sg * 0.2 * sc, mid.y, z))
         });
         if fits {
             return t;
@@ -430,8 +436,8 @@ pub fn wing_break(s: usize, station: f32, tz: f32, ty: f32, jag: f32, prev: &Tea
 /// A buckled wing hanging from the stump at `tear` (span `root`), out to `tip`
 /// where it ends in `outer`: hinged on its upper skin if it folds `up`, on
 /// its lower skin if it folds down.
-pub fn fold_at(s: usize, root: f32, tear: Tear, outer: Tear, tip: f32, up: bool, hold: f32) -> Fold {
-    let q = wing_pt(s, root, 0.4, if up { 1.0 } else { -1.0 });
+pub fn fold_at(spec: &Spec, s: usize, root: f32, tear: Tear, outer: Tear, tip: f32, up: bool, hold: f32) -> Fold {
+    let q = wing_pt(spec, s, root, 0.4, if up { 1.0 } else { -1.0 });
     let x = (tear.d - tear.n.y * q.y - tear.n.z * q.z) / tear.n.x;
     let pivot = Vec3::new(x, q.y, q.z);
     let axis = tear.n.cross(Vec3::Y).normalize();
@@ -439,9 +445,9 @@ pub fn fold_at(s: usize, root: f32, tear: Tear, outer: Tear, tip: f32, up: bool,
 }
 
 /// The tail broken off through the tail cone at `z`, slanted by `tx`, `ty`.
-pub fn tail_break(z: f32, tx: f32, ty: f32, jag: f32) -> Tear {
+pub fn tail_break(spec: &Spec, z: f32, tx: f32, ty: f32, jag: f32) -> Tear {
     let n = Vec3::new(tx, ty, 1.0).normalize();
-    let p = Vec3::new(0.0, airframe::sec(z).mid, z);
+    let p = Vec3::new(0.0, (spec.fuse)(z).1, z);
     Tear { n, d: n.dot(p), mode: 1.0, jag }
 }
 
@@ -451,7 +457,8 @@ pub enum Sel {
     Group(usize),
     /// the group with its internal structure (a wing torn off shows its spars)
     GroupAll(usize),
-    Names(&'static [&'static str]),
+    Role(Role),
+    Roles(&'static [Role]),
 }
 
 /// Something has just come off: the flight model asks the game to let it go.
@@ -497,6 +504,8 @@ pub struct Shed {
     span: f32,
     scuff: f32,
     seed: f32,
+    /// which aircraft it came off (its paint, see plane.wgsl)
+    kind: f32,
     age: f32,
     bounces: u8,
     resting: bool,
@@ -515,20 +524,21 @@ impl Sheds {
         // The pieces that go, each with its pose and the breaks it is cut along.
         let mut picked: Vec<(usize, Mat4, [Tear; 2], Vec3, Vec3, Vec3, usize)> = Vec::new();
         for (i, p) in pieces.iter().enumerate() {
-            let structure = p.name.ends_with("structure");
+            let structure = matches!(p.role, Role::WingStructure(_) | Role::TailStructure);
             if p.glass {
                 continue;
             }
             let take = match req.sel {
                 Sel::Group(g) => p.group == g && !structure,
                 Sel::GroupAll(g) => p.group == g,
-                Sel::Names(ns) => ns.contains(&p.name),
+                Sel::Role(r) => p.role == r,
+                Sel::Roles(rs) => rs.contains(&p.role),
             };
             // Structure counts as there whenever its skin is being torn.
             if !take || (dmg.hidden(p) && !(structure && matches!(req.sel, Sel::GroupAll(_)))) {
                 continue;
             }
-            let stick = if structure { 0.12 } else { 0.0 };
+            let stick = if structure { 0.12 * dmg.spec.span / 5.5 } else { 0.0 };
             let second = if req.own2 { req.tear2.grow(stick) } else { dmg.tears_for(p)[0] };
             let tears = [req.tear.grow(stick), second];
             // Where the leaving part is: the mean of its vertices, body frame.
@@ -580,10 +590,11 @@ impl Sheds {
                 tear: tears,
                 jag: if jag > 0.0 { jag } else { JAG },
                 cut: piece_cut[i] || tears.iter().any(|t| t.is_some()),
-                radius: (ext.max_element() * 0.5).clamp(0.1, 3.0) as f64,
+                radius: (ext.max_element() * 0.5).clamp(0.1, 3.0 * dmg.spec.span / 5.5) as f64,
                 span: ext.max_element(),
                 scuff: dmg.scuff[p.group].max(0.4),
                 seed,
+                kind: dmg.spec.id as f32,
                 age: 0.0,
                 bounces: 0,
                 resting: false,
@@ -675,7 +686,7 @@ impl Sheds {
             objs.push(DrawObj {
                 mesh: s.mesh,
                 model,
-                glow: [0.25, 0.0, 0.0, s.seed],
+                glow: [0.25, s.kind, 0.0, s.seed],
                 params,
                 cast: 0b11,
                 cut: s.cut,
@@ -697,4 +708,3 @@ pub fn hard_group(hi: usize) -> usize {
         _ => G_FUSE,
     }
 }
-pub const GEAR_PIECES: [&[&str]; 3] = [&["nose leg", "nose fork", "nose wheel", "upper torque link", "lower torque link"], &["left main leg", "left main wheel"], &["right main leg", "right main wheel"]];

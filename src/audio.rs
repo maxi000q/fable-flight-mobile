@@ -55,8 +55,12 @@ pub struct Params {
     /// engine and propeller condition, 0 dead .. 1 sound
     pub health: f32,
     pub prop: f32,
-    /// m/s through the air
+    /// m/s through the air, and the speed where the airframe starts to howl (0: a light single's)
     pub airspeed: f32,
+    pub vne: f32,
+    /// the engine is a turbofan (1) rather than a piston single (0), and its fan speed (fraction of N1)
+    pub jet: f32,
+    pub n1: f32,
     pub g_load: f32,
     /// RMS vertical turbulence, m/s
     pub rough: f32,
@@ -85,6 +89,12 @@ pub struct Params {
     /// fire burning near the camera 0..1
     pub fire: f32,
     pub warn: Warn,
+}
+
+impl Params {
+    fn vne_or(&self) -> f32 {
+        if self.vne > 0.0 { self.vne } else { 83.9 }
+    }
 }
 
 /// One-off sounds.
@@ -155,7 +165,6 @@ impl Audio {
 }
 
 /// Never-exceed speed, m/s.
-const VNE: f32 = crate::plane::VNE as f32;
 const RATE: u32 = 44100;
 const DT: f32 = 1.0 / RATE as f32;
 /// Parameters are smoothed and filters retuned every this many samples.
@@ -512,6 +521,57 @@ impl Engine {
     }
 }
 
+/// A turbofan (all four together): the fan's tone at its blade-passing
+/// frequency (38 blades), the buzz-saw of shock waves off the blade tips near
+/// full power (a rasping chord on the shaft's harmonics), the exhaust's roar,
+/// and the core's high whine.
+struct Jet {
+    shaft_ph: f32,
+    core_ph: f32,
+    roar: [Bq; 2],
+    hiss: Bq,
+    saw: [f32; 20],
+    saw_gain: f32,
+}
+
+impl Jet {
+    fn new() -> Self {
+        // Each harmonic of the buzz-saw starts at its own phase (no two blades are alike).
+        let mut saw = [0.0; 20];
+        for (h, s) in saw.iter_mut().enumerate() {
+            *s = (h as f32 * 2.399).fract() * TAU;
+        }
+        Self { shaft_ph: 0.0, core_ph: 0.0, roar: [Bq::new(Bq::lp, 240.0, 0.7), Bq::new(Bq::bp, 650.0, 0.7)], hiss: Bq::new(Bq::bp, 3000.0, 0.9), saw, saw_gain: 0.0 }
+    }
+    fn control(&mut self, p: &Params) {
+        self.saw_gain = smooth(0.80, 0.97, p.n1);
+        self.hiss.bp(1200.0 + 3400.0 * p.n1, 0.9);
+    }
+    fn sample(&mut self, p: &Params, rng: &mut Rng) -> f32 {
+        let n1 = p.n1.max(0.0);
+        // 3600 rpm at 100% N1.
+        let shaft = n1 * 60.0;
+        self.shaft_ph = (self.shaft_ph + shaft * DT).fract();
+        let fan = TAU * (self.shaft_ph * 38.0).fract();
+        let tone = fan.sin() * 0.6 + (2.0 * fan + 0.7).sin() * 0.25;
+        self.core_ph = (self.core_ph + (4200.0 + 3600.0 * n1) * DT).fract();
+        let whine = (TAU * self.core_ph).sin();
+        let mut saw = 0.0;
+        if self.saw_gain > 0.0 {
+            for (h, ph) in self.saw.iter().enumerate() {
+                let k = (h + 4) as f32;
+                saw += (TAU * (self.shaft_ph * k).fract() + ph).sin() / k.sqrt();
+            }
+        }
+        let nz = rng.f();
+        let thrust = p.power.max(0.0);
+        let roar = self.roar[0].run(nz) * 1.3 + self.roar[1].run(nz) * 0.8;
+        let hiss = self.hiss.run(nz);
+        let run = if p.health > 0.0 { 1.0 } else { 0.25 };
+        (tone * (0.03 + 0.10 * n1) + whine * 0.012 * n1 + saw * 0.018 * self.saw_gain + hiss * (0.05 + 0.25 * n1) + roar * (0.10 + 1.6 * thrust.powf(1.3))) * run * smooth(0.02, 0.2, n1)
+    }
+}
+
 /// Air rushing past: outside, and as heard through the cabin.
 struct Wind {
     ext: [Bq; 4],
@@ -571,7 +631,8 @@ impl Wind {
         let seal = (self.seal[0].run(nl) * 0.7 + self.seal[1].run(nr) * 0.45) * s * (1.0 + 4.0 * p.cracked);
         let crack = self.crack.run(nr) * q * 0.12 * p.cracked;
         // Past the never-exceed speed the airframe howls.
-        let over = smooth(0.85 * VNE, VNE + 15.0, v).powi(2);
+        let vne = p.vne_or();
+        let over = smooth(0.85 * vne, vne + 15.0, v).powi(2);
         let howl = (self.howl[0].run(nl) + self.howl[1].run(nr) * 0.7) * over * 2.0;
         [ext_l + howl * 0.5, ext_r + howl * 0.5, cab + seal + crack + howl, cab + seal * 0.8 + crack + howl * 0.9]
     }
@@ -856,6 +917,7 @@ struct Synth {
     t: Params,
     p: Params,
     eng: Engine,
+    jet: Jet,
     wind: Wind,
     body: Body,
     voices: Vec<Voice>,
@@ -881,6 +943,7 @@ impl Synth {
             t: Params::default(),
             p: Params::default(),
             eng: Engine::new(),
+            jet: Jet::new(),
             wind: Wind::new(),
             body: Body::new(),
             voices: Vec::with_capacity(MAX_VOICES),
@@ -996,6 +1059,8 @@ impl Synth {
         sm(&mut p.cabin, t.cabin, 0.05);
         sm(&mut p.dist, t.dist, 0.08);
         sm(&mut p.fire, t.fire, 0.3);
+        sm(&mut p.n1, t.n1, 0.12);
+        (p.jet, p.vne) = (t.jet, t.vne);
         p.health = if t.health <= 0.0 { 0.0 } else { p.health };
         p.warn = t.warn;
         if p.live < 0.01 {
@@ -1004,6 +1069,7 @@ impl Synth {
         let p = self.p;
 
         self.eng.control(&p);
+        self.jet.control(&p);
         self.wind.control(&p);
         self.body.control(&p);
         for v in &mut self.voices {
@@ -1018,7 +1084,8 @@ impl Synth {
         // Creaks: more the harder the airframe is worked.
         if p.live > 0.5 {
             let v = p.airspeed;
-            let over = smooth(0.82 * VNE, VNE + 15.0, v);
+            let vne = p.vne_or();
+            let over = smooth(0.82 * vne, vne + 15.0, v);
             let g = smooth(2.8, 5.5, p.g_load.abs()) + smooth(-0.5, -2.5, p.g_load);
             let rough = smooth(0.5, 4.0, p.rough) * smooth(20.0, 60.0, v);
             let stress = over * 2.5 + g * 2.5 + rough * 0.5 + p.jolt.min(2.0) * 2.0 + p.buffet * 0.8 + p.flutter.min(1.0) * 2.0;
@@ -1044,7 +1111,12 @@ impl Iterator for Synth {
         let rng = &mut self.rng;
 
         // The aircraft's own sources.
-        let (ex, prop, mech) = if p.live > 0.001 && p.rpm > 1.0 { self.eng.sample(&p, rng) } else { (0.0, 0.0, 0.0) };
+        let jet = p.jet > 0.5;
+        let (ex, prop, mech) = if p.live > 0.001 && p.rpm > 1.0 {
+            if jet { (self.jet.sample(&p, rng), 0.0, 0.0) } else { self.eng.sample(&p, rng) }
+        } else {
+            (0.0, 0.0, 0.0)
+        };
         let w = self.wind.sample(&p, rng);
         let b = self.body.sample(&p, rng);
         let (mut sl, mut sr, mut ml, mut mr) = (b[0], b[1], b[2], b[3]);
@@ -1072,7 +1144,7 @@ impl Iterator for Synth {
         let c = &mut self.cab;
         let dg = self.dist_gain;
         let wg = dg.sqrt().min(1.0);
-        let eng = ex + prop * 1.1 + mech * 0.6;
+        let eng = (ex + prop * 1.1 + mech * 0.6) * if jet { 3.2 } else { 1.0 };
         let mut el = (eng + ml + sl * 0.3) * dg + w[0] * wg;
         let mut er = (eng + mr + sr * 0.3) * dg + w[1] * wg;
         let k = c.abs_k;
@@ -1087,7 +1159,8 @@ impl Iterator for Synth {
         // the airframe right there.
         let (mut il, mut ir) = (0.0, 0.0);
         if p.cabin > 0.001 {
-            let ie = ex * 1.0 + prop * 1.5 + mech * 0.3;
+            // (An airliner's flight deck is far ahead of its engines, and well insulated.)
+            let ie = (ex * 1.0 + prop * 1.5 + mech * 0.3) * if jet { 0.18 } else { 1.0 };
             let ie = c.eng_lp[0].run(ie);
             let ie = c.eng_lp[1].run(ie);
             let ie = c.eng_boom.run(ie) * 0.75 + ex * 0.03;
@@ -1230,6 +1303,19 @@ mod tests {
         let full = render(Params { rpm: 2400.0, power: 1.0, throttle: 1.0, airspeed: 0.0, ..flying() }, &[], 1.0);
         let d = db(rms(&full), rms(&idle));
         assert!(d > 6.0, "full power only {d:.1} dB over idle");
+    }
+
+    #[test]
+    fn jet_spools_up_louder_than_the_single() {
+        let jet = |n1: f32, power: f32, dist: f32, cabin: f32| Params { jet: 1.0, n1, rpm: n1 * 3600.0, power, throttle: power, airspeed: 0.0, dist, cabin, vne: 85.0, ..flying() };
+        let idle = rms(&render(jet(0.25, 0.035, 85.0, 0.0), &[], 1.0));
+        let full = rms(&render(jet(1.0, 1.0, 85.0, 0.0), &[], 1.0));
+        let deck = rms(&render(jet(1.0, 1.0, 85.0, 1.0), &[], 1.0));
+        let single = rms(&render(Params { rpm: 2400.0, power: 1.0, throttle: 1.0, airspeed: 0.0, ..flying() }, &[], 1.0));
+        println!("jet idle {:.1} dB, full {:.1} dB, on the flight deck {:.1} dB, the single flat out {:.1} dB (rms re 1)", db(idle, 1.0), db(full, 1.0), db(deck, 1.0), db(single, 1.0));
+        assert!(db(full, idle) > 8.0);
+        assert!(full > single * 0.8);
+        assert!(deck < full);
     }
 
     #[test]

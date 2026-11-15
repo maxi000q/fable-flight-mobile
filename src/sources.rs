@@ -730,6 +730,9 @@ pub struct TileData {
     /// Surface height (water surface where there is water) on the GV x GV grid.
     pub heights: Vec<f32>,
     pub water: Vec<bool>,
+    /// on the same grid: how much of the ocean's long waves the water shows
+    /// (ocean.rs `sea_weight`, as the shaders' `sea_state`), 0 on land
+    pub sea: Vec<f32>,
     pub imagery: Vec<Vec<u8>>, // mip chain, rgba
     pub img_size: u32,
     pub mask: Vec<Vec<u8>>, // mip chain, rgba (see ground_mask)
@@ -984,8 +987,20 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             hs[j * e + i] = (h, raw, water);
         }
     }
+    let mask_mips = mip_chain(mask, MASK, 4);
+    // Bilinear lookup in one level of the mask, as the GPU samples it.
+    let mask_at = |level: usize, u: f64, v: f64, ch: usize| -> f32 {
+        let n = (MASK >> level).max(1);
+        let m = &mask_mips[level.min(mask_mips.len() - 1)];
+        let (x, y) = (u * n as f64 - 0.5, v * n as f64 - 0.5);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
+        let at = |i: f64, j: f64| m[((j.clamp(0.0, n as f64 - 1.0) as usize) * n + i.clamp(0.0, n as f64 - 1.0) as usize) * 4 + ch] as f32 / 255.0;
+        (at(x0, y0) * (1.0 - fx) + at(x0 + 1.0, y0) * fx) * (1.0 - fy) + (at(x0, y0 + 1.0) * (1.0 - fx) + at(x0 + 1.0, y0 + 1.0) * fx) * fy
+    };
     let mut verts = Vec::with_capacity(GV * GV + 4 * GV);
     let (mut heights, mut water) = (Vec::with_capacity(GV * GV), Vec::with_capacity(GV * GV));
+    let mut sea = Vec::with_capacity(GV * GV);
     let mut radius = 0f64;
     for j in 1..=GV {
         for i in 1..=GV {
@@ -1000,6 +1015,15 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             radius = radius.max(p.length());
             heights.push(h);
             water.push(w);
+            let (u, v) = ((i - 1) as f64 / GRID as f64, (j - 1) as f64 / GRID as f64);
+            sea.push(if w {
+                let shore = mask_at(3, u, v, 0);
+                let shore = ((shore - 0.5) / 0.5).clamp(0.0, 1.0);
+                let shore = shore * shore * (3.0 - 2.0 * shore);
+                crate::ocean::sea_weight(mask_at(1, u, v, 1) * 255.0 / 80.0, id.lat_lon(u, v).0.sin() as f32, shore)
+            } else {
+                0.0
+            });
             verts.push(TerrainVertex {
                 pos: p.as_vec3().into(),
                 depth: if w { (-raw).max(0.0) } else { 0.0 },
@@ -1037,9 +1061,10 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
         verts,
         heights,
         water,
+        sea,
         imagery: mip_chain(img.into_raw(), img_size as usize, 4),
         img_size,
-        mask: mip_chain(mask, MASK, 4),
+        mask: mask_mips,
         imagery_gen,
     })
 }
