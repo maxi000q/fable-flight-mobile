@@ -20,6 +20,7 @@ mod livewx;
 mod settings;
 mod gauges;
 mod gmaps;
+mod graphics;
 mod tiles3d;
 mod impostor;
 mod materials;
@@ -198,8 +199,10 @@ struct Args {
     weather_panel: bool,
     vsync: bool,
     taa: bool,
-    /// the 3D scene's resolution as a fraction of the window's (default: 1, or
-    /// INTEGRATED_SCALE on a GPU without memory of its own)
+    /// graphics preset and render resolution for this run (not saved; the
+    /// resolution defaults to INTEGRATED_SCALE on a GPU without memory of its
+    /// own until the graphics settings are saved)
+    graphics: Option<graphics::Level>,
     render_scale: Option<f32>,
     /// log the frame rate once a second (average and slowest frame)
     fps_log: bool,
@@ -269,6 +272,7 @@ fn parse_args() -> Args {
         weather_panel: false,
         vsync: true,
         taa: true,
+        graphics: None,
         render_scale: None,
         fps_log: false,
         headless: false,
@@ -427,7 +431,8 @@ fn parse_args() -> Args {
                 a.taa = false;
                 used = 1;
             }
-            "--render-scale" => a.render_scale = num(&v, i).map(|s| s as f32),
+            "--graphics" => a.graphics = v.get(i + 1).and_then(|s| graphics::Level::parse(s)).filter(|l| *l != graphics::Level::Off),
+            "--render-scale" => a.render_scale = num(&v, i).map(|s| (s as f32).clamp(graphics::SCALE_MIN, graphics::SCALE_MAX)),
             "--headless" => {
                 a.headless = true;
                 used = 1;
@@ -482,7 +487,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--graphics low|medium|high|ultra] [--render-scale 0.5..2] [--headless] [--fps-log] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -579,8 +584,10 @@ struct Game {
     ocean_off: DVec2,
     prev_cam: DVec3,
     prev_vp: [[f32; 4]; 4],
-    /// temporal anti-aliasing (F2)
-    taa: bool,
+    /// graphics settings (the pause menu's Graphics page; taa toggles with F2),
+    /// and what was last handed to the renderer and world
+    gfx: graphics::Graphics,
+    gfx_applied: Option<graphics::Graphics>,
     /// where the aircraft was drawn last frame, relative to that frame's camera
     prev_plane: Mat4,
     /// centre and half size of the aircraft in its body frame
@@ -709,11 +716,22 @@ struct Game {
 impl Game {
     fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
         let prefs = settings::Settings::load();
-        let r = pollster::block_on(Renderer::new(window.clone(), args.vsync))?;
+        // Saved graphics settings; the command line overrides them for this run.
+        let mut gfx = graphics::Graphics::load();
+        if let Some(l) = args.graphics {
+            gfx.apply(l);
+        }
+        gfx.vsync &= args.vsync;
+        gfx.taa &= args.taa && prefs.taa;
+        let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync))?;
+        if let Some(sc) = args.render_scale {
+            gfx.scale = sc;
+        } else if r.integrated && !graphics::Graphics::saved() {
+            gfx.scale = INTEGRATED_SCALE;
+        }
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         let mut r = r;
         r.headless = args.headless;
-        r.set_render_scale(args.render_scale.unwrap_or(if r.integrated { INTEGRATED_SCALE } else { 1.0 }));
         // Cached scans load offline too; missing ones keep the procedural layer.
         r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline));
         let google = Arc::new(gmaps::Google::load(args.google_key.clone()));
@@ -803,7 +821,7 @@ impl Game {
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len()], window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa && prefs.taa, prev_plane: Mat4::IDENTITY, plane_box,
+            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
@@ -1651,7 +1669,10 @@ impl Game {
                 self.status_until = self.real + 2.0;
             }
             KeyCode::F1 => self.show_help = !self.show_help,
-            KeyCode::F2 => self.taa = !self.taa,
+            KeyCode::F2 => {
+                    self.gfx.taa = !self.gfx.taa;
+                    self.gfx.save();
+                }
             KeyCode::F12 => {
                 let p = PathBuf::from(format!("screenshot-{}.png", self.frame));
                 self.shots.insert(0, (0.0, p, None));
@@ -2053,7 +2074,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -2496,9 +2517,11 @@ impl Game {
         }
 
         // ---- camera
-        // (in the 3D scene's pixels, which --render-scale may make fewer than the window's)
-        let (w, h) = self.r.render_size();
-        let (w, h) = (w as f32, h as f32);
+        self.apply_graphics();
+        let size = self.window.inner_size();
+        let (w, h) = (size.width.max(1) as f32, size.height.max(1) as f32);
+        // the size the scene is drawn at (graphics settings: render resolution)
+        let (rw, rh) = { let (a, b) = self.r.render_size(); (a as f32, b as f32) };
         let mut fov = 60f32.to_radians();
         let (cam, dir, upv);
         if !(self.cam_mode == 1 && !self.crashed && !in_menu) {
@@ -2650,10 +2673,10 @@ impl Game {
         // Temporal anti-aliasing: each frame is drawn a different fraction of
         // a pixel off centre (a Halton sequence), and the renderer blends the
         // frames back together. Everything else works from the centred `vp`.
-        let jitter = if self.taa {
+        let jitter = if self.gfx.taa {
             let halton = |mut i: u64, b: u64| { let (mut f, mut r) = (1.0f32, 0.0f32); while i > 0 { f /= b as f32; r += f * (i % b) as f32; i /= b; } r };
             let k = self.frame % 8 + 1;
-            Vec2::new(halton(k, 2) - 0.5, halton(k, 3) - 0.5) * 2.0 / Vec2::new(w, h)
+            Vec2::new(halton(k, 2) - 0.5, halton(k, 3) - 0.5) * 2.0 / Vec2::new(rw, rh)
         } else {
             Vec2::ZERO
         };
@@ -2706,14 +2729,17 @@ impl Game {
         let cam_up = cam_right.cross(dir);
         // Shadow cascades: three nested boxes around the aircraft, each snapped
         // to its own texel grid so shadows do not shimmer as it moves.
-        let shadow_on = mu > 0.04 && !in_menu;
+        let shadow_on = mu > 0.04 && !in_menu && self.gfx.shadows != graphics::Level::Off;
+        let sres = self.r.shadow_res() as f32;
+        // (the aircraft's layer may use only part of it: Renderer::plane_shadow_res)
+        let pres = self.r.plane_shadow_res() as f32;
         const CASC: [f32; 3] = [260.0, 1500.0, 8500.0];
         let mut casc_vp = [[[0f32; 4]; 4]; render::CASCADES + 4];
         {
             let right = { let r = DVec3::Z.cross(sun); if r.length_squared() < 1e-6 { DVec3::X } else { r.normalize() } };
             let upl = sun.cross(right);
             for (i, r) in CASC.iter().enumerate() {
-                let texel = (2.0 * r / 4096.0) as f64;
+                let texel = (2.0 * r / sres) as f64;
                 let snap = |v: f64| (v / texel).floor() * texel - v;
                 let centre = focus_abs - cam + right * snap(focus_abs.dot(right)) + upl * snap(focus_abs.dot(upl));
                 let d = r + 3500.0;
@@ -2738,15 +2764,15 @@ impl Game {
             east: v4(east, self.wave_off.x),
             north: v4(north, self.wave_off.y),
             up: v4(up, calt),
-            screen: [w, h, 1.0 / w, 1.0 / h],
+            screen: [rw, rh, 1.0 / rw, 1.0 / rh],
             time: [self.time as f32, dt as f32, exposure, self.frame as f32],
             cloud: [if in_menu { 0.0 } else { self.wx.clouds }, self.wx.cloud_base, self.wx.cloud_depth, self.wx.cloud_ceiling()],
             light_pos: [0.0; 4],
             light_col: [0.0; 4],
             vol_o: [0.0; 4],
             vol_u: [0.0; 4],
-            misc: [near, self.city_glow, 1.0, 2.0 * (fov * 0.5).tan() / h],
-            csm: [CASC[0] * 2.0 / 4096.0, CASC[1] * 2.0 / 4096.0, CASC[2] * 2.0 / 4096.0, if shadow_on { 1.0 } else { 0.0 }],
+            misc: [near, self.city_glow, 1.0, 2.0 * (fov * 0.5).tan() / rh],
+            csm: [CASC[0] * 2.0 / sres, CASC[1] * 2.0 / sres, CASC[2] * 2.0 / sres, if shadow_on { 1.0 } else { 0.0 }],
             scorch: [[0.0; 4]; 8],
             crater: [[0.0; 4]; 8],
             prev_vp: self.prev_vp,
@@ -2756,8 +2782,8 @@ impl Game {
             vol_e: [0.0; 4],
             vol_n: [0.0; 4],
             pshadow_vp: casc_vp[3],
-            pshadow: [self.spec.shadow_r * 2.0 / self.r.plane_shadow_res() as f32, 0.0012 / PSHADOW_DEPTH, self.r.plane_shadow_res() as f32 / 4096.0, if shadow_on && !self.crashed { 1.0 } else { 0.0 }],
-            taa: [jitter.x * 0.5, -jitter.y * 0.5, if self.taa { 1.0 } else { 0.0 }, 0.0],
+            pshadow: [self.spec.shadow_r * 2.0 / pres, 0.0012 / PSHADOW_DEPTH, pres / sres, if shadow_on && !self.crashed { 1.0 } else { 0.0 }],
+            taa: [jitter.x * 0.5, -jitter.y * 0.5, if self.gfx.taa { 1.0 } else { 0.0 }, 0.0],
             plane_inv: [[0.0; 4]; 4],
             plane_prev: [[0.0; 4]; 4],
             plane_box: self.plane_box,
@@ -2778,6 +2804,8 @@ impl Game {
             shore: [0.0; 4],
             foam: [[0.0; 4]; 16],
             start: [if in_menu { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            quality: [0.0; 4],
+            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), 0.0],
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -3353,6 +3381,11 @@ impl Game {
                                 ui.spacing_mut().slider_width = 130.0;
                                 self.google_settings(ui);
                             });
+                            let summary = self.gfx.matches().map(graphics::Level::name).unwrap_or(t!("Custom", "Personnalisé"));
+                            menu::section(ui, "graphics", t!("Graphics", "Graphismes"), summary, false, |ui| {
+                                ui.spacing_mut().slider_width = 160.0;
+                                self.graphics_settings(ui);
+                            });
                             let n = self.binds.axes.len() + self.binds.buttons.len();
                             let summary = if n > 0 { t!("{} bound", "{} assignés", n) } else { String::new() };
                             menu::section(ui, "bindings", t!("Joysticks & key bindings", "Joysticks et assignations"), &summary, false, |ui| {
@@ -3514,6 +3547,37 @@ impl Game {
     /// Whether Google's data is on screen (its credit is shown, HUD or not).
     fn google_shown(&self) -> bool {
         self.src.google.enabled() || self.world.photo().stats.0 > 0
+    }
+
+    /// The graphics settings panel; saves what changes (applied next frame).
+    fn graphics_settings(&mut self, ui: &mut egui::Ui) {
+        let size = self.window.inner_size();
+        if self.gfx.ui(ui, (size.width, size.height), self.fps) {
+            self.gfx.save();
+        }
+    }
+
+    /// Hands changed graphics settings to the renderer and the world.
+    fn apply_graphics(&mut self) {
+        let g = self.gfx;
+        if self.gfx_applied == Some(g) {
+            return;
+        }
+        self.r.set_scale(g.scale);
+        self.r.set_shadow_res(g.shadow_res());
+        self.r.set_vsync(g.vsync);
+        self.r.ao = g.ao;
+        self.r.cloud_step = g.cloud_step();
+        self.world.lod_k = g.lod_k();
+        self.world.reach_k = g.reach();
+        self.world.city_k = g.city_k();
+        self.world.tree_far = g.tree_far();
+        self.world.tree_imp_k = g.tree_imp_k();
+        self.world.cars = g.car_density();
+        if self.gfx_applied.is_some() {
+            log::info!("graphics: {} at {:.0}%, shadows {}, clouds {}, terrain {}, scenery {}, city {}, trees {}, traffic {}, AO {}", g.matches().map(graphics::Level::name).unwrap_or("custom"), g.scale * 100.0, g.shadows.name(), g.clouds.name(), g.terrain.name(), g.scenery.name(), g.city.name(), g.trees.name(), g.cars.name(), g.ao);
+        }
+        self.gfx_applied = Some(g);
     }
 
     /// Map imagery: the Google Maps switch, its API key and what it has used.
@@ -3691,11 +3755,6 @@ impl Game {
                             let t = if self.show_hud { t!("shown", "affiché") } else { t!("hidden", "masqué") };
                             ui.checkbox(&mut self.show_hud, t);
                             ui.end_row();
-                            menu::heading(ui, t!("GRAPHICS", "GRAPHISMES"));
-                            ui.end_row();
-                            ui.label(t!("Anti-aliasing", "Anticrénelage"));
-                            ui.checkbox(&mut self.taa, t!("temporal (TAA)", "temporel (TAA)"));
-                            ui.end_row();
                             menu::heading(ui, t!("TRAFFIC", "TRAFIC"));
                             ui.end_row();
                             ui.label(t!("Live air traffic", "Trafic aérien réel"));
@@ -3711,8 +3770,16 @@ impl Game {
                         if pad {
                             ui.label(RichText::new(t!("In flight, View switches the camera.", "En vol, View change de caméra.")).size(12.0).color(DIM));
                         } else {
-                            ui.label(RichText::new(t!("Shortcuts in flight: U sound, C camera, H HUD, F2 anti-aliasing.", "Raccourcis en vol : U son, C caméra, H HUD, F2 anticrénelage.")).size(12.0).color(DIM));
+                            ui.label(RichText::new(t!("Shortcuts in flight: U sound, C camera, H HUD, F2 anti-aliasing. Resolution, shadows and the rest are on the Graphics page.", "Raccourcis en vol : U son, C caméra, H HUD, F2 anticrénelage. Résolution, ombres et le reste sont sur la page Graphismes.")).size(12.0).color(DIM));
                         }
+                        padui::follow_focus(ui);
+                    }).inner,
+                    Page::Graphics => egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
+                        ui.spacing_mut().slider_width = 200.0;
+                        self.graphics_settings(ui);
+                        ui.add_space(6.0);
+                        let t = if self.src.google.photoreal() { "on" } else { "off" };
+                        ui.label(RichText::new(format!("Google's photorealistic 3D cities ({t}) have their own switch and detail level under Settings › Map imagery.")).size(11.5).color(DIM));
                         padui::follow_focus(ui);
                     }).inner,
                     Page::Controls => {
