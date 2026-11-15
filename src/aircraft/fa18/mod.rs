@@ -407,6 +407,11 @@ pub static SPEC: Spec = Spec {
     // 4,900 kg inside; two F404s: about 0.2 kg/s idling, 2.4 at military power, 12 in full afterburner
     fuel_kg: 4_900.0,
     fuel_flow: [0.2, 2.4, 12.0],
+    // (Its pilot is all the payload there is.)
+    payload: [100.0, 100.0, 0.0],
+    mac: 3.51,
+    cg: [0.22, 0.16, 0.30],
+    fuel_arm: 0.4,
     // Pitch, yaw, roll (NASA's F/A-18 HARV simulation data).
     inertia: DVec3::new(165.7e3, 205.1e3, 31.2e3),
     wing_area: 37.16,

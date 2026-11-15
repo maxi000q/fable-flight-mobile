@@ -88,6 +88,8 @@ pub struct Plane {
     auto_start: f64,
     /// the electrical system and the failures (systems.rs)
     pub sys: crate::systems::Systems,
+    /// payload aboard (kg): crew, passengers, baggage
+    pub payload: f64,
     /// a jet's fan speed, fraction of 100% N1
     pub n1: f64,
     /// how far the afterburners are lit, 0..1 (what is seen and heard of them; the thrust is immediate)
@@ -214,6 +216,7 @@ impl Plane {
             starter_on: false,
             auto_start: 0.0,
             sys: Default::default(),
+            payload: spec.payload[0],
             n1: 0.0,
             burner: 0.0,
             drop: 0.0,
@@ -326,7 +329,21 @@ impl Plane {
     /// Angle of attack the wing stalls at (flaps make it stall a little earlier, slats later).
     /// What it weighs now (kg): `spec.mass` with half tanks, more or less the fuel.
     pub fn mass(&self) -> f64 {
-        self.spec.mass + self.fuel - 0.5 * self.spec.fuel_kg
+        self.spec.mass + self.fuel - 0.5 * self.spec.fuel_kg + self.payload - self.spec.payload[0]
+    }
+
+    /// Centre of gravity, as a fraction of the mean aerodynamic chord: where
+    /// the fuel and the payload put it, against the reference at `spec.mass`.
+    pub fn cg(&self) -> f64 {
+        let s = self.spec;
+        let moment = (self.fuel - 0.5 * s.fuel_kg) * s.fuel_arm + (self.payload - s.payload[0]) * s.payload[2];
+        s.cg[0] + moment / self.mass() / s.mac
+    }
+
+    /// How far the CG is outside its limits (fraction of MAC; 0 inside, - forward, + aft).
+    pub fn cg_excess(&self) -> f64 {
+        let (c, s) = (self.cg(), self.spec);
+        if c < s.cg[1] { c - s.cg[1] } else if c > s.cg[2] { c - s.cg[2] } else { 0.0 }
     }
 
     /// Fuel left, as a fraction of full tanks.
@@ -1193,15 +1210,25 @@ impl Plane {
             if el > 0.05 && self.stick.x.abs() > 0.06 {
                 self.trim += (alpha_1g - self.trim) * (dt * 0.5).min(1.0);
             }
-            let mut alpha_cmd = self.trim + self.stick.x * hd.alpha_ctl * el;
+            // Balance: aft, the static margin shrinks, so the nose is lighter and
+            // quicker to answer (beyond the aft limit, barely stable); forward, it
+            // is stiff and heavy, and the elevator runs out sooner (a hard flare).
+            let shift = self.cg() - spec.cg[0];
+            let margin = 0.15 - shift;
+            let cg_stiff = (0.4 + 0.6 * margin / 0.15).clamp(0.15, 1.8);
+            let cg_auth = (1.0 + 1.5 * shift).clamp(0.5, 1.4);
+            // (The stick sets the elevator; how much angle of attack that buys is
+            // its moment over the stability: less stable, more for the same pull.)
+            let cg_sens = (1.0 / cg_stiff).min(2.5);
+            let mut alpha_cmd = self.trim + self.stick.x * hd.alpha_ctl * el * cg_auth * cg_sens;
             if spec.fbw_g > 0.0 {
                 // Fly-by-wire: the stick asks for load, never more than the limit.
                 let alpha_for = |g: f64| (g * mass * 9.81 / (q * area).max(1.0) - spec.cl0 - flap_cl) / spec.cl_a;
                 alpha_cmd = alpha_cmd.clamp(alpha_for(-0.4 * spec.fbw_g), alpha_for(spec.fbw_g));
             }
             // Pitch stiffness comes from the tailplane; without one the nose wanders off.
-            let stiff = hd.pitch_k * st - hd.pitch_k_lost * (1.0 - st);
-            wdot.x = a * (stiff * (alpha_cmd - alpha) + self.stick.x * hd.pitch_ctl * el) - hd.pitch_d * ad * (0.3 + 0.7 * st) * om.x;
+            let stiff = (hd.pitch_k * st - hd.pitch_k_lost * (1.0 - st)) * cg_stiff;
+            wdot.x = a * (stiff * (alpha_cmd - alpha) + self.stick.x * hd.pitch_ctl * el * cg_auth) - hd.pitch_d * ad * (0.3 + 0.7 * st) * om.x;
             // Roll damping fades in a stall, and past it turns round: the wing going
             // down meets the air at a still higher angle and loses still more lift.
             // An airliner's outboard ailerons lock out once the flaps are up.
@@ -2285,6 +2312,39 @@ mod tests {
         p.fuel = 50.0;
         run(&mut p, 2.0, &Controls::default());
         assert!(p.running, "{}", rpm(&p));
+    }
+
+    #[test]
+    fn balance_follows_the_load_and_changes_the_handling() {
+        // As loaded by default the CG sits at the reference, inside the limits.
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+        assert!((p.cg() - C172.cg[0]).abs() < 1e-9 && p.cg_excess() == 0.0);
+        // Four up and full baggage: heavier, and the CG goes past the aft limit.
+        p.payload = C172.payload[1];
+        assert!(p.mass() > C172.mass + 200.0);
+        assert!(p.cg() > C172.cg[2] && p.cg_excess() > 0.0, "{}", p.cg());
+        // Burning fuel (it sits aft of the CG) moves it forward.
+        let c0 = p.cg();
+        p.fuel = 10.0;
+        assert!(p.cg() < c0);
+
+        // The same pull on the stick: the aft-loaded aircraft pitches up quicker.
+        let w = empty_world();
+        let pitch_rate = |payload: f64, fuel: f64| {
+            let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+            (p.payload, p.fuel) = (payload, fuel);
+            p.throttle = 0.7;
+            let dt = 1.0 / 180.0;
+            let mut best: f64 = 0.0;
+            for _ in 0..(1.0 / dt) as usize {
+                p.step(dt, &Controls { pitch: 0.4, ..Default::default() }, &w);
+                best = best.max(p.omega.x.abs());
+            }
+            best
+        };
+        let (fwd, aft) = (pitch_rate(80.0, C172.fuel_kg * 0.1), pitch_rate(C172.payload[1], C172.fuel_kg));
+        println!("pitch rate after a pull: forward CG {:.1}°/s, aft CG {:.1}°/s", fwd.to_degrees(), aft.to_degrees());
+        assert!(aft > fwd * 1.15, "{fwd} {aft}");
     }
 
     #[test]

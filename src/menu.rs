@@ -128,6 +128,8 @@ pub struct Menu {
     /// fuel to start with (fraction of full tanks), and an engine left off for a start on the ground
     pub fuel: f64,
     pub cold: bool,
+    /// payload, as a fraction of the most the aircraft takes (None: as it comes)
+    pub payload: Option<f64>,
 }
 
 /// How to start at an airport chosen on the globe.
@@ -143,7 +145,7 @@ pub enum Start {
 
 impl Menu {
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, show_controls: false, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, fuel: 0.5, cold: false }
+        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, show_controls: false, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, fuel: 0.5, cold: false, payload: None }
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {

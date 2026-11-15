@@ -97,6 +97,11 @@ pub static SPEC: Spec = Spec {
     // 62 US gal usable of avgas; about 2 gal/h idling and 14 at full power
     fuel_kg: 169.0,
     fuel_flow: [0.0015, 0.0105, 0.0135],
+    // Two up front included; the rear seats and the baggage are well aft.
+    payload: [160.0, 420.0, 0.95],
+    mac: 1.49,
+    cg: [0.27, 0.16, 0.37],
+    fuel_arm: 0.2,
     // Published figures for a 172.
     inertia: DVec3::new(1825.0, 2667.0, 1285.0),
     wing_area: 16.2,

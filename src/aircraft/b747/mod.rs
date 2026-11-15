@@ -1557,6 +1557,10 @@ pub static SPEC: Spec = Spec {
     // 216,840 l of Jet A; four CF6s: about 600 kg/h each idling, 10 t/h each at take-off thrust
     fuel_kg: 174_000.0,
     fuel_flow: [0.65, 11.0, 12.0],
+    payload: [40_000.0, 110_000.0, 0.5],
+    mac: 8.32,
+    cg: [0.24, 0.11, 0.33],
+    fuel_arm: 1.0,
     // Pitch, yaw, roll (Heffley & Jewell, the 747 at 288 t).
     inertia: DVec3::new(44.9e6, 67.4e6, 24.7e6),
     wing_area: 541.2,

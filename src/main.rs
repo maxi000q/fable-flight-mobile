@@ -1031,6 +1031,7 @@ impl Game {
         self.parking_brake = false;
         self.plane = Plane::spawn(self.spec, lat, lon, alt, heading, speed);
         self.plane.fuel = self.spec.fuel_kg * self.menu.fuel;
+        self.plane.payload = self.start_payload();
         // The spawn speed is through the air, not over the ground.
         self.plane.wind = self.wx.steady(self.plane.pos, 300.0);
         self.plane.vel += self.plane.wind;
@@ -1056,6 +1057,7 @@ impl Game {
         self.respawn_at(lat, lon, h + 10.0, heading, 0.0);
         self.plane = Plane::spawn_ground(self.spec, lat, lon, h, heading, pitch);
         self.plane.fuel = self.spec.fuel_kg * self.menu.fuel;
+        self.plane.payload = self.start_payload();
         if self.menu.cold {
             self.plane.cold_and_dark();
         }
@@ -1411,6 +1413,12 @@ impl Game {
                 self.keys.remove(&a.key);
             }
         }
+    }
+
+    /// The payload chosen on the start screen (kg), or the aircraft's usual.
+    fn start_payload(&self) -> f64 {
+        let [usual, most, _] = self.spec.payload;
+        self.menu.payload.map(|f| f * most).unwrap_or(usual)
     }
 
     /// The pause menu's failures: each one by hand, or one now and then at random.
@@ -3807,6 +3815,26 @@ impl Game {
                                 let kg = self.spec.fuel_kg;
                                 ui.add(egui::Slider::new(&mut self.menu.fuel, 0.05..=1.0).custom_formatter(move |v, _| format!("{:.0}%  ·  {:.0} kg", v * 100.0, v * kg)));
                             });
+                            let [usual, most, _] = self.spec.payload;
+                            if most > usual {
+                                ui.horizontal(|ui| {
+                                    ui.label(t!("Payload", "Charge"));
+                                    let mut f = self.menu.payload.unwrap_or(usual / most);
+                                    if ui.add(egui::Slider::new(&mut f, 0.15..=1.0).custom_formatter(move |v, _| format!("{:.0} kg", v * most))).changed() {
+                                        self.menu.payload = Some(f);
+                                    }
+                                });
+                            }
+                            {
+                                // Mass and balance as it will be loaded.
+                                let mut probe = Plane::spawn(self.spec, 0.0, 0.0, 1000.0, 0.0, 50.0);
+                                probe.fuel = self.spec.fuel_kg * self.menu.fuel;
+                                probe.payload = self.start_payload();
+                                let s = self.spec;
+                                let out = probe.cg_excess() != 0.0;
+                                let text = t!("{:.0} kg  ·  CG {:.0}% MAC (limits {:.0}-{:.0}%){}", "{:.0} kg  ·  centrage {:.0} % MAC (limites {:.0}-{:.0} %){}", probe.mass(), probe.cg() * 100.0, s.cg[1] * 100.0, s.cg[2] * 100.0, if out { t!("  OUT OF LIMITS", "  HORS LIMITES") } else { "" });
+                                ui.label(RichText::new(text).size(11.5).color(if out { Color32::from_rgb(255, 120, 70) } else { DIM }));
+                            }
                             if ground {
                                 ui.checkbox(&mut self.menu.cold, t!("Engine off (cold start: F4 starts it)", "Moteur arrêté (démarrage à froid : F4 pour démarrer)"));
                             }
@@ -4381,6 +4409,7 @@ impl Game {
                                     t!("magnetos {} · mixture {:.0}%", "magnétos {} · mélange {:.0}%", if p.ignition { "ON" } else { "OFF" }, p.mixture * 100.0)
                                 };
                                 row(ui, t!("Engine", "Moteur"), format!("{state}  ·  {detail}"), if p.running { TEXT } else { low });
+                                row(ui, t!("Mass, balance", "Masse, centrage"), format!("{:.0} kg  ·  {:.0}% MAC", p.mass(), p.cg() * 100.0), if p.cg_excess() != 0.0 { Color32::from_rgb(255, 90, 60) } else { TEXT });
                                 let el = &p.sys.elec;
                                 let elec = if !el.master {
                                     t!("master OFF (Ins)", "master sur OFF (Inser)").to_string()
@@ -4707,6 +4736,9 @@ impl Game {
                 }
                 if p.sys.fail.vacuum && !p.spec.is_jet() {
                     warn.push(("VACUUM", amber));
+                }
+                if p.cg_excess() != 0.0 {
+                    warn.push(("CG LIMIT", amber));
                 }
             }
             let report = if self.crashed { Vec::new() } else { p.dmg.report() };
