@@ -35,6 +35,13 @@ pub struct Weather {
     pub thermal_off: DVec3,
     /// the storm cells handed to the shaders last frame (see `storm_cells`)
     pub cells: Vec<[[f32; 4]; 2]>,
+    /// real weather (see livewx.rs) sets the sliders: where its report came
+    /// from ("EBBR", "Open-Meteo") and the report itself
+    pub live: bool,
+    pub live_station: String,
+    pub live_raw: String,
+    /// the clock follows the real time and date (see `real_clock`)
+    pub real_time: bool,
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -119,7 +126,7 @@ fn cube_face(q: DVec3) -> (u32, DVec3, DVec3, DVec3) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new() }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false }
     }
 
     /// Top of the cloud layer including any storm towers, metres.
@@ -343,7 +350,8 @@ impl Weather {
     /// game clock; `lon` (degrees) sets local time.
     pub fn panel(&mut self, ctx: &egui::Context, utc: &mut f64, doy: &mut f64, lon: f64) {
         let mut open = self.open;
-        egui::Window::new("Weather & time  (F3)")
+        egui::Window::new(t!("Weather & time  (F3)", "Météo et heure  (F3)"))
+            .id(egui::Id::unique("weather_window"))
             .open(&mut open)
             .collapsible(true)
             .resizable(false)
@@ -358,23 +366,44 @@ impl Weather {
     /// The sliders and presets, for the F3 window (one column) and the
     /// in-flight menu (two).
     pub fn controls(&mut self, ui: &mut egui::Ui, utc: &mut f64, doy: &mut f64, lon: f64, two_columns: bool) {
+        self.live_switch(ui);
+        let free = !self.live;
         if two_columns {
             ui.columns(2, |c| {
                 c[0].spacing_mut().slider_width = 115.0;
                 c[1].spacing_mut().slider_width = 115.0;
                 self.day_controls(&mut c[0], utc, doy, lon);
                 c[0].add_space(8.0);
-                self.wind_controls(&mut c[0]);
-                self.sky_controls(&mut c[1]);
-                c[1].add_space(8.0);
-                self.presets(&mut c[1]);
+                c[0].add_enabled_ui(free, |ui| self.wind_controls(ui));
+                c[1].add_enabled_ui(free, |ui| {
+                    self.sky_controls(ui);
+                    ui.add_space(8.0);
+                    self.presets(ui);
+                });
             });
         } else {
             self.day_controls(ui, utc, doy, lon);
-            self.sky_controls(ui);
-            self.wind_controls(ui);
-            ui.add_space(6.0);
-            self.presets(ui);
+            ui.add_enabled_ui(free, |ui| {
+                self.sky_controls(ui);
+                self.wind_controls(ui);
+                ui.add_space(6.0);
+                self.presets(ui);
+            });
+        }
+    }
+
+    /// The real-weather switch, and where the report comes from.
+    fn live_switch(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.live, t!("Real weather (METAR, else Open-Meteo)", "Météo réelle (METAR, sinon Open-Meteo)"));
+        if self.live {
+            let text = if self.live_station.is_empty() {
+                if self.live_raw.is_empty() { t!("Waiting for a report…", "En attente d'un bulletin…").to_string() } else { self.live_raw.clone() }
+            } else if self.live_raw.is_empty() {
+                t!("From {} (weather model)", "Selon {} (modèle météo)", self.live_station)
+            } else {
+                self.live_raw.clone()
+            };
+            ui.label(RichText::new(text).monospace().size(11.0).weak());
         }
     }
 
@@ -382,20 +411,25 @@ impl Weather {
     /// (the clock is set from them on take-off), then the sky and the wind.
     /// The start screen's weather: presets, sky and wind.
     pub fn start_weather(&mut self, ui: &mut egui::Ui) {
-        self.presets(ui);
-        ui.add_space(4.0);
-        self.sky_controls(ui);
-        self.wind_controls(ui);
+        self.live_switch(ui);
+        ui.add_enabled_ui(!self.live, |ui| {
+            self.presets(ui);
+            ui.add_space(4.0);
+            self.sky_controls(ui);
+            self.wind_controls(ui);
+        });
     }
 
     /// The start screen's time: local time of day and the date.
-    pub fn start_time(ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64) {
+    pub fn start_time(ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64, real_time: &mut bool) {
+        real_time_switch(ui, real_time);
+        let free = !*real_time;
         egui::Grid::new("start_time").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
-            ui.label("Local time");
-            add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v)));
+            ui.label(t!("Local time", "Heure locale"));
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v))));
             ui.end_row();
             ui.label("Date");
-            add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| month_day(v)));
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| date_label(v))));
             ui.end_row();
         });
     }
@@ -403,86 +437,92 @@ impl Weather {
     /// A few words for the weather: the preset it matches, else the cloud
     /// cover and wind.
     pub fn summary(&self) -> String {
+        if self.live {
+            return if self.live_station.is_empty() { t!("Real", "Réelle").to_string() } else { t!("Real · {}", "Réelle · {}", self.live_station) };
+        }
         let near = |a: f64, b: f64| (a - b).abs() < 1e-3 * (1.0 + b.abs());
         for &(name, c, b, d, s, a, h, w, g) in PRESETS {
             if near(self.clouds as f64, c as f64) && near(self.cloud_base as f64, b as f64) && near(self.cloud_depth as f64, d as f64) && near(self.storms as f64, s as f64) && near(self.alto as f64, a as f64) && near(self.haze as f64, h as f64) && near(self.wind as f64, w as f64) && near(self.gusts as f64, g as f64) {
-                return name.to_string();
+                return tr(name).to_string();
             }
         }
-        format!("{:.0}% cloud · {:.0} kt", self.clouds * 100.0, self.wind * 1.94384)
+        t!("{:.0}% cloud · {:.0} kt", "{:.0}% de nuages · {:.0} kt", self.clouds * 100.0, self.wind * 1.94384)
     }
 
     fn day_controls(&mut self, ui: &mut egui::Ui, utc: &mut f64, doy: &mut f64, lon: f64) {
-        section(ui, "DAY", |ui| {
-            ui.label("Local time");
+        real_time_switch(ui, &mut self.real_time);
+        let free = !self.real_time;
+        section(ui, tr("DAY"), |ui| {
+            ui.label(t!("Local time", "Heure locale"));
             let mut local = (*utc + lon / 15.0).rem_euclid(24.0);
             let hhmm = |v: f64, _: std::ops::RangeInclusive<usize>| format!("{:02}:{:02}", v as u32 % 24, (v.fract() * 60.0) as u32);
-            if add(ui, Slider::new(&mut local, 0.0..=23.99).custom_formatter(hhmm)).changed() {
+            if ui.add_enabled_ui(free, |ui| add(ui, Slider::new(&mut local, 0.0..=23.99).custom_formatter(hhmm))).inner.changed() {
                 *utc = (local - lon / 15.0).rem_euclid(24.0);
             }
             ui.end_row();
             ui.label("Date");
-            let date = |v: f64, _: std::ops::RangeInclusive<usize>| month_day(v);
-            add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(date));
+            let date = |v: f64, _: std::ops::RangeInclusive<usize>| date_label(v);
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(date)));
             ui.end_row();
-            ui.label("Clock speed");
-            add(ui, Slider::new(&mut self.time_rate, 0.0..=3600.0).logarithmic(true).smallest_positive(1.0).custom_formatter(|v, _| if v == 0.0 { "stopped".into() } else { format!("{v:.0}×") }));
+            ui.label(t!("Clock speed", "Vitesse de l'horloge"));
+            let rate = &mut self.time_rate;
+            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(rate, 0.0..=3600.0).logarithmic(true).smallest_positive(1.0).custom_formatter(|v, _| if v == 0.0 { t!("stopped", "arrêtée").into() } else { format!("{v:.0}×") })));
             ui.end_row();
-            ui.label("Moon");
-            add(ui, Slider::new(&mut self.moon_age, 0.0..=29.5).custom_formatter(|v, _| moon_phase(v).into()));
+            ui.label(t!("Moon", "Lune"));
+            add(ui, Slider::new(&mut self.moon_age, 0.0..=29.5).custom_formatter(|v, _| tr(moon_phase(v)).into()));
             ui.end_row();
         });
     }
 
     fn sky_controls(&mut self, ui: &mut egui::Ui) {
-        section(ui, "SKY", |ui| {
-            ui.label("Cloud cover");
+        section(ui, tr("SKY"), |ui| {
+            ui.label(t!("Cloud cover", "Couverture nuageuse"));
             add(ui, Slider::new(&mut self.clouds, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
-            ui.label("Cloud base");
+            ui.label(t!("Cloud base", "Base des nuages"));
             add(ui, Slider::new(&mut self.cloud_base, 300.0..=4000.0).step_by(50.0).suffix(" m"));
             ui.end_row();
-            ui.label("Cloud depth");
+            ui.label(t!("Cloud depth", "Épaisseur des nuages"));
             add(ui, Slider::new(&mut self.cloud_depth, 500.0..=8000.0).step_by(50.0).suffix(" m"));
             ui.end_row();
-            ui.label("Storm cells");
+            ui.label(t!("Storm cells", "Cellules orageuses"));
             add(ui, Slider::new(&mut self.storms, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
-            ui.label("Mid-level cloud");
+            ui.label(t!("Mid-level cloud", "Nuages moyens"));
             add(ui, Slider::new(&mut self.alto, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
-            ui.label("Haze");
+            ui.label(t!("Haze", "Brume"));
             add(ui, Slider::new(&mut self.haze, 0.2..=40.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.1}×")));
             ui.end_row();
             ui.label("");
-            ui.label(RichText::new(format!("visibility ~{:.0} km", self.visibility_km())).size(11.5).weak());
+            ui.label(RichText::new(t!("visibility ~{:.0} km", "visibilité ~{:.0} km", self.visibility_km())).size(11.5).weak());
             ui.end_row();
         });
     }
 
     fn wind_controls(&mut self, ui: &mut egui::Ui) {
-        section(ui, "WIND", |ui| {
-            ui.label("Speed");
+        section(ui, tr("WIND"), |ui| {
+            ui.label(t!("Speed", "Vitesse"));
             let mut kt = self.wind * 1.94384;
             if add(ui, Slider::new(&mut kt, 0.0..=50.0).fixed_decimals(0).suffix(" kt")).changed() {
                 self.wind = kt / 1.94384;
             }
             ui.end_row();
-            ui.label("From");
-            add(ui, Slider::new(&mut self.wind_from, 0.0..=359.0).step_by(1.0).custom_formatter(|v, _| format!("{:03.0}° {}", v, compass(v))));
+            ui.label(t!("From", "Direction"));
+            add(ui, Slider::new(&mut self.wind_from, 0.0..=359.0).step_by(1.0).custom_formatter(|v, _| format!("{:03.0}° {}", v, tr(compass(v)))));
             ui.end_row();
-            ui.label("Gusts");
+            ui.label(t!("Gusts", "Rafales"));
             add(ui, Slider::new(&mut self.gusts, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
         });
     }
 
     fn presets(&mut self, ui: &mut egui::Ui) {
-        crate::menu::heading(ui, "PRESETS");
+        crate::menu::heading(ui, tr("PRESETS"));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
             for &(name, c, b, d, s, a, h, w, g) in PRESETS {
-                if ui.button(name).clicked() {
+                if ui.button(tr(name)).clicked() {
                     (self.clouds, self.cloud_base, self.cloud_depth, self.storms, self.alto, self.haze, self.wind, self.gusts) = (c, b, d, s, a, h, w, g);
                 }
             }
@@ -490,7 +530,54 @@ impl Weather {
     }
 }
 
+use crate::i18n::{t, tr};
 use egui::{RichText, Slider};
+
+/// The "real time" switch above the clock's sliders.
+fn real_time_switch(ui: &mut egui::Ui, on: &mut bool) {
+    ui.checkbox(on, t!("Real time (the sun where you are, now)", "Heure réelle (le soleil là où vous êtes, maintenant)"));
+}
+
+/// The real time now: hours UTC and the day of the year (0 = 1 January,
+/// the 29th of February counted as the 28th), from the system clock.
+pub fn real_clock() -> (f64, f64) {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    clock_at(secs)
+}
+
+fn clock_at(secs: f64) -> (f64, f64) {
+    let days = (secs / 86_400.0).floor();
+    let hours = (secs - days * 86_400.0) / 3600.0;
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let dy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * dy + 2) / 153;
+    let d = dy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    const BEFORE: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let doy = (BEFORE[(m - 1) as usize] + d.min(if m == 2 { 28 } else { 31 }) - 1).min(364);
+    (hours, doy as f64)
+}
+
+/// "Jun 21", or "21 juin" in French.
+pub fn date_label(doy: f64) -> String {
+    if !crate::i18n::is_fr() {
+        return month_day(doy);
+    }
+    const M: [&str; 12] = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+    const LEN: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut d = doy.max(0.0) as u32 % 365;
+    for (name, len) in M.iter().zip(LEN) {
+        if d < len {
+            return format!("{} {}", d + 1, name);
+        }
+        d -= len;
+    }
+    "31 déc.".into()
+}
 
 /// A headed two-column grid of labelled sliders.
 fn section(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
@@ -550,6 +637,12 @@ mod tests {
         assert_eq!(moon_phase(14.8), "full");
         assert_eq!(compass(248.0), "W");
         assert_eq!(compass(350.0), "N");
+        // 2026-11-15 17:20 UTC, 2024-02-29 (leap day) and 2024-12-31 noon
+        let (h, d) = clock_at(1_794_763_200.0);
+        assert_eq!((month_day(d).as_str(), (h * 60.0).round()), ("Nov 15", 17.0 * 60.0 + 20.0));
+        assert_eq!(month_day(clock_at(1_709_208_000.0).1), "Feb 28");
+        assert_eq!(month_day(clock_at(1_735_646_400.0).1), "Dec 31");
+        assert_eq!(clock_at(0.0), (0.0, 0.0));
     }
 
     #[test]
