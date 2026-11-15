@@ -99,6 +99,8 @@ pub const STRINGS: &[&str] = &[
     "2219.0Z", "35.0NM", "TFC", "PACK 2 OFF", "APU RUNNING", "DUCT PRESS", "MASTER", "WARNING", "CAUTION", "RA", "DH", "WINDSHEAR", "CMD L", "CMD C", "CMD R", "DISC",
     "TO", "CRZ", "CLB", "REF", "PROG", "EXEC", "INIT", "MENU", "LEGS", "DEP ARR", "FIX", "NAV RAD", "PREV PAGE", "NEXT PAGE", "CLR", "DEL",
     "25", "30",
+    // The Hornet's cockpit (fa18/pit.rs, pit18.wgsl).
+    "DANGER", "FIRE", "MASTER CAUTION", "EXTGH", "A/A", "A/G", "MASTER ARM", "EMERG JETT", "APU FIRE", "IR COOL", "HMD", "SPIN", "NIGHT", "CONT", "5", "6", "7", "8", "9", "0", "ENT", "I/P", "ADF", "VOL", "COMM 1", "COMM 2", "EMCON", "A/P", "IFF", "TCN", "ILS", "D/L", "BCN", "ON/OFF", "DAY", "BLK LVL", "W/B", "BAL", "AOA", "INS", "LOCK", "SHOOT", "MODE", "QTY", "ZONE", "INT", "CRS", "ECM", "LDG GEAR", "NOSE", "LEFT", "RIGHT", "HALF", "FULL", "EXT LT", "FCS", "COMM", "INTR LT", "SNSR", "KY-58", "DEFOG", "IDLE", "MIL", "MAX", "CANOPY", "EJECTION SEAT", "UPPER", "RWS", "TWS", "STT", "RSET", "SIL", "AZ", "EL", "OPR", "ADI", "HSI", "SA", "STORES", "SUPT", "BIT", "FPAS", "CHKLST", "UFC", "TAC", "WYPT", "SEQ1", "SCL", "DCLTR", "MK-82", "AIM-9X", "AIM-120", "GUN", "PRGM", "T/R", "RCV", "X", "Y", "71X", "M", "RPM", "TEMP", "NOZ", "OIL", "BINGO", "T", "I", "L", "R", "G", "N", "E", "S", "W", "DIST", "RNG", "40",
 ];
 
 /// Index of a string in `STRINGS` (panics if it is missing: a typo in the layout).
@@ -148,7 +150,7 @@ pub fn strings_wgsl() -> String {
     out
 }
 
-fn legend_mat(style: u32, s: u32, col: Vec3) -> Mat {
+pub(crate) fn legend_mat(style: u32, s: u32, col: Vec3) -> Mat {
     mt(mat::PLASTIC, col.x, col.y, col.z).pat(pat::LEGEND).x((style + 16 * s) as f32)
 }
 
@@ -307,37 +309,37 @@ fn window_ring(k: usize, e: f32, lining: bool) -> Vec<Vec3> {
 
 /// A flat face: origin, right and up axes; it faces `ax × ay` (toward the crew).
 #[derive(Clone, Copy)]
-struct Face {
-    o: Vec3,
-    ax: Vec3,
-    ay: Vec3,
+pub(crate) struct Face {
+    pub(crate) o: Vec3,
+    pub(crate) ax: Vec3,
+    pub(crate) ay: Vec3,
 }
 impl Face {
-    fn new(o: Vec3, ax: Vec3, ay: Vec3) -> Face {
+    pub(crate) fn new(o: Vec3, ax: Vec3, ay: Vec3) -> Face {
         let ax = ax.normalize();
         let ay = (ay - ax * ay.dot(ax)).normalize();
         Face { o, ax, ay }
     }
-    fn n(&self) -> Vec3 {
+    pub(crate) fn n(&self) -> Vec3 {
         self.ax.cross(self.ay).normalize()
     }
-    fn at(&self, u: f32, v: f32) -> Vec3 {
+    pub(crate) fn at(&self, u: f32, v: f32) -> Vec3 {
         self.o + self.ax * u + self.ay * v
     }
-    fn at_h(&self, u: f32, v: f32, h: f32) -> Vec3 {
+    pub(crate) fn at_h(&self, u: f32, v: f32, h: f32) -> Vec3 {
         self.at(u, v) + self.n() * h
     }
-    fn rot(&self) -> Quat {
+    pub(crate) fn rot(&self) -> Quat {
         Quat::from_mat3(&Mat3::from_cols(self.ax, self.ay, self.n()))
     }
     /// The same face moved to (u, v), raised by h.
-    fn sub(&self, u: f32, v: f32, h: f32) -> Face {
+    pub(crate) fn sub(&self, u: f32, v: f32, h: f32) -> Face {
         Face { o: self.at_h(u, v, h), ..*self }
     }
 }
 
 /// Quad with uv in units of its half height (u ±hx/hy, v ±1), carrying its aspect in `wear`.
-fn rect(m: &mut Mesh, mm: &Mat, c: Vec3, ax: Vec3, ay: Vec3, hx: f32, hy: f32) {
+pub(crate) fn rect(m: &mut Mesh, mm: &Mat, c: Vec3, ax: Vec3, ay: Vec3, hx: f32, hy: f32) {
     let n = ax.cross(ay).normalize();
     // A legend's made-up text is seeded by where it is (the fraction of its code).
     let mut mm = *mm;
@@ -353,7 +355,7 @@ fn rect(m: &mut Mesh, mm: &Mat, c: Vec3, ax: Vec3, ay: Vec3, hx: f32, hy: f32) {
     m.i.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 /// Quad with uv the local frame scaled to [-1, 1] (displays).
-fn screen_quad(m: &mut Mesh, mm: &Mat, c: Vec3, ax: Vec3, ay: Vec3, hx: f32, hy: f32) {
+pub(crate) fn screen_quad(m: &mut Mesh, mm: &Mat, c: Vec3, ax: Vec3, ay: Vec3, hx: f32, hy: f32) {
     let n = ax.cross(ay).normalize();
     let base = m.v.len() as u32;
     for (u, v) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
@@ -2199,7 +2201,7 @@ mod tests {
 
     #[test]
     fn plane_shader_validates() {
-        let src = format!("{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"));
+        let src = format!("{}\n{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"), include_str!("../../shaders/pit18.wgsl"));
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         if let Err(e) = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m) {
             panic!("{}", e.emit_to_string(&src));

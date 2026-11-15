@@ -180,6 +180,8 @@ struct Args {
     /// record frames + audio to a directory: (dir, start, seconds), fixed 30 fps steps
     record: Option<(PathBuf, f64, f64)>,
     crash_at: Option<f64>,
+    /// from this many seconds on, full throttle with the boost key held (the afterburners), for scripted screenshots and recordings
+    boost_at: Option<f64>,
     /// game time stands still for this many wall-clock seconds at the start (tiles stream in)
     hold: f64,
     size: (u32, u32),
@@ -239,6 +241,7 @@ fn parse_args() -> Args {
         shots: Vec::new(),
         record: None,
         crash_at: None,
+        boost_at: None,
         hold: 0.0,
         size: (1600, 900),
         imagery: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}".into(),
@@ -344,6 +347,7 @@ fn parse_args() -> Args {
             }
             "--imagery" => a.imagery = v.get(i + 1).cloned().unwrap_or(a.imagery.clone()),
             "--crash-at" => a.crash_at = num(&v, i),
+            "--boost-at" => a.boost_at = num(&v, i),
             "--hold" => a.hold = num(&v, i).unwrap_or(0.0),
             "--damage" => a.damage = v.get(i + 1).cloned(),
             "--pause-menu" => {
@@ -427,7 +431,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -542,6 +546,7 @@ struct Game {
     status_until: f64,
     shots: Vec<(f64, PathBuf, Option<(f64, f64, f64)>)>,
     crash_at: Option<f64>,
+    boost_at: Option<f64>,
     hold: f64,
     gilrs: Option<gilrs::Gilrs>,
     pad: Controls,
@@ -725,7 +730,7 @@ impl Game {
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { 0 }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
             frame: 0, fps: 60.0, paused: false, show_help: false, show_hud: !args.no_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: true, volume: 1.0, info_open: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, look_sens: 1.0, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(cockpit::FOV).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
@@ -837,9 +842,12 @@ impl Game {
             let tat = oat + (oat + 273.15) * 0.2 * mach * mach;
             let x = ((p.n1 - 0.2) / 0.82).clamp(0.0, 1.2);
             let running = (p.n1 / 0.15).clamp(0.0, 1.0);
-            let egt = oat + (440.0 - oat + 200.0 * x.powf(1.4)) * running;
-            let ff = (550.0 + 8200.0 * x * x) * running;
-            let fuel = (110_000.0 - self.time * ff * 4.0 / 3600.0).max(0.0);
+            // (The Hornet's two F404s: hotter and thirstier for their size, 4.9 t of fuel inside.)
+            let hornet = self.spec.id == 2;
+            let egt = if hornet { oat + (400.0 - oat + 380.0 * x.powf(1.4)) * running } else { oat + (440.0 - oat + 200.0 * x.powf(1.4)) * running };
+            let ff = if hornet { (280.0 + 4300.0 * x * x) * running } else { (550.0 + 8200.0 * x * x) * running };
+            let (full, n_eng) = if hornet { (4_900.0, 2.0) } else { (110_000.0, 4.0) };
+            let fuel = (full - self.time * ff * n_eng / 3600.0).max(0.0);
             let u = p.pos.normalize();
             let gs = (p.vel - u * p.vel.dot(u)).length() * 1.94384;
             return [
@@ -1009,6 +1017,10 @@ impl Game {
                 c.pitch = -1.0;
                 c.throttle = 1.0;
             }
+        }
+        if self.boost_at.is_some_and(|t| self.real > t) {
+            c.throttle = 1.0;
+            c.boost = true;
         }
         c
     }
@@ -1695,7 +1707,7 @@ impl Game {
         let sa = p.stall_alpha();
         let ground_speed = (p.vel - up * vs).length();
         // The sound was tuned on the light single: a jet's airflow is scaled to match.
-        let jet = matches!(p.spec.sound, aircraft::Sound::Jet);
+        let jet = !matches!(p.spec.sound, aircraft::Sound::Piston);
         let sk = if jet { 0.45 } else { 1.0 };
         let params = audio::Params {
             live: if live { 1.0 } else { 0.0 },
@@ -1709,6 +1721,8 @@ impl Game {
             vne: (p.spec.vne * sk) as f32,
             jet: if jet { 1.0 } else { 0.0 },
             n1: p.n1 as f32,
+            fighter: if matches!(p.spec.sound, aircraft::Sound::Fighter) { 1.0 } else { 0.0 },
+            burner: p.burner as f32,
             g_load: p.g_load as f32,
             rough: p.air.sigma_w as f32,
             jolt: jolt as f32,
@@ -2483,6 +2497,18 @@ impl Game {
             let blur = ((self.plane.prop_rate - 30.0) / 25.0).clamp(0.0, 1.0) as f32;
             let dm = self.plane.dmg;
             let kind = self.spec.id as f32;
+            // What the exhaust shows (plane.wgsl, the plume and the nozzles): how far the
+            // afterburners are lit, and how hard the engines are running dry (0 idle .. 1).
+            let (burner, dry) = match &self.spec.engine {
+                aircraft::Engine::Fan(fe) => (self.plane.burner as f32, (((self.plane.n1 - fe.idle) / (1.0 - fe.idle)).clamp(0.0, 1.0) * if dm.engine > 0.0 { 1.0 } else { 0.0 }) as f32),
+                _ => (0.0, 0.0),
+            };
+            if burner > 0.01 && self.crash.is_none() {
+                // The flames light the tail from behind (turned down at night, as they are, for the eye that has opened up).
+                let k = burner * (0.12 + 0.88 * day) * 2.2;
+                g.light_pos = v4(self.plane.pos + self.plane.rot * DVec3::new(0.0, 0.0, 10.0) - cam, 1.3);
+                g.light_col = [k, 0.5 * k, 0.2 * k, 0.0];
+            }
             for (i, p) in self.model.pieces.iter().enumerate() {
                 let hide = match p.vis {
                     airframe::Vis::Always => false,
@@ -2497,7 +2523,7 @@ impl Game {
                 objs.push(DrawObj {
                     mesh: self.piece_mesh[i],
                     model: base * pose[i],
-                    tint: [blur, 0.0, 0.0, 0.0],
+                    tint: [blur, burner, dry, 0.0],
                     glow: [0.0, kind, 0.0, 0.0],
                     params,
                     cast: 1 << render::PLANE_LAYER,

@@ -70,6 +70,8 @@ pub struct Plane {
     charge: f64,
     /// a jet's fan speed, fraction of 100% N1
     pub n1: f64,
+    /// how far the afterburners are lit, 0..1 (what is seen and heard of them; the thrust is immediate)
+    pub burner: f64,
     /// which wing a stall would rather drop (slowly wandering, -1..1)
     drop: f64,
     pub rot: DQuat,
@@ -185,6 +187,7 @@ impl Plane {
             power: 0.7,
             charge: 0.0,
             n1: 0.0,
+            burner: 0.0,
             drop: 0.0,
             rot: DQuat::IDENTITY,
             omega: DVec3::ZERO,
@@ -802,7 +805,7 @@ impl Plane {
         let frac = if n1 >= fe.idle { fe.idle_thrust + (1.0 - fe.idle_thrust) * x.powf(1.7) } else { fe.idle_thrust * (n1 / fe.idle).powi(2) };
         let m = v / sound_speed(h);
         let sigma = density(h) / RHO0;
-        fe.n as f64 * fe.thrust * frac * sigma.powf(0.8) * (1.0 - 0.78 * m + 0.38 * m * m).max(0.05)
+        fe.n as f64 * fe.thrust * frac * sigma.powf(0.8) * (1.0 - fe.mach_lapse[0] * m + fe.mach_lapse[1] * m * m).max(0.05)
     }
     /// Thrust (N) once the engine has settled at this throttle.
     pub fn thrust(&self, throttle: f64, v: f64, h: f64) -> f64 {
@@ -829,7 +832,13 @@ impl Plane {
 
     /// Drag coefficient of the shock waves near the speed of sound (Lock's fourth-power rise).
     fn wave_cd(&self, mach: f64) -> f64 {
-        if self.spec.mcrit > 0.0 && mach > self.spec.mcrit { 20.0 * (mach - self.spec.mcrit).powi(4) } else { 0.0 }
+        if self.spec.cd_wave > 0.0 {
+            self.spec.cd_wave * smooth(self.spec.mcrit, self.spec.mcrit + 0.25, mach)
+        } else if self.spec.mcrit > 0.0 && mach > self.spec.mcrit {
+            20.0 * (mach - self.spec.mcrit).powi(4)
+        } else {
+            0.0
+        }
     }
     /// Angle of attack (rad) that carries the weight at true airspeed `v`.
     fn alpha_level(&self, v: f64, rho: f64, flap_cl: f64) -> f64 {
@@ -1110,7 +1119,12 @@ impl Plane {
             if el > 0.05 && self.stick.x.abs() > 0.06 {
                 self.trim += (alpha_1g - self.trim) * (dt * 0.5).min(1.0);
             }
-            let alpha_cmd = self.trim + self.stick.x * hd.alpha_ctl * el;
+            let mut alpha_cmd = self.trim + self.stick.x * hd.alpha_ctl * el;
+            if spec.fbw_g > 0.0 {
+                // Fly-by-wire: the stick asks for load, never more than the limit.
+                let alpha_for = |g: f64| (g * spec.mass * 9.81 / (q * area).max(1.0) - spec.cl0 - flap_cl) / spec.cl_a;
+                alpha_cmd = alpha_cmd.clamp(alpha_for(-0.4 * spec.fbw_g), alpha_for(spec.fbw_g));
+            }
             // Pitch stiffness comes from the tailplane; without one the nose wanders off.
             let stiff = hd.pitch_k * st - hd.pitch_k_lost * (1.0 - st);
             wdot.x = a * (stiff * (alpha_cmd - alpha) + self.stick.x * hd.pitch_ctl * el) - hd.pitch_d * ad * (0.3 + 0.7 * st) * om.x;
@@ -1231,7 +1245,11 @@ impl Plane {
                 let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
                 self.n1 += (target - self.n1) * (dt * kr).min(1.0);
                 self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
-                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h) * if c.boost { 1.08 } else { 1.0 };
+                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h) * if c.boost { fe.boost } else { 1.0 };
+                // An afterburner (not an airliner's take-off bump) lights with a
+                // thump a moment after it is asked for and dies away as quickly.
+                let lit = c.boost && fe.boost > 1.2 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
+                self.burner += ((if lit { 1.0 } else { 0.0 }) - self.burner) * (dt * if lit { 5.0 } else { 8.0 }).min(1.0);
                 self.power = thrust / (fe.n as f64 * fe.thrust);
                 thrust *= 1.0 - self.reverser * (1.0 + fe.reverse);
                 force_b += DVec3::NEG_Z * thrust;
@@ -1945,6 +1963,65 @@ mod tests {
             let vs = p.vel.dot(p.pos.normalize());
             (alt0 - h) * 0.002 - vs * 0.02
         }
+    }
+
+    #[test]
+    fn performance_is_a_hornet() {
+        let hornet: &Spec = &crate::aircraft::fa18::SPEC;
+        let w = empty_world();
+        let dt = 1.0 / 180.0;
+        let level = |boost: bool| {
+            let mut p = Plane::spawn(hornet, 0.6, -2.1, 3000.0, 0.0, 200.0);
+            p.throttle = 1.0;
+            let mut hold = hold_alt(3000.0);
+            let mut gmax: f64 = 0.0;
+            for i in 0..(180.0 / dt) as usize {
+                // the stick does a lot at Mach 1: the test pilot goes gently
+                let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
+                let roll_err = -p.right().dot(p.pos.normalize());
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                assert!(p.step(dt, &c, &w).is_none());
+                if i as f64 * dt > 60.0 {
+                    gmax = gmax.max((p.g_load - 1.0).abs());
+                }
+            }
+            println!("  boost {boost}: Mach {:.3}, worst load swing {gmax:.2} g", p.mach());
+            assert!(gmax < 0.5, "porpoising: {gmax}");
+            p.mach()
+        };
+        let (dry, wet) = (level(false), level(true));
+        println!("level at 3000 m: Mach {dry:.2} dry, {wet:.2} in afterburner");
+        assert!(dry > 0.85 && dry < 1.02 && wet > 1.1 && wet < 1.45, "{dry} {wet}");
+
+        // A full pull at 450 kt: the fly-by-wire holds it near 7.5 g.
+        let mut p = Plane::spawn(hornet, 0.6, -2.1, 3000.0, 0.0, 232.0);
+        let mut gmax: f64 = 0.0;
+        for _ in 0..(3.0 / dt) as usize {
+            let c = Controls { pitch: 1.0, throttle: 1.0, ..Default::default() };
+            assert!(p.step(dt, &c, &w).is_none());
+            gmax = gmax.max(p.g_load);
+        }
+        println!("full pull at 450 kt: {gmax:.1} g");
+        assert!(gmax > 6.0 && gmax < 8.5, "{gmax}");
+
+        // On approach: gear and full flaps at 135 kt, the angle of attack it flies at.
+        let mut p = Plane::spawn(hornet, 0.6, -2.1, 600.0, 0.0, 70.0);
+        p.gear_down = true;
+        p.gear = 1.0;
+        p.flap_set = 2;
+        p.flaps = 1.0;
+        let mut hold = hold_alt(600.0);
+        for _ in 0..(60.0 / dt) as usize {
+            // auto-throttle on 135 kt
+            let v = p.airspeed().length();
+            let thr = (0.7 + (70.0 - v) * 0.08).clamp(0.0, 1.0);
+            let roll_err = -p.right().dot(p.pos.normalize());
+            let c = Controls { pitch: hold(&p).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: thr, ..Default::default() };
+            p.throttle = thr;
+            assert!(p.step(dt, &c, &w).is_none());
+        }
+        println!("approach: {:.0} kt, alpha {:.1} deg, throttle {:.0}%", p.airspeed().length() * KT, p.alpha.to_degrees(), p.throttle * 100.0);
+        assert!(p.alpha.to_degrees() > 5.0 && p.alpha.to_degrees() < 14.0 && !p.stalled);
     }
 
     #[test]
