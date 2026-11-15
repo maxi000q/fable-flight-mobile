@@ -3863,8 +3863,8 @@ fn load_fonts(ctx: &egui::Context) {
     };
     let mut fonts = egui::FontDefinitions::empty();
     for (name, family, kind, fb) in [
-        ("mono", egui::FontFamily::Monospace, "monospace", ["/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf"]),
-        ("sans", egui::FontFamily::Proportional, "sans", ["/usr/share/fonts/google-noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"]),
+        ("mono", egui::FontFamily::Monospace, "monospace", ["/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf", "C:/Windows/Fonts/consola.ttf"]),
+        ("sans", egui::FontFamily::Proportional, "sans", ["/usr/share/fonts/google-noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "C:/Windows/Fonts/segoeui.ttf"]),
     ] {
         if let Some(data) = find(kind, &fb) {
             fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(data)));

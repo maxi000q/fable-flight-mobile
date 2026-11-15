@@ -95,7 +95,10 @@ fn load(fetch: &Fetcher, s: &Spec) -> Result<Layer> {
     let j: serde_json::Value = serde_json::from_slice(&files)?;
     let get = |map: &str| -> Result<image::DynamicImage> {
         let url = j[map]["1k"]["jpg"]["url"].as_str().ok_or_else(|| anyhow!("no 1k {map}"))?;
-        let name = url.rsplit('/').next().unwrap_or(map);
+        // The name comes from the server's JSON: keep only plain file-name characters so a
+        // hostile reply (`..\`, `C:`, ...) can't point the cache write outside its folder.
+        let name: String = url.rsplit(['/', '\\']).next().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).collect();
+        let name = if name.is_empty() || name.starts_with('.') { format!("{map}.jpg") } else { name };
         let data = fetch.get_cached(&format!("ph/{id}/{name}"), url)?;
         let img = image::load_from_memory(&data)?;
         Ok(if img.width() == N && img.height() == N { img } else { img.resize_exact(N, N, FilterType::Triangle) })
