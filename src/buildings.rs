@@ -245,6 +245,9 @@ pub const FAR: Lvl = Lvl(3);
 /// Distances (from the camera) over which buildings dissolve from their full
 /// geometry into their far stand-ins. Must match FAR0/FAR1 in buildings.wgsl.
 pub const BFAR: [f32; 2] = [1000.0, 1300.0];
+/// Distance the finest level of detail starts to dissolve out at (60% of
+/// `LOD2_FAR` in buildings.wgsl; must match it).
+pub const FINE_FADE: f32 = 680.0 * 0.6;
 /// Height classes, tallest first: (least height in metres, distance scale). A
 /// tower stands out against the skyline from much farther off than a house, so
 /// its full geometry, and the middle and finest levels that dress it, are kept

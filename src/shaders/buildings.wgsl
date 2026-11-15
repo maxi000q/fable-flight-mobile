@@ -38,8 +38,9 @@ struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f3
 // Distance the levels of detail go by: towers keep theirs out to a multiple of
 // the usual distances (buildings::HCLASS; the draw's instance index carries 4x
 // the multiple above the level).
+// The graphics settings' city detail scales them all (city_k).
 fn lod_dist(P: vec3f, lod: u32) -> f32 {
-  return length(P) / max(f32(lod >> 3u) * 0.25, 1.0);
+  return length(P) / (max(f32(lod >> 3u) * 0.25, 1.0) * city_k());
 }
 const LOD2_FAR = 680.0;
 // Distances over which buildings dissolve from their full geometry (and its
@@ -276,6 +277,15 @@ fn roof_glint(N: vec3f, V: vec3f, f0: vec3f, rough: f32) -> vec3f {
   else if (lod == 3u) { fade = min(fade, near); }
   else if (lod == 4u && n < near) { discard; }
   if (fade < 1.0 && n >= fade) { discard; }
+  return shade_building(in);
+}
+// The same for geometry that nothing can cut away or dissolve this frame
+// (render.rs draws those runs first): without a discard anywhere in the
+// shader the GPU tests depth before shading, so the facades hidden behind
+// nearer towers cost nothing.
+@fragment fn fs_whole(in: VOut) -> GOut { return shade_building(in); }
+
+fn shade_building(in: VOut) -> GOut {
   let V = normalize(in.P);
   var N = normalize(in.N);
   let kind = u32(in.col.a * 255.0 / 50.0 + 0.5);

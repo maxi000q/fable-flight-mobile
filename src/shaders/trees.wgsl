@@ -61,7 +61,7 @@ fn lod_of(d: f32, ia: vec4f) -> f32 {
 const IMP_DIST = 120.0;
 // Whether a tree (not undergrowth, not a loose tree) is far enough away to be an impostor.
 fn imp_far(ia: vec4f, far: f32) -> bool {
-  return far >= 250.0 && T.offset.w < 0.5 && length(ia.xyz + T.offset.xyz) / tree_jit(ia) >= IMP_DIST;
+  return far >= 250.0 && T.offset.w < 0.5 && length(ia.xyz + T.offset.xyz) / tree_jit(ia) >= IMP_DIST * tree_imp_k();
 }
 // Whether this vertex belongs to a model other than the one the instance is
 // drawn with. Undergrowth (far < 250) and loose trees (T.offset.w = 1) only
@@ -651,7 +651,7 @@ struct IOut {
   o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
   let base = ia.xyz + T.offset.xyz;
   let d = length(base);
-  if (ia.w <= 0.0 || d / tree_jit(ia) < IMP_DIST) { return o; }
+  if (ia.w <= 0.0 || d / tree_jit(ia) < IMP_DIST * tree_imp_k() || d > tree_far()) { return o; }
   let layer = vi / 4u;
   let corner = vec2f(f32(vi & 1u), f32((vi >> 1u) & 1u)) * 2.0 - 1.0;
   let b = IB.b[layer];
@@ -723,6 +723,9 @@ struct IOut {
 }
 @fragment fn fs_imp(in: IOut) -> COut {
   if (photo_hides(in.Q, in.clip.xy)) { discard; }
+  // The farthest trees dissolve away (how far: the graphics settings).
+  let tf = tree_far();
+  if (ign(in.clip.xy) >= 1.0 - smoothstep(tf * 0.8, tf, length(in.C))) { discard; }
   // Mip level from how big a picture is on screen, a little on the sharp
   // side (the temporal filter takes out the shimmer).
   let lod = clamp(log2(max(length(dpdx(in.uva.xy)), length(dpdy(in.uva.xy))) * 0.5 * IMP_CELL) - 0.5, 0.0, 6.0);

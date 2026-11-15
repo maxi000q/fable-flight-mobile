@@ -241,12 +241,13 @@ pub enum Page {
     Weather,
     Game,
     Settings,
+    Graphics,
     Controls,
 }
 
 impl Page {
     pub const INFO: [Page; 3] = [Page::Flight, Page::Places, Page::Weather];
-    pub const PAUSE: [Page; 3] = [Page::Game, Page::Settings, Page::Controls];
+    pub const PAUSE: [Page; 4] = [Page::Game, Page::Settings, Page::Graphics, Page::Controls];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -255,6 +256,7 @@ impl Page {
             Page::Weather => "Weather",
             Page::Game => "Game",
             Page::Settings => "Settings",
+            Page::Graphics => "Graphics",
             Page::Controls => "Controls",
         }
     }
