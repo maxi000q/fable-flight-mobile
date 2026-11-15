@@ -14,8 +14,8 @@ Explore the skies with real-world weather, live air traffic, and an immersive op
 [![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/9akYzMRBc6)
 [![Rust](https://img.shields.io/badge/Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 <br>
-[Demo](https://github.com/user-attachments/assets/4f8833da-13c0-4d20-a50b-c0acf2d88df1)
 </div>
+https://github.com/user-attachments/assets/4f8833da-13c0-4d20-a50b-c0acf2d88df1
 
 # Compiling
 * Install rust
