@@ -127,7 +127,9 @@ pub fn glyph(c: char) -> u32 {
 
 /// The string table as WGSL: 15 glyphs a string, 8 bits each, the length in the top byte.
 pub fn strings_wgsl() -> String {
-    let mut out = format!("var<private> STRS: array<vec4u, {}> = array<vec4u, {}>(\n", STRINGS.len(), STRINGS.len());
+    // (const, not var<private>: Metal copies a private array into every
+    // invocation, 4 KB here, on every pixel of the aircraft.)
+    let mut out = format!("const STRS = array<vec4u, {}>(\n", STRINGS.len());
     for (k, s) in STRINGS.iter().enumerate() {
         let mut b = [15u32; 16];
         let n = s.chars().count().min(15);
