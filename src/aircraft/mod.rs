@@ -255,7 +255,12 @@ pub struct Spec {
     pub hole: Hole,
 
     // ---- mass and aerodynamics
+    /// mass with the tanks half full (kg); the fuel on board adds or takes away from it
     pub mass: f64,
+    /// usable fuel with the tanks full (kg), and what the engines burn
+    /// together (kg/s): idling, at full dry power, and with the boost (afterburners)
+    pub fuel_kg: f64,
+    pub fuel_flow: [f64; 3],
     /// pitch, yaw, roll (kg m²)
     pub inertia: DVec3,
     pub wing_area: f64,

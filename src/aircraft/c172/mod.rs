@@ -94,6 +94,9 @@ pub static SPEC: Spec = Spec {
     hole: Hole { fus: [0.82, 0.92, -0.04, 0.5], wing: [0.72, 0.03, 0.36, 0.24], stab: [0.2, 0.2, 1.75], fin: [0.3, 1.55, 0.2, 0.14], pods: [[0.0; 3]; 2] },
     // Two aboard and most of the fuel (maximum takeoff weight is 1157 kg).
     mass: 1100.0,
+    // 62 US gal usable of avgas; about 2 gal/h idling and 14 at full power
+    fuel_kg: 169.0,
+    fuel_flow: [0.0015, 0.0105, 0.0135],
     // Published figures for a 172.
     inertia: DVec3::new(1825.0, 2667.0, 1285.0),
     wing_area: 16.2,

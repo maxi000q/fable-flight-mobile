@@ -141,8 +141,9 @@ impl Gauges {
         self.dg_off = wrap(self.card - truth(p).hdg);
     }
 
-    /// Advance by `dt` of game time; `time` is the flight time (s) for the fuel burnt.
-    pub fn update(&mut self, dt: f64, p: &Plane, time: f64) {
+    /// Advance by `dt` of game time (`_time`, the flight time, is no longer
+    /// needed: the fuel comes from what the engine burns).
+    pub fn update(&mut self, dt: f64, p: &Plane, _time: f64) {
         if dt <= 0.0 {
             return;
         }
@@ -225,8 +226,9 @@ impl Gauges {
         // Fuel: what is left, sloshing about under the sideways and vertical loads.
         let side = -p.sf.x / 9.81;
         let vert = p.sf.y / 9.81 - 1.0;
-        let left = (21.0 - time / 900.0).max(1.0);
-        let right = (19.5 - time / 950.0).max(1.0);
+        // The fuel on board, in US gallons a tank (avgas, 0.72 kg/l).
+        let gal = p.fuel / 0.72 / 3.785 / 2.0;
+        let (left, right) = (gal * 1.02, gal * 0.98);
         let slosh = |s: f64, k: f64| s * (1.0 + 0.22 * side * k - 0.08 * vert) + 0.25 * wobble(t * 0.9, k * 3.0) * p.air.sigma_w.min(3.0) / 3.0;
         self.fuel[0] = lag(self.fuel[0], slosh(left, -1.0), 1.4, dt);
         self.fuel[1] = lag(self.fuel[1], slosh(right, 1.0), 1.4, dt);

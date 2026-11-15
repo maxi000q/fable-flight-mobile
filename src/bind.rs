@@ -119,6 +119,11 @@ pub const ACTIONS: &[Action] = &[
     act("speedbrake", KeyCode::Slash, "Speedbrake", "Aérofreins"),
     act("reversers", KeyCode::KeyZ, "Thrust reversers (hold)", "Inverseurs de poussée (maintenir)"),
     act("boost", KeyCode::Space, "Boost / afterburner", "Boost / postcombustion"),
+    act("engine_auto", KeyCode::F4, "Start / stop the engine", "Démarrer / couper le moteur"),
+    act("ignition", KeyCode::KeyI, "Magnetos (jets: fuel controls)", "Magnétos (jets : robinets carburant)"),
+    act("starter", KeyCode::KeyO, "Starter", "Démarreur"),
+    act("mixture_rich", KeyCode::PageUp, "Mixture richer", "Mélange plus riche"),
+    act("mixture_lean", KeyCode::PageDown, "Mixture leaner", "Mélange plus pauvre"),
     act("nav_display", KeyCode::KeyJ, "Navigation instruments", "Instruments de navigation"),
     act("obs_left", KeyCode::BracketLeft, "OBS course left", "OBS : course à gauche"),
     act("obs_right", KeyCode::BracketRight, "OBS course right", "OBS : course à droite"),
@@ -607,15 +612,15 @@ mod tests {
         let pitch_down = action("pitch_down").unwrap();
         let pitch_up = action("pitch_up").unwrap();
         assert_eq!(b.map_key(KeyCode::KeyW), Some(KeyCode::KeyW));
-        // Pitch down onto I: I now pitches down, W does nothing.
-        b.set_key("pitch_down", KeyCode::KeyI);
-        assert_eq!(b.map_key(KeyCode::KeyI), Some(KeyCode::KeyW));
+        // Pitch down onto 7: 7 now pitches down, W does nothing.
+        b.set_key("pitch_down", KeyCode::Digit7);
+        assert_eq!(b.map_key(KeyCode::Digit7), Some(KeyCode::KeyW));
         assert_eq!(b.map_key(KeyCode::KeyW), None);
         // Pitch down onto S takes it from pitch up, which is left without a key.
         b.set_key("pitch_down", KeyCode::KeyS);
         assert_eq!(b.map_key(KeyCode::KeyS), Some(KeyCode::KeyW));
         assert_eq!(b.key_of(pitch_up), None);
-        assert_eq!(b.map_key(KeyCode::KeyI), Some(KeyCode::KeyI));
+        assert_eq!(b.map_key(KeyCode::Digit7), Some(KeyCode::Digit7));
         // Back to the defaults.
         b.reset_key("pitch_down");
         b.reset_key("pitch_up");

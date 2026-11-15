@@ -404,6 +404,9 @@ pub static SPEC: Spec = Spec {
     hole: Hole { fus: [1.1, 0.72, -0.05, 0.4], wing: [0.12, -W_ANH, 0.10, 0.04], stab: [-0.15, 0.06, 3.3], fin: [0.25, 2.6, 0.06, 0.025], pods: [[0.0; 3]; 2] },
     // About 15.5 t: full internal fuel and a pair of Sidewinders (empty 10.4 t, maximum 23.4 t).
     mass: 15_500.0,
+    // 4,900 kg inside; two F404s: about 0.2 kg/s idling, 2.4 at military power, 12 in full afterburner
+    fuel_kg: 4_900.0,
+    fuel_flow: [0.2, 2.4, 12.0],
     // Pitch, yaw, roll (NASA's F/A-18 HARV simulation data).
     inertia: DVec3::new(165.7e3, 205.1e3, 31.2e3),
     wing_area: 37.16,

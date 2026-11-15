@@ -125,6 +125,9 @@ pub struct Menu {
     pub markers: Vec<(u32, f32, f32)>,
     /// which aircraft to fly (index into `aircraft::ALL`)
     pub aircraft: usize,
+    /// fuel to start with (fraction of full tanks), and an engine left off for a start on the ground
+    pub fuel: f64,
+    pub cold: bool,
 }
 
 /// How to start at an airport chosen on the globe.
@@ -140,7 +143,7 @@ pub enum Start {
 
 impl Menu {
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, show_controls: false, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0 }
+        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, show_controls: false, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, fuel: 0.5, cold: false }
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {
@@ -308,6 +311,10 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("Z", "thrust reversers, on the ground (hold)"),
         ("K", "set the heading indicator to the compass"),
         ("Num 7 / Num 1", "trim nose down / up"),
+        ("F4", "start / stop the engine (automatic)"),
+        ("I", "magnetos on / off (jets: fuel controls)"),
+        ("O", "starter (hold; jets: engage)"),
+        ("Page Up / Down", "mixture richer / leaner"),
         ("J", "navigation instruments (VOR, ILS, ADF)"),
         ("[ / ]", "OBS course left / right"),
         ("X", "altimeter to the QNH"),
