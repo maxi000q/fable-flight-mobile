@@ -31,34 +31,3 @@ Settings (language, sound, camera, HUD, anti-aliasing) are kept in `settings.jso
 
 # Contributions
 Please contribute anything if you want to! Improvements to flight sim realism, graphics, optimization, UI, and especially plane models are needed! (((=
-
-# Français
-Simulateur de vol en monde ouvert, en Rust pur, créé par Claude Fable 5.2 et Opus 5.5.
-
-## Compiler et lancer
-Installez Rust (https://rustup.rs), puis :
-```
-cargo run --release
-```
-Sous Linux, il faut aussi les bibliothèques ALSA et udev (`libasound2-dev libudev-dev` sur Debian/Ubuntu).
-
-## Langue
-L'interface est disponible en anglais et en français. Elle suit la langue du système, se change dans les Réglages (écran de départ ou menu pause) et est mémorisée. Pour une seule session : `cargo run --release -- --lang fr`.
-
-## Trafic aérien réel
-Les vrais avions autour de vous, tels que les captent les récepteurs ADS-B (données [adsb.lol](https://adsb.lol), ODbL), volent dans le ciel avec une étiquette (indicatif, type, altitude, vitesse, distance) ; le panneau de vol (Tab) liste les plus proches. Se désactive dans les Réglages du menu pause.
-
-## Météo réelle
-La météo suit les conditions réelles là où vous volez : le METAR le plus proche dans un rayon de 60 km ([aviationweather.gov](https://aviationweather.gov)) fixe le vent, les rafales, la visibilité, les couches nuageuses et les orages ; loin de tout aéroport, le modèle d'[Open-Meteo](https://open-meteo.com) prend le relais. Elle est mise à jour toutes les 10 minutes ou tous les 30 km, avec une transition en douceur. Désactivez-la dans les réglages météo (écran de départ, panneau de vol ou F3) pour régler la météo à la main.
-
-L'horloge peut aussi suivre l'heure réelle (« Heure réelle », au-dessus des curseurs du jour) : le soleil et la date sont ceux de l'endroit où vous volez, maintenant (heure solaire : elle peut différer d'une heure environ de l'heure légale). Régler l'heure à la main avec T / Y quitte l'heure réelle.
-
-Les réglages (langue, son, caméra, HUD, anticrénelage) sont enregistrés dans `settings.json`, dans le dossier de configuration (`~/.config/fablegame` sous Linux).
-
-## Commandes principales
-- **W / S** : piquer / cabrer, **A / D** : roulis, **Q / E** : palonnier
-- **Maj / Ctrl** : gaz, **F / V** : volets, **L** : train d'atterrissage
-- **Tab** : panneau de vol, **Échap** : menu pause, **F1** : aide-mémoire des touches
-
-## Contributions
-Toute contribution est bienvenue : réalisme du vol, graphismes, optimisation, interface et surtout nouveaux modèles d'avions. Pour ajouter une langue, voir `src/i18n.rs`.
