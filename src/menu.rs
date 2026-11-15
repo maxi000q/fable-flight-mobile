@@ -238,6 +238,7 @@ pub const GLASS: Color32 = Color32::from_rgba_premultiplied(5, 8, 12, 140);
 pub enum Page {
     Flight,
     Places,
+    Radio,
     Weather,
     Game,
     Settings,
@@ -247,13 +248,14 @@ pub enum Page {
 }
 
 impl Page {
-    pub const INFO: [Page; 3] = [Page::Flight, Page::Places, Page::Weather];
+    pub const INFO: [Page; 4] = [Page::Flight, Page::Places, Page::Radio, Page::Weather];
     pub const PAUSE: [Page; 5] = [Page::Game, Page::Settings, Page::Graphics, Page::Controls, Page::Bindings];
 
     pub fn name(self) -> &'static str {
         match self {
             Page::Flight => "Flight",
             Page::Places => "Go to",
+            Page::Radio => "Radio",
             Page::Weather => "Weather",
             Page::Game => "Game",
             Page::Settings => "Settings",
@@ -306,6 +308,9 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("Z", "thrust reversers, on the ground (hold)"),
         ("K", "set the heading indicator to the compass"),
         ("Num 7 / Num 1", "trim nose down / up"),
+        ("J", "navigation instruments (VOR, ILS, ADF)"),
+        ("[ / ]", "OBS course left / right"),
+        ("X", "altimeter to the QNH"),
         (".", "parking brake"),
     ]),
     ("VIEW", &[

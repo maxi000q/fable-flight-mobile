@@ -17,6 +17,7 @@ mod bind;
 mod i18n;
 mod live;
 mod livewx;
+mod nav;
 mod settings;
 mod gauges;
 mod gmaps;
@@ -709,6 +710,8 @@ struct Game {
     /// joysticks, pedals and moved keys, and what was last saved of them
     binds: bind::Bindings,
     binds_stamp: String,
+    /// NAV 1, the ADF, the OBS and the altimeter setting
+    radios: nav::Radios,
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
 }
@@ -838,6 +841,7 @@ impl Game {
             livewx: livewx::LiveWx::new(),
             binds_stamp: String::new(),
             binds: bind::Bindings::load(),
+            radios: nav::Radios::default(),
             prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
                 let i = airports::Db::get().find(c);
@@ -934,7 +938,8 @@ impl Game {
         let t = self.time;
         let strobe = { let s = t.rem_euclid(1.3); if s < 0.045 || (s > 0.16 && s < 0.2) { 1.0 } else { 0.0 } };
         let beacon = (1.0 - ((t * 1.1).rem_euclid(1.0) - 0.15).abs() * 7.0).max(0.0);
-        let (g, card) = self.gauges.readings(p);
+        let (mut g, card) = self.gauges.readings(p);
+        g[0][1] += self.radios.alt_error_ft(self.wx.qnh) as f32;
         if self.spec.is_jet() {
             // The glass cockpit's engine and air data (b747/deck747.wgsl).
             let (_, _, h) = geo::pos_to_lla(p.pos);
@@ -1082,6 +1087,11 @@ impl Game {
             self.respawn_at(lat, lon, alt, heading, v);
             self.plane.configure(notch, true, v * 3f64.to_radians().sin());
             self.status = t!("{} {} · final approach runway {} · {:.1} nm", "{} {} · approche finale piste {} · {:.1} NM", a.code(), a.name, r.ident[e], d / 1852.0);
+            // NAV 1 on the runway's ILS, as a crew would have it set up.
+            let (la, lo, _) = geo::pos_to_lla(self.plane.pos);
+            if let Some((st, _)) = nav::near(la.to_degrees(), lo.to_degrees(), 20_000.0, nav::Kind::Ils).into_iter().find(|(s, _)| s.name == a.ident && s.ident == r.ident[e]) {
+                self.radios.tune_nav(st, self.plane.pos);
+            }
         } else {
             let start = if e == 0 { r.a } else { r.b } + dir * 25.0;
             let (lat, lon) = g.lla(start);
@@ -1112,6 +1122,10 @@ impl Game {
             reverse: k(KeyCode::KeyZ),
             throttle_set: None,
         };
+        let obs = ax(k(KeyCode::BracketRight), k(KeyCode::BracketLeft));
+        if obs != 0.0 {
+            self.radios.obs = (self.radios.obs + obs * 20.0 * dt).rem_euclid(360.0);
+        }
         let trim = ax(k(KeyCode::Numpad1), k(KeyCode::Numpad7));
         if trim != 0.0 && self.mode == Mode::Fly && !self.pause_open && !self.crashed {
             self.plane.trim = (self.plane.trim + trim * 0.035 * dt).clamp(-0.05, 0.24);
@@ -1361,6 +1375,236 @@ impl Game {
                 self.keys.remove(&a.key);
             }
         }
+    }
+
+    /// The flight panel's radios: NAV 1 (VOR or ILS) and the ADF tuned from
+    /// the stations around, the OBS, and the altimeter setting.
+    fn radio_page(&mut self, ui: &mut egui::Ui) {
+        use egui::RichText;
+        use menu::{ACCENT, DIM, TEXT};
+        use nav::Kind;
+        let pos = self.plane.pos;
+        let (la, lo, h) = geo::pos_to_lla(pos);
+        let (lat, lon) = (la.to_degrees(), lo.to_degrees());
+        let dim = |s: String| RichText::new(s).size(12.0).color(DIM);
+        ui.checkbox(&mut self.radios.show, t!("Show the navigation instruments (J)", "Afficher les instruments de navigation (J)"));
+
+        menu::heading(ui, "NAV 1  (VOR / ILS)");
+        if let Some(st) = self.radios.nav.clone() {
+            let r = nav::nav_reading(&st, self.radios.obs, pos);
+            ui.label(RichText::new(format!("{}  {}", st.freq_text(), st.label())).monospace().size(13.0).color(ACCENT));
+            let state = if !r.live {
+                t!("no signal", "pas de signal").to_string()
+            } else {
+                let mut s = match r.to {
+                    Some(true) => "TO".to_string(),
+                    Some(false) => "FROM".to_string(),
+                    None => "LOC".to_string(),
+                };
+                if r.gs.is_some() {
+                    s += " · G/S";
+                }
+                if let Some(d) = r.dme {
+                    s += &format!(" · DME {d:.1} NM");
+                }
+                s
+            };
+            ui.label(dim(state));
+            ui.horizontal(|ui| {
+                if st.kind == Kind::Ils {
+                    ui.label(RichText::new(t!("Course {:03.0}°", "Axe {:03.0}°", st.course)).monospace().color(TEXT));
+                } else {
+                    ui.label(RichText::new(format!("OBS {:03.0}°", self.radios.obs)).monospace().color(TEXT));
+                    for (txt, d) in [("−10", -10.0), ("−1", -1.0), ("+1", 1.0), ("+10", 10.0)] {
+                        if ui.small_button(txt).clicked() {
+                            self.radios.obs = (self.radios.obs.round() + d).rem_euclid(360.0);
+                        }
+                    }
+                    if ui.small_button(t!("Direct to", "Direct")).clicked() {
+                        self.radios.obs = nav::bearing(pos, st.pos()).round();
+                    }
+                }
+                if ui.small_button(t!("Off", "Éteindre")).clicked() {
+                    self.radios.nav = None;
+                }
+            });
+        } else {
+            ui.label(dim(t!("Not tuned: pick a station below.", "Non réglée : choisissez une station ci-dessous.").into()));
+        }
+        let mut list = nav::near(lat, lon, 200_000.0, Kind::Vor);
+        list.truncate(8);
+        let mut ils = nav::near(lat, lon, 40_000.0, Kind::Ils);
+        ils.truncate(8);
+        list.extend(ils);
+        list.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut tune = None;
+        egui::Grid::new("radio_nav").num_columns(3).spacing([8.0, 2.0]).show(ui, |ui| {
+            for (st, d) in list.iter().take(10) {
+                let on = self.radios.nav.as_ref() == Some(st);
+                if ui.add(egui::Button::selectable(on, RichText::new(st.freq_text()).monospace().size(12.0))).clicked() {
+                    tune = Some(st.clone());
+                }
+                ui.label(RichText::new(st.label().chars().take(30).collect::<String>()).size(12.0).color(TEXT));
+                ui.label(dim(format!("{:.0} km", d / 1000.0)));
+                ui.end_row();
+            }
+        });
+        if let Some(st) = tune {
+            self.radios.tune_nav(st, pos);
+        }
+
+        menu::heading(ui, "ADF  (NDB)");
+        match self.radios.adf.clone() {
+            Some(st) => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{}  {}", st.freq_text(), st.label())).monospace().size(13.0).color(ACCENT));
+                    if ui.small_button(t!("Off", "Éteindre")).clicked() {
+                        self.radios.adf = None;
+                    }
+                });
+            }
+            None => {
+                ui.label(dim(t!("Not tuned.", "Non réglé.").into()));
+            }
+        }
+        let mut tune = None;
+        egui::Grid::new("radio_adf").num_columns(3).spacing([8.0, 2.0]).show(ui, |ui| {
+            for (st, d) in nav::near(lat, lon, 150_000.0, Kind::Ndb).iter().take(6) {
+                let on = self.radios.adf.as_ref() == Some(st);
+                if ui.add(egui::Button::selectable(on, RichText::new(st.freq_text()).monospace().size(12.0))).clicked() {
+                    tune = Some(st.clone());
+                }
+                ui.label(RichText::new(st.label().chars().take(30).collect::<String>()).size(12.0).color(TEXT));
+                ui.label(dim(format!("{:.0} km", d / 1000.0)));
+                ui.end_row();
+            }
+        });
+        if let Some(st) = tune {
+            self.radios.tune_adf(st);
+        }
+
+        menu::heading(ui, t!("ALTIMETER", "ALTIMÈTRE"));
+        let qnh = self.wx.qnh;
+        let src = if self.wx.live && !self.wx.live_station.is_empty() { self.wx.live_station.clone() } else { t!("standard", "standard").into() };
+        ui.label(dim(t!("QNH {:.0} hPa ({})", "QNH {:.0} hPa ({})", qnh, src)));
+        let set = self.radios.setting(qnh);
+        ui.horizontal(|ui| {
+            let auto = if self.radios.baro.is_none() { t!(" (on the QNH)", " (sur le QNH)") } else { "" };
+            ui.label(RichText::new(t!("Setting {:.0} hPa{}", "Calage {:.0} hPa{}", set, auto)).monospace().color(TEXT));
+            if ui.small_button("−1").clicked() {
+                self.radios.baro = Some(set.round() - 1.0);
+            }
+            if ui.small_button("+1").clicked() {
+                self.radios.baro = Some(set.round() + 1.0);
+            }
+            if ui.small_button("QNH (X)").clicked() {
+                self.radios.baro = None;
+            }
+            if ui.small_button("STD 1013").clicked() {
+                self.radios.baro = Some(1013.25);
+            }
+        });
+        let true_ft = h * 3.28084;
+        ui.label(dim(t!("The altimeter reads {:.0} ft (true altitude {:.0} ft).", "L'altimètre indique {:.0} ft (altitude vraie {:.0} ft).", true_ft + self.radios.alt_error_ft(qnh), true_ft)));
+    }
+
+    /// The navigation instruments over the game: a course deviation
+    /// indicator for NAV 1 (with the glide slope on an ILS) and an ADF dial.
+    fn nav_overlay(&self, ctx: &egui::Context, hdg: f64) {
+        use egui::{Align2, Color32, FontId, Stroke};
+        let pos = self.plane.pos;
+        let nav = self.radios.nav.as_ref().map(|s| (s, nav::nav_reading(s, self.radios.obs, pos)));
+        let adf = self.radios.adf.as_ref().map(|s| (s, nav::adf_bearing(s, pos, hdg)));
+        if nav.is_none() && adf.is_none() {
+            return;
+        }
+        let white = Color32::from_rgba_unmultiplied(255, 255, 255, 235);
+        let dim = Color32::from_rgba_unmultiplied(255, 255, 255, 140);
+        let green = Color32::from_rgb(110, 235, 140);
+        let amber = Color32::from_rgb(255, 196, 64);
+        let red = Color32::from_rgb(255, 90, 60);
+        let mono = |s: f32| FontId::monospace(s);
+        egui::Area::new(egui::Id::unique("nav_inst")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0]).show(ctx, |ui| {
+            egui::Frame::new().fill(Color32::from_rgba_unmultiplied(8, 12, 18, 150)).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some((st, r)) = &nav {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(220.0, 128.0), egui::Sense::hover());
+                        let p = ui.painter();
+                        p.text(rect.left_top(), Align2::LEFT_TOP, format!("NAV1 {} {}", st.ident, st.freq_text()), mono(12.0), white);
+                        if let Some(d) = r.dme.filter(|_| r.live) {
+                            p.text(rect.right_top(), Align2::RIGHT_TOP, format!("DME {d:.1}"), mono(12.0), white);
+                        }
+                        // The course needle over five dots each side.
+                        let c = egui::pos2(rect.left() + 95.0, rect.top() + 66.0);
+                        for k in -5..=5 {
+                            if k != 0 {
+                                p.circle_stroke(c + egui::vec2(k as f32 * 15.0, 0.0), 2.5, Stroke::new(1.2, dim));
+                            }
+                        }
+                        p.circle_stroke(c, 5.0, Stroke::new(1.2, dim));
+                        if r.live {
+                            let x = c.x + r.cdi as f32 * 75.0;
+                            p.line_segment([egui::pos2(x, c.y - 36.0), egui::pos2(x, c.y + 36.0)], Stroke::new(3.0, green));
+                        } else {
+                            p.text(c + egui::vec2(0.0, -22.0), Align2::CENTER_CENTER, "OFF", mono(14.0), red);
+                        }
+                        // TO / FROM, and the course.
+                        let course = if st.kind == nav::Kind::Ils { st.course } else { self.radios.obs };
+                        let flag = match (r.live, r.to) {
+                            (true, Some(true)) => "▲ TO",
+                            (true, Some(false)) => "▼ FROM",
+                            (true, None) => "LOC",
+                            _ => "",
+                        };
+                        p.text(c + egui::vec2(0.0, 48.0), Align2::CENTER_CENTER, flag, mono(11.0), white);
+                        p.text(egui::pos2(rect.left(), rect.bottom()), Align2::LEFT_BOTTOM, format!("CRS {course:03.0}"), mono(12.0), amber);
+                        // The glide slope on the right, on an ILS.
+                        if st.kind == nav::Kind::Ils {
+                            let gx = rect.right() - 12.0;
+                            for k in -2..=2 {
+                                p.circle_stroke(egui::pos2(gx, c.y + k as f32 * 16.0), if k == 0 { 4.0 } else { 2.5 }, Stroke::new(1.2, dim));
+                            }
+                            p.text(egui::pos2(gx, rect.bottom()), Align2::CENTER_BOTTOM, "GS", mono(10.0), dim);
+                            match r.gs {
+                                Some(g) => {
+                                    let y = c.y - g as f32 * 32.0;
+                                    let d = 6.0;
+                                    p.add(egui::Shape::convex_polygon(vec![egui::pos2(gx, y - d), egui::pos2(gx + d, y), egui::pos2(gx, y + d), egui::pos2(gx - d, y)], green, Stroke::NONE));
+                                }
+                                None => {
+                                    p.text(egui::pos2(gx, c.y - 44.0), Align2::CENTER_CENTER, "OFF", mono(10.0), red);
+                                }
+                            }
+                        }
+                    }
+                    if let Some((st, b)) = &adf {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(110.0, 128.0), egui::Sense::hover());
+                        let p = ui.painter();
+                        let c = rect.center() + egui::vec2(0.0, -6.0);
+                        let rad = 44.0;
+                        p.circle_stroke(c, rad, Stroke::new(1.2, dim));
+                        for k in 0..12 {
+                            let a = (k as f32 * 30.0).to_radians();
+                            let v = egui::vec2(a.sin(), -a.cos());
+                            p.line_segment([c + v * (rad - if k % 3 == 0 { 8.0 } else { 4.0 }), c + v * rad], Stroke::new(1.2, dim));
+                        }
+                        p.text(c + egui::vec2(0.0, -rad + 14.0), Align2::CENTER_CENTER, "▲", mono(9.0), dim);
+                        match b {
+                            Some(b) => {
+                                let a = (*b as f32).to_radians();
+                                let v = egui::vec2(a.sin(), -a.cos());
+                                p.line_segment([c - v * (rad - 10.0), c + v * (rad - 6.0)], Stroke::new(2.5, amber));
+                                p.circle_filled(c + v * (rad - 6.0), 3.5, amber);
+                            }
+                            None => {
+                                p.text(c, Align2::CENTER_CENTER, "OFF", mono(13.0), red);
+                            }
+                        }
+                        p.text(egui::pos2(c.x, rect.bottom()), Align2::CENTER_BOTTOM, format!("ADF {} {}", st.ident, st.freq_text()), mono(11.0), white);
+                    }
+                });
+            });
+        });
     }
 
     /// The bindings page: devices, axes, joystick buttons and the keyboard.
@@ -1653,6 +1897,12 @@ impl Game {
             KeyCode::F3 => self.wx.open = !self.wx.open,
             KeyCode::KeyP => self.paused = !self.paused,
             KeyCode::KeyH => self.show_hud = !self.show_hud,
+            KeyCode::KeyJ => self.radios.show = !self.radios.show,
+            KeyCode::KeyX => {
+                self.radios.baro = None;
+                self.status = t!("Altimeter set to the QNH, {:.0} hPa", "Altimètre calé au QNH, {:.0} hPa", self.wx.qnh);
+                self.status_until = self.real + 3.0;
+            }
             KeyCode::Period => {
                 self.parking_brake = !self.parking_brake;
                 self.status = if self.parking_brake { t!("Parking brake set", "Frein de parc serré") } else { t!("Parking brake released", "Frein de parc desserré") }.into();
@@ -3935,6 +4185,7 @@ impl Game {
                                 }
                             });
                         }
+                        Page::Radio => self.radio_page(ui),
                         Page::Weather => {
                             ui.spacing_mut().slider_width = 140.0;
                             self.wx.controls(ui, &mut self.utc, &mut self.doy, lon, false);
@@ -3952,6 +4203,8 @@ impl Game {
                                 row(ui, t!("Airspeed", "Vitesse air"), format!("{:.0} kt IAS  ·  {:.0} TAS", speed * 1.94384, p.airspeed().length() * 1.94384), TEXT);
                                 row(ui, t!("Ground speed", "Vitesse sol"), t!("{:.0} kt  ·  track {trk:03.0}°", "{:.0} kt  ·  route {trk:03.0}°", p.vel.length() * 1.94384), TEXT);
                                 row(ui, "Altitude", format!("{:.0} ft", alt * 3.28084), TEXT);
+                                let set = self.radios.setting(self.wx.qnh);
+                                row(ui, t!("Altimeter", "Altimètre"), format!("{:.0} ft  ·  {:.0} hPa", alt * 3.28084 + self.radios.alt_error_ft(self.wx.qnh), set), TEXT);
                                 row(ui, t!("Above ground", "Hauteur sol"), format!("{:.0} ft", agl.max(0.0) * 3.28084), TEXT);
                                 row(ui, t!("Vertical speed", "Vitesse verticale"), t!("{:+.0} fpm", "{:+.0} ft/min", vs * 196.85), TEXT);
                                 row(ui, t!("Heading", "Cap"), format!("{hdg:03.0}°"), TEXT);
@@ -3990,6 +4243,7 @@ impl Game {
                                 row(ui, t!("Local time", "Heure locale"), menu::hhmm(local), TEXT);
                                 row(ui, t!("Wind", "Vent"), if wind_kt < 1.0 { t!("calm", "calme").into() } else { format!("{:03.0}° / {:.0} kt", self.wx.wind_from, wind_kt) }, TEXT);
                                 row(ui, t!("Clouds", "Nuages"), if self.wx.clouds < 0.05 { t!("clear", "dégagé").into() } else { format!("{:.0}%, base {:.0} ft", self.wx.clouds * 100.0, self.wx.cloud_base * 3.28084) }, TEXT);
+                                row(ui, "QNH", format!("{:.0} hPa", self.wx.qnh), TEXT);
                                 row(ui, t!("Visibility", "Visibilité"), format!("{:.0} km", self.wx.visibility_km()), TEXT);
                             });
                             ui.add_space(6.0);
@@ -4196,6 +4450,9 @@ impl Game {
                         }
                     });
                 });
+            }
+            if self.show_hud && self.radios.show {
+                self.nav_overlay(ctx, hdg);
             }
             // Real traffic: a tag beside each aircraft within range.
             if let (true, Some((vp, cam))) = (self.show_hud && self.live.enabled(), self.live_view) {

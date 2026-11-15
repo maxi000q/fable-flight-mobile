@@ -42,6 +42,9 @@ pub struct Weather {
     pub live_raw: String,
     /// the clock follows the real time and date (see `real_clock`)
     pub real_time: bool,
+    /// sea-level pressure (hPa): the QNH an altimeter is set to (standard
+    /// unless the real weather says otherwise)
+    pub qnh: f64,
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -126,7 +129,7 @@ fn cube_face(q: DVec3) -> (u32, DVec3, DVec3, DVec3) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false, qnh: 1013.25 }
     }
 
     /// Top of the cloud layer including any storm towers, metres.
