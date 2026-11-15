@@ -484,7 +484,8 @@ fn pom(l: i32, wc: vec2f, Vt: vec3f, depth: f32, dx: vec2f, dy: vec2f) -> vec2f 
 }
 
 // ------------------------------------------------------------ vertices
-fn finish(Pin: vec3f, nrm: vec3f, uv: vec2f, depth: f32, skirt: f32) -> VOut {
+// sp: spacing of the vertices around this one (m): the waves are filtered to it.
+fn finish(Pin: vec3f, nrm: vec3f, uv: vec2f, depth: f32, skirt: f32, sp: f32) -> VOut {
   var P = Pin;
   let m = textureSampleLevel(t_mask, s_clamp, uv, 1.0);
   if (m.r > 0.5 && skirt < 0.5) {
@@ -494,7 +495,9 @@ fn finish(Pin: vec3f, nrm: vec3f, uv: vec2f, depth: f32, skirt: f32) -> VOut {
       let upn = normalize(P - G.planet.xyz);
       let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, uv, 3.0).r);
       let st = sea_state(m.g * 255.0 / 80.0, upn.z, shore);
-      P += upn * swell(wave_coord(P), G.time.x, T.offset.w * 4.0).x * st.x * fade;
+      // The FFT ocean: height, and the sideways shift that sharpens the crests.
+      let w = ocean_disp(ocean_coord(P), sp, st) * fade;
+      P += G.east.xyz * w.x + G.north.xyz * w.y + upn * w.z;
     }
   }
   if (skirt < 0.5) { P += normalize(P - G.planet.xyz) * crater_field(P).w; }
@@ -513,9 +516,15 @@ struct TopOut { @builtin(position) clip: vec4f, @location(0) uv: vec2f, @locatio
   if (in.skirt > 0.5 || textureSampleLevel(t_mask, s_clamp, in.uv, 0.0).r < 0.5) { discard; }
   return vec4f(0.0, in.h, 0.0, 0.0);
 }
+// Where any ground was drawn at all, into the red channel of the shore mask
+// (shore.rs): land there is ground without our water on it.
+@fragment fn fs_cover(in: TopOut) -> @location(0) vec4f {
+  if (in.skirt > 0.5) { discard; }
+  return vec4f(1.0, 0.0, 0.0, 0.0);
+}
 
 @vertex fn vs(@location(0) pos: vec3f, @location(1) depth: f32, @location(2) nrm: vec3f, @location(3) skirt: f32, @location(4) uv: vec2f) -> VOut {
-  return finish(pos + T.offset.xyz, nrm, uv, depth, skirt);
+  return finish(pos + T.offset.xyz, nrm, uv, depth, skirt, T.offset.w);
 }
 
 // Tessellation without a tessellation stage: every coarse grid cell near the
@@ -614,7 +623,10 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
     let sp = max(d * TESS_K, T.offset.w / f32(TN));
     P += normalize(v.N) * relief(P, v.N, v.uv, sp) * fade;
   }
-  return finish(P, v.N, v.uv, v.depth, 0.0);
+  // The waves follow the finer spacing where the cells are split, back to
+  // the plain cells' where the block must join them.
+  let wsp = mix(T.offset.w, max(d * TESS_K, T.offset.w / f32(TN)), fade);
+  return finish(P, v.N, v.uv, v.depth, 0.0, wsp);
 }
 
 // The rest of a tessellated tile, one quad per cell; the cells drawn by
@@ -627,7 +639,7 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
     return VOut(vec4f(2.0, 2.0, 2.0, 1.0), vec3f(0.0), vec3f(0.0, 0.0, 1.0), vec2f(0.0), 0.0);
   }
   let v = cv(cj * GV + ci + (vi & 1u) + (vi >> 1u) * GV);
-  return finish(v.P, v.N, v.uv, v.depth, 0.0);
+  return finish(v.P, v.N, v.uv, v.depth, 0.0, T.offset.w);
 }
 
 // ------------------------------------------------------------ surface

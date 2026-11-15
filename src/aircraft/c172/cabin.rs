@@ -1,5 +1,6 @@
 //! The cabin: lining and carpet, the instrument panel with its gauges, radios,
 //! switches and breakers, the moving controls, seats and belts, and the glass.
+use super::*;
 use crate::airframe::*;
 use glam::{Mat3, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -41,6 +42,8 @@ const KNOB: Mat = mt(mat::PLASTIC, 0.02, 0.02, 0.022);
 pub fn build(b: &mut Builder) {
     let mut m = Mesh::default();
     lining(&mut m);
+    window_trim(&mut m);
+    door_trim(&mut m);
     panel(&mut m);
     seats(&mut m);
     fittings(&mut m);
@@ -193,9 +196,10 @@ fn lining(m: &mut Mesh) {
     // Door armrests, handles and window latches.
     for sx in [-1.0f32, 1.0] {
         m.rbox(&mt(mat::PLASTIC, 0.22, 0.21, 0.2), Vec3::new(sx * 0.515, -0.07, -0.95), Vec3::new(0.035, 0.028, 0.2), 0.02, Quat::IDENTITY);
-        m.rbox(&CHROME, Vec3::new(sx * 0.53, 0.09, -0.66), Vec3::new(0.008, 0.008, 0.05), 0.006, Quat::from_rotation_x(0.3));
-        m.rbox(&BLACK, Vec3::new(sx * 0.538, 0.09, -0.66), Vec3::new(0.004, 0.025, 0.06), 0.004, Quat::IDENTITY);
-        m.rbox(&KNOB, Vec3::new(sx * 0.53, 0.115, -0.98), Vec3::new(0.01, 0.006, 0.03), 0.004, Quat::IDENTITY);
+        // Inside door handle in its recessed escutcheon, aft of the armrest.
+        let hx = inner_x(-0.62, -0.01);
+        m.rbox(&BLACK, Vec3::new(sx * (hx - 0.004), -0.01, -0.62), Vec3::new(0.004, 0.025, 0.06), 0.004, Quat::IDENTITY);
+        m.rbox(&CHROME, Vec3::new(sx * (hx - 0.016), -0.01, -0.62), Vec3::new(0.008, 0.008, 0.05), 0.006, Quat::from_rotation_x(0.3));
         // Air vents at the top corners of the windshield.
         let c = Vec3::new(sx * 0.47, 0.545, -0.93);
         m.lathe(&KNOB, c, Vec3::new(-sx * 0.3, -1.0, 0.5), &[[0.03, -0.004], [0.03, 0.0], [0.024, 0.006], [0.02, 0.006]], 20, false);
@@ -206,6 +210,305 @@ fn lining(m: &mut Mesh) {
     }
     // Dome light.
     m.lathe(&mt(mat::PLASTIC, 0.7, 0.7, 0.66), Vec3::new(0.0, inner(-0.2).top, -0.2), Vec3::NEG_Y, &[[0.04, 0.0], [0.04, 0.006], [0.032, 0.012], [0.0, 0.014]], 20, true);
+}
+
+// ---------------------------------------------------------------- window trim
+
+/// Moulded window surrounds, slightly lighter than the walls they sit on.
+const SURROUND: Mat = mt(mat::PLASTIC, 0.34, 0.33, 0.31);
+/// Scale on the polar angle so the (z, angle) plane is roughly isotropic.
+const POLAR_R: f32 = 0.55;
+
+/// Where a ray from the waist centre of section `s` at polar angle `phi`
+/// (0 straight up, positive toward the right) meets it.
+fn ray_hit(s: &Sec, phi: f32) -> Vec2 {
+    let a = phi.abs().min(PI);
+    let (mut lo, mut hi) = (0.0f32, PI);
+    for _ in 0..24 {
+        let mid = (lo + hi) * 0.5;
+        let p = sec_pt(s, mid);
+        if p.x.atan2(p.y - s.mid) < a { lo = mid } else { hi = mid }
+    }
+    let p = sec_pt(s, (lo + hi) * 0.5);
+    Vec2::new(if phi < 0.0 { -p.x } else { p.x }, p.y)
+}
+/// The skin and the lining over a (station, scaled polar angle) plane, so a
+/// point of one has the other radially inside or outside it.
+fn skin_at(q: Vec2) -> Vec3 {
+    let p = ray_hit(&sec(q.x), q.y / POLAR_R);
+    Vec3::new(p.x, p.y, q.x)
+}
+fn lin_at(q: Vec2) -> Vec3 {
+    let p = ray_hit(&inner(q.x), q.y / POLAR_R);
+    Vec3::new(p.x, p.y, q.x)
+}
+/// Outward normal of either surface at q.
+fn surf_n(f: fn(Vec2) -> Vec3, q: Vec2) -> Vec3 {
+    let e = 0.002;
+    let dz = f(q + Vec2::X * e) - f(q - Vec2::X * e);
+    let dp = f(q + Vec2::Y * e) - f(q - Vec2::Y * e);
+    dz.cross(dp).normalize()
+}
+fn skin_window(q: Vec2) -> f32 {
+    window(skin_at(q))
+}
+/// Unit direction in the plane away from the opening (up the distance field).
+fn away(q: Vec2) -> Vec2 {
+    let e = 0.002;
+    let g = Vec2::new(skin_window(q + Vec2::X * e) - skin_window(q - Vec2::X * e), skin_window(q + Vec2::Y * e) - skin_window(q - Vec2::Y * e));
+    g.normalize_or_zero()
+}
+
+/// The edge of the skin's opening round centre `c`, every ~8 mm, closed.
+fn trace_opening(c: Vec2) -> Vec<Vec2> {
+    let n = 720;
+    let raw: Vec<Vec2> = (0..n)
+        .map(|k| {
+            let a = k as f32 / n as f32 * TAU;
+            let d = Vec2::new(a.cos(), a.sin());
+            let step = 0.008;
+            let mut t = 0.0;
+            while t < 1.6 && skin_window(c + d * (t + step)) < 0.0 {
+                t += step;
+            }
+            let (mut lo, mut hi) = (t, t + step);
+            for _ in 0..18 {
+                let m = (lo + hi) * 0.5;
+                if skin_window(c + d * m) < 0.0 { lo = m } else { hi = m }
+            }
+            c + d * ((lo + hi) * 0.5)
+        })
+        .collect();
+    // Even spacing along the skin.
+    let pts: Vec<Vec3> = raw.iter().map(|&q| skin_at(q)).collect();
+    let mut acc = vec![0.0f32];
+    for k in 0..n {
+        acc.push(acc[k] + (pts[(k + 1) % n] - pts[k]).length());
+    }
+    let total = acc[n];
+    let m = (total / 0.008).round() as usize;
+    let mut out = Vec::with_capacity(m);
+    let mut j = 0;
+    for i in 0..m {
+        let s = total * i as f32 / m as f32;
+        while acc[j + 1] < s {
+            j += 1;
+        }
+        let t = (s - acc[j]) / (acc[j + 1] - acc[j]).max(1e-9);
+        out.push(raw[j].lerp(raw[(j + 1) % n], t));
+    }
+    out
+}
+
+/// One window's frame from inside: a rubber gasket where the glass meets the
+/// skin, a reveal straight in to the lining, and a moulded surround with a
+/// rounded lip that laps over the lining's own cut edge. Returns points along
+/// the middle of the surround (with its normal) for screws.
+fn frame_window(m: &mut Mesh, c: Vec2, flange: f32, cut: &dyn Fn(Vec3) -> bool) -> Vec<(Vec3, Vec3, f32)> {
+    let loop_q = trace_opening(c);
+    struct Pt {
+        q: Vec2,
+        g: Vec2,
+        s: Vec3,
+        ns: Vec3,
+        u: Vec3,
+        nl: Vec3,
+        k: f32, // plane units per metre along the lining, toward g
+    }
+    let pts: Vec<Pt> = loop_q
+        .iter()
+        .map(|&q| {
+            let g = away(q);
+            let s = skin_at(q);
+            let ns = surf_n(skin_at, q);
+            let u = (skin_at(q + g * 0.003) - s).normalize();
+            let l = lin_at(q);
+            let nl = surf_n(lin_at, q);
+            let k = 0.003 / (lin_at(q + g * 0.003) - l).length().max(1e-6);
+            Pt { q, g, s, ns, u, nl, k }
+        })
+        .collect();
+    // How far out the surround has to reach to cover the lining's cut
+    // (the lining is cut where its own point lies over an opening).
+    let mut need = flange;
+    for p in &pts {
+        let mut a = 0.0;
+        while a < 0.08 && window(lin_at(p.q + p.g * (a * p.k))) < 0.006 {
+            a += 0.002;
+        }
+        need = need.max(a + 0.008);
+    }
+    let w = need.min(0.075);
+    // Lining point `a` metres out from the reveal, lifted `h` into the cabin.
+    let on_lin = |p: &Pt, a: f32, h: f32| lin_at(p.q + p.g * (a * p.k)) - p.nl * h;
+    let flange_prof: [(f32, f32); 9] = [(-0.004, 0.0065), (-0.001, 0.0105), (0.004, 0.0125), (0.010, 0.0118), (0.30, 0.0085), (0.55, 0.0055), (0.78, 0.003), (0.93, 0.0015), (1.0, 0.0006)];
+
+    let mut gasket: Vec<Vec<SP>> = Vec::new();
+    let mut trim: Vec<Vec<SP>> = Vec::new();
+    let mut arc = 0.0;
+    let mut screws = Vec::new();
+    let mut runs: Vec<(Vec<Vec<SP>>, Vec<Vec<SP>>)> = Vec::new();
+    let n = pts.len();
+    for i in 0..=n {
+        let p = &pts[i % n];
+        if i > 0 {
+            arc += (p.s - pts[i - 1].s).length();
+        }
+        if cut(p.s) {
+            // Hidden (under the glareshield): end this run here.
+            if gasket.len() > 1 {
+                runs.push((std::mem::take(&mut gasket), std::mem::take(&mut trim)));
+            }
+            gasket.clear();
+            trim.clear();
+            continue;
+        }
+        let (s, ns, u) = (p.s, p.ns, p.u);
+        gasket.push(vec![
+            (s - u * 0.009 - ns * 0.0012, [arc, 0.0], 0.0),
+            (s - u * 0.007 - ns * 0.0040, [arc, 0.003], 0.0),
+            (s - u * 0.0035 - ns * 0.0062, [arc, 0.007], 0.0),
+            (s + u * 0.002 - ns * 0.0072, [arc, 0.012], 0.0),
+        ]);
+        let mut row: Vec<SP> = vec![(s + u * 0.0005 - ns * 0.0055, [arc, 0.0], 0.0)];
+        // The reveal: straight in from the skin to the lip.
+        let lip = on_lin(p, -0.004, 0.0065);
+        for t in [0.33f32, 0.66] {
+            row.push((s.lerp(lip, t), [arc, 0.045 * t], 0.0));
+        }
+        for &(a, h) in &flange_prof {
+            let a = if a <= 0.02 { a } else { a * w };
+            row.push((on_lin(p, a, h), [arc, 0.05 + a], 0.0));
+        }
+        trim.push(row);
+        if (arc / 0.23).fract() < (0.008 / 0.23) && arc > 0.05 {
+            let at = on_lin(p, 0.55 * w, 0.0055 + 0.0006);
+            screws.push((at, -p.nl, arc));
+        }
+    }
+    if gasket.len() > 1 {
+        runs.push((gasket, trim));
+    }
+    for (g, t) in runs {
+        for (rows, mat, probe) in [(g, RUBBER, 1usize), (t, SURROUND, 5usize)] {
+            let start = m.v.len();
+            let nc = rows[0].len();
+            m.grid(&mat, &rows, false, false);
+            // Face the cabin (probe a point on the lip / the gasket's crown).
+            let mid = rows.len() / 2;
+            let v = &m.v[start + mid * nc + probe];
+            let pv = Vec3::from(v.pos);
+            // Inward is toward the cabin's centre line at that height.
+            let inward = Vec3::new(-pv.x, (0.1 - pv.y) * 0.5, 0.0);
+            let inward = if inward.length() < 0.05 { Vec3::NEG_Y } else { inward };
+            if Vec3::from(v.nrm).dot(inward) < 0.0 {
+                for v in &mut m.v[start..] {
+                    v.nrm = (-Vec3::from(v.nrm)).into();
+                }
+            }
+        }
+    }
+    screws
+}
+
+fn window_trim(m: &mut Mesh) {
+    let mut side = Mesh::default();
+    let mut screws = Vec::new();
+    // Door window and rear side window, right side (mirrored below).
+    let phi = |z: f32, y: f32| {
+        let s = sec(z);
+        let th = fuse_th(z, y);
+        let p = sec_pt(&s, th);
+        p.x.atan2(p.y - s.mid) * POLAR_R
+    };
+    let never = |_: Vec3| false;
+    screws.extend(frame_window(&mut side, Vec2::new(-0.90, phi(-0.90, 0.30)), 0.030, &never));
+    screws.extend(frame_window(&mut side, Vec2::new(0.05, phi(0.05, 0.30)), 0.030, &never));
+    for (p, n, seed) in screws.drain(..) {
+        trim_screw(&mut side, p, n, seed);
+    }
+    m.append(&side.mirror_x());
+    m.append(&side);
+    // Windshield (both sides at once) and the rear window in the roof.
+    // Ahead of the panel the windshield's lower edge runs under the glareshield.
+    let under_gs = |p: Vec3| p.z < PANEL_Z - 0.02 && p.y < 0.30 && p.x.abs() < 0.47;
+    let mut s = frame_window(m, Vec2::new(-1.40, 0.0), 0.034, &under_gs);
+    s.extend(frame_window(m, Vec2::new(1.16, 0.0), 0.030, &never));
+    for (p, n, seed) in s {
+        trim_screw(m, p, n, seed);
+    }
+}
+
+/// A Phillips screw in a cup washer, painted over with the trim.
+fn trim_screw(m: &mut Mesh, p: Vec3, n: Vec3, seed: f32) {
+    m.lathe(&mt(mat::PLASTIC, 0.30, 0.29, 0.275), p, n, &[[0.0046, 0.0], [0.0046, 0.0005], [0.0034, 0.0013], [0.0, 0.0013]], 16, false);
+    m.screw(&mt(mat::SCREW, 0.32, 0.31, 0.29).x(1.0), p + n * 0.001, n, 0.0026, seed);
+}
+
+/// The doors from inside: the opening window's hinge and latch, a map
+/// pocket, a pull strap, the seal round the frame.
+fn door_trim(m: &mut Mesh) {
+    let mut d = Mesh::default();
+    // The door window opens: a piano hinge along its top, a latch at the bottom.
+    let (z0, z1) = (-1.02f32, -0.60f32);
+    let hinge: Vec<Vec3> = (0..=12).map(|k| on_side(z0 + (z1 - z0) * k as f32 / 12.0, 0.507, 1.0, -0.010).0).collect();
+    d.tube(&mt(mat::ALU, 0.5, 0.5, 0.52), &hinge, &|_| 0.0042, 10, true);
+    for k in 0..7 {
+        let z = z0 + 0.02 + k as f32 * 0.063;
+        let (p, _) = on_side(z, 0.507, 1.0, -0.010);
+        d.lathe(&mt(mat::ALU, 0.42, 0.42, 0.44), p - Vec3::Z * 0.004, Vec3::Z, &[[0.0049, 0.0], [0.0049, 0.008], [0.0, 0.008]], 10, true);
+    }
+    // Latch: a cast body on the window frame, a lever, and its catch on the sill.
+    let (lp, ln) = on_side(-0.95, 0.098, 1.0, -0.012);
+    let rot = Quat::from_rotation_arc(Vec3::X, -ln);
+    d.rbox(&BLACK, lp, Vec3::new(0.006, 0.010, 0.022), 0.004, rot);
+    let lever: Vec<Vec3> = [(0.004, 0.004, 0.0), (0.016, 0.010, 0.018), (0.022, 0.012, 0.045)].iter().map(|&(a, b, c)| lp - ln * a + Vec3::Y * b + Vec3::Z * c).collect();
+    d.tube(&BLACK, &lever, &|t| 0.0042 - 0.001 * t, 8, true);
+    d.dome(&BLACK, *lever.last().unwrap(), Vec3::Z, 0.0055, 0.006, 10, 0.0);
+    let (cp, cn) = on_side(-0.95, 0.058, 1.0, -0.042);
+    d.rbox(&CHROME, cp, Vec3::new(0.004, 0.008, 0.018), 0.002, Quat::from_rotation_arc(Vec3::X, -cn));
+    // The placard under it: the window stays shut above 163 KIAS.
+    let (pp, pn) = on_side(-0.88, 0.054, 1.0, -0.0505);
+    d.rbox(&PAINT_WHITE.pat(pat::PLACARD), pp, Vec3::new(0.0004, 0.0055, 0.03), 0.0002, Quat::from_rotation_arc(Vec3::X, -pn));
+
+    // Map pocket low on the door: a moulded tray with a stiff lip.
+    let pocket = mt(mat::PLASTIC, 0.20, 0.195, 0.185);
+    let (zp0, zp1) = (-1.30f32, -0.72f32);
+    let rows: Vec<Vec<SP>> = (0..=16)
+        .map(|i| {
+            let z = zp0 + (zp1 - zp0) * i as f32 / 16.0;
+            let ends = (((z - zp0) / (zp1 - zp0) * PI).sin()).powf(0.3);
+            let bulge = 0.032 * ends;
+            let x = |y: f32| inner_x(z, y);
+            let prof = [(-0.40, 0.0015), (-0.385, bulge * 0.6), (-0.36, bulge), (-0.30, bulge), (-0.255, bulge * 0.95), (-0.25, bulge * 0.9), (-0.252, 0.004)];
+            prof.iter().enumerate().map(|(j, &(y, o))| (Vec3::new(x(y) - o, y, z), [z, j as f32 * 0.02], 0.0)).collect()
+        })
+        .collect();
+    let start = d.v.len();
+    d.grid(&pocket, &rows, false, false);
+    if d.v[start + 8 * 7 + 3].nrm[0] > 0.0 {
+        for v in &mut d.v[start..] {
+            v.nrm = (-Vec3::from(v.nrm)).into();
+        }
+    }
+    // A pen and a folded chart showing over the lip.
+    d.tube(&mt(mat::PLASTIC, 0.03, 0.06, 0.25), &[Vec3::new(inner_x(-1.1, -0.25) - 0.02, -0.255, -1.16), Vec3::new(inner_x(-1.0, -0.23) - 0.022, -0.225, -1.03)], &|_| 0.004, 8, true);
+    d.rbox(&mt(mat::PLASTIC, 0.62, 0.62, 0.55).pat(pat::PLACARD), Vec3::new(inner_x(-0.9, -0.27) - 0.017, -0.262, -0.90), Vec3::new(0.0015, 0.03, 0.09), 0.001, Quat::from_rotation_x(0.08));
+
+    // Pull strap on the door just under the window, for closing it.
+    let (a, an) = on_side(-0.82, 0.03, 1.0, -0.043);
+    let (b, _) = on_side(-0.68, 0.03, 1.0, -0.043);
+    let sag = (a + b) * 0.5 - an * 0.012 - Vec3::Y * 0.012;
+    let pts: Vec<Vec3> = (0..=8).map(|k| { let t = k as f32 / 8.0; a.lerp(b, t) + (sag - (a + b) * 0.5) * (4.0 * t * (1.0 - t)) }).collect();
+    for w in pts.windows(2) {
+        strap(&mut d, &STRAP, w[0], w[1], -an, 0.022, 0.003);
+    }
+    for p in [a, b] {
+        trim_screw(&mut d, p - an * 0.002, -an, p.z * 9.0);
+    }
+
+    m.append(&d.mirror_x());
+    m.append(&d);
 }
 
 // ---------------------------------------------------------------- instrument panel
@@ -559,7 +862,7 @@ fn controls(b: &mut Builder) {
         y.rbox(&mt(mat::PLASTIC, 0.08, 0.08, 0.08), c + Vec3::new(-0.115, 0.06, 0.028), Vec3::new(0.004, 0.008, 0.004), 0.002, Quat::IDENTITY);
         y.screw(&SCREW_BLACK, c + Vec3::new(0.04, -0.055, 0.0285), Vec3::Z, 0.0022, xs);
         y.screw(&SCREW_BLACK, c + Vec3::new(-0.04, -0.055, 0.0285), Vec3::Z, 0.0022, xs + 1.0);
-        b.add("yoke", G_FUSE, y, Anim::Yoke, c, Vec3::Z, None);
+        b.add("yoke", G_FUSE, y, Anim::turn_slide(Drive::new(Input::Roll, -0.6), Drive::new(Input::Pitch, 0.06), Vec3::Z), c, Vec3::Z, None);
         // The shaft collar where it comes through the panel.
         let mut col = Mesh::default();
         col.lathe(&BLACK, Vec3::new(xs, -0.06, PANEL_Z), Vec3::Z, &[[0.03, 0.0], [0.03, 0.004], [0.016, 0.008], [0.013, 0.008]], 24, false);
@@ -575,32 +878,32 @@ fn controls(b: &mut Builder) {
             p.rbox(&ALU, pc + Vec3::new(0.0, 0.0, 0.008), Vec3::new(0.034, 0.06, 0.005), 0.004, tilt);
             p.rbox(&RUBBER.pat(pat::KNURL), pc + Vec3::new(0.0, -0.005, 0.0145), Vec3::new(0.03, 0.04, 0.0025), 0.002, tilt);
             p.tube(&CHROME, &[pc + Vec3::new(0.0, 0.05, 0.0), pc + Vec3::new(0.0, 0.10, -0.08)], &|_| 0.005, 8, true);
-            b.add("pedal", G_FUSE, p, Anim::Pedal(dx.signum()), pv, Vec3::X, None);
+            b.add("pedal", G_FUSE, p, Anim::hinge(Drive::new(Input::Yaw, dx.signum() * 0.2)), pv, Vec3::X, None);
         }
     }
     // Throttle.
     let mut t = Mesh::default();
     t.tube(&CHROME, &[Vec3::new(0.0, -0.195, PANEL_Z - 0.09), Vec3::new(0.0, -0.195, PANEL_Z + 0.02)], &|_| 0.005, 12, false);
     t.lathe(&KNOB, Vec3::new(0.0, -0.195, PANEL_Z + 0.02), Vec3::Z, &[[0.005, 0.0], [0.017, 0.006], [0.019, 0.02], [0.017, 0.027], [0.0, 0.028]], 22, true);
-    b.add("throttle", G_FUSE, t, Anim::Throttle, Vec3::ZERO, Vec3::Z, None);
+    b.add("throttle", G_FUSE, t, Anim::slide(Drive::new(Input::Throttle, -0.06).offset(0.06), Vec3::Z), Vec3::ZERO, Vec3::Z, None);
     // Gear handle: a lever with a wheel-shaped knob.
     let mut g = Mesh::default();
     let gp = Vec3::new(-0.09, -0.185, PANEL_Z);
     g.tube(&CHROME, &[gp, gp + Vec3::Z * 0.05], &|_| 0.004, 8, false);
     g.lathe(&mt(mat::PLASTIC, 0.85, 0.85, 0.83), gp + Vec3::new(0.0, -0.007, 0.05), Vec3::Y, &[[0.0, 0.0], [0.013, 0.0], [0.015, 0.003], [0.015, 0.011], [0.013, 0.014], [0.0, 0.014]], 20, false);
-    b.add("gear handle", G_FUSE, g, Anim::GearHandle, gp, Vec3::X, None);
+    b.add("gear handle", G_FUSE, g, Anim::hinge(Drive::new(Input::GearHandle, 0.45)), gp, Vec3::X, None);
     // Flap lever with its airfoil-shaped knob.
     let mut fl = Mesh::default();
     let fp = Vec3::new(0.15, -0.195, PANEL_Z - 0.01);
     fl.tube(&CHROME, &[fp, fp + Vec3::Z * 0.035], &|_| 0.0035, 8, false);
     let foil: Vec<Vec2> = (0..20).map(|k| { let a = k as f32 / 20.0 * TAU; Vec2::new(0.016 * a.cos(), 0.006 * a.sin() * (1.0 - 0.5 * a.cos())) }).collect();
     fl.slab(&PAINT_WHITE, &foil, &[], fp + Vec3::new(0.0, 0.0, 0.045), Vec3::X, Vec3::Y, 0.01);
-    b.add("flap lever", G_FUSE, fl, Anim::FlapLever, fp, Vec3::X, None);
+    b.add("flap lever", G_FUSE, fl, Anim::hinge(Drive::new(Input::FlapLever, 0.7).offset(-0.35)), fp, Vec3::X, None);
     // Elevator trim wheel.
     let mut w = Mesh::default();
     let wc = Vec3::new(0.0, -0.40, PANEL_Z + 0.0);
     w.lathe(&BLACK.pat(pat::KNURL), wc - Vec3::X * 0.008, Vec3::X, &[[0.0, 0.0], [0.058, 0.0], [0.062, 0.004], [0.062, 0.012], [0.058, 0.016], [0.0, 0.016]], 40, false);
-    b.add("trim wheel", G_FUSE, w, Anim::TrimWheel, wc, Vec3::X, None);
+    b.add("trim wheel", G_FUSE, w, Anim::hinge(Drive::new(Input::Trim, 9.0)), wc, Vec3::X, None);
 }
 
 // ---------------------------------------------------------------- glass

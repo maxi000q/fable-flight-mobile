@@ -24,9 +24,25 @@ struct Obj { model: mat4x4f, tint: vec4f, glow: vec4f, params: array<vec4f, 6>, 
 const M_PAINT = 0u; const M_LIVERY = 1u; const M_ALU = 2u; const M_STEEL = 3u; const M_RUBBER = 4u;
 const M_PLASTIC = 5u; const M_FABRIC = 6u; const M_GLASS = 7u; const M_LAMP = 8u; const M_GAUGE = 9u;
 const M_BLACK = 10u; const M_EXHAUST = 11u; const M_SCREW = 12u; const M_PROP = 13u; const M_DISPLAY = 14u;
-const M_SATIN = 15u; const M_PROPDISC = 16u;
+const M_SATIN = 15u; const M_PROPDISC = 16u; const M_PLUME = 17u;
 const P_FUSE = 1u; const P_WING = 2u; const P_CTRL = 3u; const P_COWL = 4u; const P_TAIL = 5u; const P_TREAD = 6u;
 const P_LINING = 7u; const P_SEAT = 8u; const P_CARPET = 9u; const P_PANEL = 10u; const P_PLACARD = 11u; const P_KNURL = 12u;
+const P_NACELLE = 13u; const P_LEGEND = 14u; const P_FLEECE = 15u; const P_SPINNER = 16u; const P_HORNET = 17u;
+// The Hornet's cockpit (aircraft/fa18/pit.rs, pit18.wgsl).
+const P_PIT = 18u; const P_MESH = 19u; const P_WEBBING = 20u; const P_NONSLIP = 21u; const P_STRIPE = 22u; const P_HOSE = 23u;
+
+// The Hornet's paint (assets/fa18_paint.jpg): it seen from above, from below
+// and from the left, one layer each.
+@group(1) @binding(1) var t_paint: texture_2d_array<f32>;
+
+// Which aircraft is being drawn (aircraft::Spec::id, carried in glow.y): 0 the
+// light single, 1 the 747, 2 the Hornet. Its windows, wells, paint and panel
+// lines differ. tint.y and tint.z carry the engines: how far the afterburners
+// are lit, and how hard they are running dry (0 idle .. 1).
+fn kind() -> u32 { return u32(O.glow.y + 0.5); }
+// The engines, of the aircraft being flown only (wreckage and parts that have come off carry a glow.x).
+fn burner() -> f32 { return O.tint.y * step(O.glow.x, 0.001); }
+fn dry_power() -> f32 { return O.tint.z * step(O.glow.x, 0.001); }
 
 const WHITE_PAINT = vec3f(0.80, 0.80, 0.78);
 const NAVY = vec3f(0.010, 0.024, 0.075);
@@ -57,7 +73,7 @@ struct SOut { @builtin(position) clip: vec4f, @location(0) L: vec3f, @location(1
 @fragment fn fs_shadow(in: SOut) {
   // Sunlight comes in through the windows, the gear wells stay open, and
   // nothing is cast by what has been torn off.
-  if (cut_here(in.L, u32(in.mat.y + 0.5)) || u32(in.mat.x + 0.5) == M_GLASS || u32(in.mat.x + 0.5) == M_PROPDISC || tear_d(in.L) > 0.0) { discard; }
+  if (cut_here(in.L, u32(in.mat.y + 0.5)) || u32(in.mat.x + 0.5) == M_GLASS || u32(in.mat.x + 0.5) == M_PROPDISC || u32(in.mat.x + 0.5) == M_PLUME || tear_d(in.L) > 0.0) { discard; }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -99,8 +115,11 @@ fn sd_poly(p: vec2f, vin: array<vec2f, 5>, n: i32) -> f32 {
 }
 fn quad(a: vec2f, b: vec2f, c: vec2f, d: vec2f) -> array<vec2f, 5> { return array<vec2f, 5>(a, b, c, d, a); }
 
-// Window openings (negative inside); matches airframe::window.
+// Window openings (negative inside); matches c172::window / b747::window.
 fn window(p: vec3f) -> f32 {
+  if (kind() == 1u) { return window747(p); }
+  // The Hornet's canopy is one blown piece: all of it is window.
+  if (kind() == 2u) { return -1.0; }
   let zy = vec2f(p.z, p.y);
   var d = sd_poly(zy, array<vec2f, 5>(vec2f(-1.72, 0.31), vec2f(-1.52, 0.07), vec2f(-1.03, 0.64), vec2f(-1.0, 0.80), vec2f(-1.75, 0.80)), 5) + 0.01;
   if (abs(p.x) > 0.3 && p.y < 0.6) {
@@ -112,8 +131,9 @@ fn window(p: vec3f) -> f32 {
   }
   return d;
 }
-// Landing gear wells (only the skin has them); matches airframe::well.
+// Landing gear wells (only the skin has them); matches c172::well / b747::well.
 fn well(p: vec3f) -> f32 {
+  if (kind() == 1u) { return well747(p); }
   var d = 1.0;
   if (p.y < -0.40) {
     d = min(d, sd_poly(vec2f(p.z, p.x), quad(vec2f(-3.0, -0.135), vec2f(-1.915, -0.135), vec2f(-1.915, 0.135), vec2f(-3.0, 0.135)), 4) + 0.005);
@@ -125,7 +145,9 @@ fn well(p: vec3f) -> f32 {
   return d;
 }
 fn cut_here(L: vec3f, pt: u32) -> bool {
-  return (pt == P_FUSE || pt == P_COWL || pt == P_LINING) && (window(L) < 0.0 || (pt != P_LINING && well(L) < 0.0));
+  // The 747's wing gear passes through the lower wing skin as well.
+  let wing_well = kind() == 1u && pt == P_WING && well(L) < 0.0;
+  return wing_well || ((pt == P_FUSE || pt == P_COWL || pt == P_LINING) && (window(L) < 0.0 || (pt != P_LINING && well(L) < 0.0)));
 }
 fn torn() -> bool { return O.dmg.x != 0.0 || O.dmg.y != 0.0; }
 // Signed distance past the piece's break(s): positive where it has been torn
@@ -165,7 +187,7 @@ fn baggage_door(L: vec3f) -> f32 {
 // Stroke font: digits, N E S W and a point (glyphs 0-14; 15 is a space).
 // (const, not var<private>: on Metal a private array is a per-pixel copy made
 // at the start of every invocation, which cost the aircraft ~7 ms a frame on an M4.)
-const GSEG = array<vec4f, 99>(
+const GSEG = array<vec4f, 237>(
   vec4f(0.25, 0.0, 0.75, 0.0),
   vec4f(0.75, 0.0, 1.0, 0.4),
   vec4f(1.0, 0.4, 1.0, 1.6),
@@ -264,9 +286,147 @@ const GSEG = array<vec4f, 99>(
   vec4f(0.25, 0.0, 0.5, 1.2),
   vec4f(0.5, 1.2, 0.75, 0.0),
   vec4f(0.75, 0.0, 1.0, 2.0),
-  vec4f(0.45, 0.08, 0.55, 0.08)
+  vec4f(0.45, 0.08, 0.55, 0.08),
+  vec4f(0.0, 0.0, 0.5, 2.0),
+  vec4f(0.5, 2.0, 1.0, 0.0),
+  vec4f(0.2, 0.8, 0.8, 0.8),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(0.0, 2.0, 0.7, 2.0),
+  vec4f(0.7, 2.0, 0.95, 1.75),
+  vec4f(0.95, 1.75, 0.95, 1.3),
+  vec4f(0.95, 1.3, 0.7, 1.05),
+  vec4f(0.7, 1.05, 0.0, 1.05),
+  vec4f(0.7, 1.05, 1.0, 0.75),
+  vec4f(1.0, 0.75, 1.0, 0.3),
+  vec4f(1.0, 0.3, 0.7, 0.0),
+  vec4f(0.7, 0.0, 0.0, 0.0),
+  vec4f(1.0, 1.7, 0.7, 2.0),
+  vec4f(0.7, 2.0, 0.3, 2.0),
+  vec4f(0.3, 2.0, 0.0, 1.6),
+  vec4f(0.0, 1.6, 0.0, 0.4),
+  vec4f(0.0, 0.4, 0.3, 0.0),
+  vec4f(0.3, 0.0, 0.7, 0.0),
+  vec4f(0.7, 0.0, 1.0, 0.3),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(0.0, 2.0, 0.6, 2.0),
+  vec4f(0.6, 2.0, 1.0, 1.5),
+  vec4f(1.0, 1.5, 1.0, 0.5),
+  vec4f(1.0, 0.5, 0.6, 0.0),
+  vec4f(0.6, 0.0, 0.0, 0.0),
+  vec4f(1.0, 2.0, 0.0, 2.0),
+  vec4f(0.0, 2.0, 0.0, 0.0),
+  vec4f(0.0, 1.05, 0.75, 1.05),
+  vec4f(1.0, 1.7, 0.7, 2.0),
+  vec4f(0.7, 2.0, 0.3, 2.0),
+  vec4f(0.3, 2.0, 0.0, 1.6),
+  vec4f(0.0, 1.6, 0.0, 0.4),
+  vec4f(0.0, 0.4, 0.3, 0.0),
+  vec4f(0.3, 0.0, 0.7, 0.0),
+  vec4f(0.7, 0.0, 1.0, 0.3),
+  vec4f(1.0, 0.3, 1.0, 0.9),
+  vec4f(1.0, 0.9, 0.55, 0.9),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(1.0, 0.0, 1.0, 2.0),
+  vec4f(0.0, 1.05, 1.0, 1.05),
+  vec4f(0.5, 0.0, 0.5, 2.0),
+  vec4f(0.2, 0.0, 0.8, 0.0),
+  vec4f(0.2, 2.0, 0.8, 2.0),
+  vec4f(1.0, 2.0, 1.0, 0.4),
+  vec4f(1.0, 0.4, 0.7, 0.0),
+  vec4f(0.7, 0.0, 0.3, 0.0),
+  vec4f(0.3, 0.0, 0.0, 0.4),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(1.0, 2.0, 0.0, 0.8),
+  vec4f(0.35, 1.15, 1.0, 0.0),
+  vec4f(0.0, 2.0, 0.0, 0.0),
+  vec4f(0.0, 0.0, 1.0, 0.0),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(0.0, 2.0, 0.5, 0.9),
+  vec4f(0.5, 0.9, 1.0, 2.0),
+  vec4f(1.0, 2.0, 1.0, 0.0),
+  vec4f(0.3, 0.0, 0.7, 0.0),
+  vec4f(0.7, 0.0, 1.0, 0.4),
+  vec4f(1.0, 0.4, 1.0, 1.6),
+  vec4f(1.0, 1.6, 0.7, 2.0),
+  vec4f(0.7, 2.0, 0.3, 2.0),
+  vec4f(0.3, 2.0, 0.0, 1.6),
+  vec4f(0.0, 1.6, 0.0, 0.4),
+  vec4f(0.0, 0.4, 0.3, 0.0),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(0.0, 2.0, 0.7, 2.0),
+  vec4f(0.7, 2.0, 1.0, 1.7),
+  vec4f(1.0, 1.7, 1.0, 1.2),
+  vec4f(1.0, 1.2, 0.7, 0.9),
+  vec4f(0.7, 0.9, 0.0, 0.9),
+  vec4f(0.3, 0.0, 0.7, 0.0),
+  vec4f(0.7, 0.0, 1.0, 0.4),
+  vec4f(1.0, 0.4, 1.0, 1.6),
+  vec4f(1.0, 1.6, 0.7, 2.0),
+  vec4f(0.7, 2.0, 0.3, 2.0),
+  vec4f(0.3, 2.0, 0.0, 1.6),
+  vec4f(0.0, 1.6, 0.0, 0.4),
+  vec4f(0.0, 0.4, 0.3, 0.0),
+  vec4f(0.6, 0.4, 1.05, -0.1),
+  vec4f(0.0, 0.0, 0.0, 2.0),
+  vec4f(0.0, 2.0, 0.7, 2.0),
+  vec4f(0.7, 2.0, 1.0, 1.7),
+  vec4f(1.0, 1.7, 1.0, 1.2),
+  vec4f(1.0, 1.2, 0.7, 0.9),
+  vec4f(0.7, 0.9, 0.0, 0.9),
+  vec4f(0.5, 0.9, 1.0, 0.0),
+  vec4f(0.0, 2.0, 1.0, 2.0),
+  vec4f(0.5, 2.0, 0.5, 0.0),
+  vec4f(0.0, 2.0, 0.0, 0.4),
+  vec4f(0.0, 0.4, 0.3, 0.0),
+  vec4f(0.3, 0.0, 0.7, 0.0),
+  vec4f(0.7, 0.0, 1.0, 0.4),
+  vec4f(1.0, 0.4, 1.0, 2.0),
+  vec4f(0.0, 2.0, 0.5, 0.0),
+  vec4f(0.5, 0.0, 1.0, 2.0),
+  vec4f(0.0, 0.0, 1.0, 2.0),
+  vec4f(0.0, 2.0, 1.0, 0.0),
+  vec4f(0.0, 2.0, 0.5, 1.0),
+  vec4f(0.5, 1.0, 1.0, 2.0),
+  vec4f(0.5, 1.0, 0.5, 0.0),
+  vec4f(0.0, 2.0, 1.0, 2.0),
+  vec4f(1.0, 2.0, 0.0, 0.0),
+  vec4f(0.0, 0.0, 1.0, 0.0),
+  vec4f(0.05, 0.0, 0.95, 2.0),
+  vec4f(0.15, 1.0, 0.85, 1.0),
+  vec4f(0.1, 1.0, 0.9, 1.0),
+  vec4f(0.5, 0.6, 0.5, 1.4),
+  vec4f(0.5, 0.45, 0.5, 0.5),
+  vec4f(0.5, 1.5, 0.5, 1.55),
+  vec4f(0.25, 1.55, 0.6, 1.55),
+  vec4f(0.6, 1.55, 0.6, 1.95),
+  vec4f(0.6, 1.95, 0.25, 1.95),
+  vec4f(0.25, 1.95, 0.25, 1.55),
+  vec4f(1.0, 1.8, 0.0, 1.0),
+  vec4f(0.0, 1.0, 1.0, 0.2),
+  vec4f(0.0, 1.8, 1.0, 1.0),
+  vec4f(1.0, 1.0, 0.0, 0.2),
+  vec4f(0.75, 2.1, 0.35, 1.6),
+  vec4f(0.35, 1.6, 0.35, 0.4),
+  vec4f(0.35, 0.4, 0.75, -0.1),
+  vec4f(0.25, 2.1, 0.65, 1.6),
+  vec4f(0.65, 1.6, 0.65, 0.4),
+  vec4f(0.65, 0.4, 0.25, -0.1),
+  vec4f(0.75, 2.1, 0.3, 2.1),
+  vec4f(0.3, 2.1, 0.3, -0.1),
+  vec4f(0.3, -0.1, 0.75, -0.1),
+  vec4f(0.25, 2.1, 0.7, 2.1),
+  vec4f(0.7, 2.1, 0.7, -0.1),
+  vec4f(0.7, -0.1, 0.25, -0.1),
+  vec4f(0.5, 0.5, 0.5, 1.5),
+  vec4f(0.1, 0.75, 0.9, 1.25),
+  vec4f(0.1, 1.25, 0.9, 0.75),
+  vec4f(0.5, 2.0, 0.45, 1.5),
+  vec4f(0.05, 0.05, 0.95, 0.05),
+  vec4f(0.95, 0.05, 0.95, 1.95),
+  vec4f(0.95, 1.95, 0.05, 1.95),
+  vec4f(0.05, 1.95, 0.05, 0.05)
 );
-const GSTART = array<u32, 17>(0u, 8u, 10u, 16u, 27u, 30u, 38u, 49u, 51u, 65u, 76u, 79u, 83u, 94u, 98u, 99u, 99u);
+const GSTART = array<u32, 53>(0u, 8u, 10u, 16u, 27u, 30u, 38u, 49u, 51u, 65u, 76u, 79u, 83u, 94u, 98u, 99u, 99u, 102u, 112u, 119u, 125u, 128u, 137u, 140u, 143u, 147u, 150u, 152u, 156u, 164u, 170u, 179u, 186u, 188u, 193u, 195u, 197u, 200u, 203u, 204u, 205u, 207u, 209u, 213u, 215u, 217u, 220u, 223u, 226u, 229u, 232u, 233u, 237u);
 
 fn glyph_d(g: u32, p: vec2f) -> f32 {
   var d = 1e3;
@@ -314,7 +474,8 @@ fn pack(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32 {
 
 // ---------------------------------------------------------------- paint scheme
 
-fn livery(L: vec3f, aa: f32) -> vec3f {
+fn livery(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  if (kind() == 1u) { return livery747(L, aa, pt); }
   var c = WHITE_PAINT;
   let ax = abs(L.x);
   let fin = ax < 0.15 && L.y > 0.33 && L.z > 2.8;
@@ -358,6 +519,7 @@ fn weather(L: vec3f, N: vec3f, base: vec3f) -> vec4f {
   let n = nz(L * 0.35);
   let belly = sat(-N.y * 1.5 + 0.2);
   c *= 1.0 - (0.03 + 0.07 * belly) * n.g;
+  if (kind() == 1u) { return weather747(L, N, c, belly, n); }
   // Soot from the exhaust stack streaking back along the belly.
   let d = L.z + 2.1;
   if (d > 0.0 && L.y < -0.2) {
@@ -386,6 +548,7 @@ fn chord_at(s: f32) -> f32 { return select(1.65 - 0.5 * (s - 2.55) / 2.95, 1.65,
 
 // Height (m), seam dirt, rivet coverage, for the surface pattern.
 fn relief(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
+  if (kind() == 1u) { return relief747(pt, uv, L, Nl, px); }
   var h = 0.0;
   var dirt = 0.0;
   var rv = 0.0;
@@ -508,7 +671,34 @@ fn relief(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
       h += 0.0004 * nz(L * 60.0).g * (1.0 - smoothstep(0.0005, 0.002, px));
     }
     case 9u: { h += 0.0015 * nz(L * 45.0).r * (1.0 - smoothstep(0.001, 0.004, px)); }
-    case 10u: { h += 0.0002 * nz(L * 160.0).r * (1.0 - smoothstep(0.0003, 0.0012, px)); }
+    case 18u: { // cockpit paint: orange peel
+      h += 0.00010 * nz(L * 110.0).r * (1.0 - smoothstep(0.0002, 0.0009, px));
+    }
+    case 19u: { // open-weave mesh fabric: raised threads round small holes
+      let q = uv / 0.0026;
+      let f = abs(fract(q) - 0.5) * 2.0;
+      let thread = max(smoothstep(0.55, 0.9, f.x), smoothstep(0.55, 0.9, f.y));
+      let fade = 1.0 - smoothstep(0.0003, 0.0012, px);
+      h += 0.0004 * thread * fade + 0.0012 * nz(L * 18.0).g;
+      dirt += (1.0 - thread) * 0.7 * fade;
+    }
+    case 20u: { // webbing: a twill weave, stitching along both edges
+      let tw = sin((uv.y + uv.x * 0.6) * 2400.0);
+      let fade = 1.0 - smoothstep(0.0002, 0.0008, px);
+      h += 0.00012 * tw * fade;
+      let st = step(0.5, fract(uv.y / 0.004)) * line(abs(abs(uv.x) - 0.017), 0.0006);
+      h -= 0.0002 * st * fade;
+      dirt += st * 0.5 * fade;
+    }
+    case 21u: { // anti-skid grit
+      h += 0.0005 * nz(L * 190.0).r * (1.0 - smoothstep(0.0003, 0.0012, px));
+    }
+    case 23u: { // corrugated hose
+      let r = sin(uv.y * 6.2831853 / 0.0065);
+      h += 0.0011 * r * (1.0 - smoothstep(0.0006, 0.0025, px));
+      dirt += smoothstep(0.6, 1.0, -r) * 0.4;
+    }
+    case 10u: { h += select(0.0002, 0.00006, kind() == 2u) * nz(L * 160.0).r * (1.0 - smoothstep(0.0003, 0.0012, px)); }
     case 12u: { h += 0.00025 * sin((L.x + L.y * 1.3 + L.z * 0.7) * 2600.0) * (1.0 - smoothstep(0.0002, 0.0008, px)); }
     case 6u: { // tyre tread: circumferential grooves
       var c = vec3f(sign(L.x) * 1.25, -1.31, 0.30);
@@ -612,6 +802,22 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
       arcs[2] = vec4f(45.0, 85.0, 0.79, 0.85); arc_col[2] = vec3f(0.6);
       redline = 163.0;
       nd[0] = vec4f(dial(P0.x, 0.0, 200.0, a0, a1), 0.86, 0.035, 0.18); nn = 1;
+      if (kind() == 1u) {
+        // The 747's standby airspeed: 60 to 450 kt, no arcs, the barber pole at Vmo.
+        a0 = rad(10.0); vmin = 60.0; vmax = 450.0; tn = 39.0; tper = 3.0;
+        ln = 8.0; lfirst = 100.0; lstep = 50.0;
+        arcs[0] = vec4f(0.0); arcs[1] = vec4f(0.0); arcs[2] = vec4f(0.0);
+        redline = 365.0;
+        nd[0] = vec4f(dial(P0.x, 60.0, 450.0, a0, a1), 0.86, 0.035, 0.18);
+      }
+      if (kind() == 2u) {
+        // The Hornet's standby airspeed: 50 to 850 kt.
+        a0 = rad(10.0); vmin = 50.0; vmax = 850.0; tn = 32.0; tper = 4.0;
+        ln = 8.0; lfirst = 100.0; lstep = 100.0; ldiv = 10.0;
+        arcs[0] = vec4f(0.0); arcs[1] = vec4f(0.0); arcs[2] = vec4f(0.0);
+        redline = -1e9;
+        nd[0] = vec4f(dial(P0.x, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
+      }
     }
     case 2u: { // altimeter: hundreds, thousands, ten thousands, pressure window
       a0 = 0.0; a1 = rad(360.0); vmax = 10.0; tn = 50.0; tper = 5.0;
@@ -629,6 +835,16 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
       a0 = rad(-260.0); a1 = rad(80.0); vmin = -2000.0; vmax = 2000.0; tn = 40.0; tper = 5.0;
       ln = 9.0; lfirst = -2000.0; lstep = 500.0; ldiv = 100.0;
       nd[0] = vec4f(dial(P0.z, vmin, vmax, a0, a1), 0.86, 0.035, 0.18); nn = 1;
+      if (kind() == 2u) {
+        vmin = -6000.0; vmax = 6000.0; lfirst = -6000.0; lstep = 2000.0; ln = 7.0; ldiv = 1000.0; tn = 24.0; tper = 4.0;
+        nd[0] = vec4f(dial(P0.z, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
+      }
+    }
+    case 21u: { // the Hornet's brake accumulator pressure, psi x 1000
+      a0 = rad(-120.0); a1 = rad(120.0); vmin = 0.0; vmax = 4.0; tn = 8.0; tper = 2.0;
+      ln = 5.0; lfirst = 0.0; lstep = 1.0; lr = 0.58; lh = 0.2;
+      arcs[0] = vec4f(2.0, 3.2, 0.88, 0.95); arc_col[0] = vec3f(0.05, 0.4, 0.08);
+      nd[0] = vec4f(dial(3.0, vmin, vmax, a0, a1), 0.84, 0.045, 0.15); nn = 1;
     }
     case 6u: { // tachometer with its hour meter
       a0 = rad(-135.0); a1 = rad(135.0); vmax = 3500.0; tn = 35.0; tper = 5.0;
@@ -883,6 +1099,101 @@ fn vis(ndv: f32, ndl: f32, a: f32) -> f32 {
   return 0.25 / ((ndv * (1.0 - k) + k) * (ndl * (1.0 - k) + k));
 }
 
+// ---------------------------------------------------------------- the Hornet (aircraft/fa18)
+
+// Its paint: three pictures of it (from above, from below and from the left
+// side, the layers of t_paint) projected back onto the skin, each where the
+// surface faces that way. The rectangles they cover are GUIDE_* in
+// assets/blender/fa18.py. rgb the paint; a 0 where no picture faces the
+// surface (the lips of the intakes, the ends of things).
+fn hornet_paint(L: vec3f, Nl: vec3f, dLx: vec3f, dLy: vec3f) -> vec4f {
+  let n = Nl * inverseSqrt(max(dot(Nl, Nl), 1e-12));
+  var w = vec3f(pow(max(n.y, 0.0), 4.0), pow(max(-n.y, 0.0), 4.0), pow(abs(n.x), 4.0));
+  let sum = w.x + w.y + w.z;
+  if (sum < 0.02) { return vec4f(0.0); }
+  w /= sum;
+  let v = (L.z + 10.3) / 19.8;
+  let dv = vec2f(dLx.z, dLy.z) / 19.8;
+  var c = vec3f(0.0);
+  if (w.x > 0.004) { c += w.x * textureSampleGrad(t_paint, s_aniso, vec2f((L.x + 6.6) / 13.2, v), 0, vec2f(dLx.x / 13.2, dv.x), vec2f(dLy.x / 13.2, dv.y)).rgb; }
+  if (w.y > 0.004) { c += w.y * textureSampleGrad(t_paint, s_aniso, vec2f((6.6 - L.x) / 13.2, v), 1, vec2f(-dLx.x / 13.2, dv.x), vec2f(-dLy.x / 13.2, dv.y)).rgb; }
+  if (w.z > 0.004) { c += w.z * textureSampleGrad(t_paint, s_aniso, vec2f((L.y + 5.6) / 13.2, v), 2, vec2f(dLx.y / 13.2, dv.x), vec2f(dLy.y / 13.2, dv.y)).rgb; }
+  return vec4f(c, 1.0);
+}
+
+// Where the engines' exhaust leaves: the nozzle exits are at z = 8.0, the
+// engines' centrelines 0.52 m either side and 0.05 m below the datum.
+const NOZZLE_Z = 8.0;
+fn plume_r(L: vec3f) -> f32 { return length(vec2f(abs(L.x) - 0.52, L.y + 0.05)); }
+
+// The exhaust plume (material 17, drawn in the transparent pass): shells and
+// discs round each engine's jet that glow by how squarely they are looked
+// through, so the whole reads as a volume. in.mat.w: 0 the heat haze, 1 the
+// flame's sheath, 2 its core, 3 discs across it (what is seen looking up the
+// jet). Dry, the jet only makes the air shimmer; with the afterburners lit
+// it is a flame five metres long with shock diamonds standing in it.
+fn plume(in: VOut) -> vec4f {
+  let layer = u32(in.mat.w + 0.5);
+  let ab = burner();
+  let dry = dry_power();
+  let L = in.L;
+  let z = L.z - NOZZLE_Z;
+  let V = normalize(in.P);
+  let ndv = abs(dot(normalize(in.N), V));
+  let t = G.time.x;
+  let side = sign(L.x);
+  // Turbulence streaming aft with the jet.
+  let n1 = nz(vec3f(L.x * 1.7 + side * 3.1, L.y * 1.7, z * 0.30 - t * 9.0));
+  let n2 = nz(vec3f(L.x * 5.0 + side, L.y * 5.0, z * 0.9 - t * 21.0));
+  if (layer == 0u) {
+    // Heat haze: what lies behind the jet shimmers through it.
+    let k = (0.10 + 0.55 * dry + 0.6 * ab) * (0.3 + 0.7 * smoothstep(0.0, 0.6, ndv)) * smoothstep(-0.05, 0.8, z) * (1.0 - smoothstep(5.0, 11.5, z));
+    if (k < 0.01) { discard; }
+    let off = (vec2f(n1.g, n1.b) - 0.5 + (vec2f(n2.r, n2.a) - 0.5) * 0.6) * k * 0.05 / max(length(in.P), 2.0);
+    let uv = in.clip.xy * G.screen.zw + off;
+    var seen = textureLoad(t_scene, vec2i(in.clip.xy), 0).rgb;
+    let q = vec2i(clamp(uv * G.screen.xy, vec2f(0.0), G.screen.xy - 1.0));
+    if (textureLoad(t_gdepth, q, 0) <= in.clip.z) { seen = textureSampleLevel(t_scene, s_clamp, uv, 0.0).rgb; }
+    let a = sat(k * 1.6);
+    return vec4f(seen * a, a);
+  }
+  let l = light_at_nv(in.P);
+  let night = 1.0 - smoothstep(-0.08, 0.1, dot(l.upn, G.sun_dir.xyz));
+  // Shock diamonds: bright knots where the pressure waves in the jet cross,
+  // closer together and fainter aft; and the cone of flame off the nozzle.
+  let zd = z * (1.0 + 0.035 * z);
+  let dia = pow(0.5 + 0.5 * cos((zd - 0.62) * 6.2832 / 0.88), 3.0) * exp(-max(z, 0.0) / 2.6) * smoothstep(0.15, 0.5, z);
+  let cone = exp(-max(z, 0.0) / 0.45);
+  let flick = 0.72 + 0.56 * n1.r;
+  var col = vec3f(0.0);
+  var glow = 0.0;
+  if (layer == 2u) {
+    // The core: blue-white off the nozzle, the diamonds yellow-white, orange further back.
+    let s = z / 4.5;
+    col = mix(vec3f(0.55, 0.70, 1.0), vec3f(1.0, 0.72, 0.36), smoothstep(0.0, 0.6, s));
+    col = mix(col, vec3f(1.0, 0.90, 0.70), sat(dia * 1.4));
+    glow = ab * (0.10 + 1.1 * cone + 2.3 * dia) * pow(ndv, 1.4) * (1.0 - smoothstep(0.5, 1.0, s)) * flick;
+  } else if (layer == 1u) {
+    // The sheath: a thin orange going to red, with a violet edge near the nozzle.
+    let s = z / 6.9;
+    col = mix(vec3f(1.0, 0.46, 0.14), vec3f(0.85, 0.18, 0.04), smoothstep(0.1, 0.9, s));
+    col = mix(col, vec3f(0.50, 0.40, 1.0), 0.45 * (1.0 - ndv) * (1.0 - smoothstep(0.0, 0.45, s)));
+    glow = ab * (0.20 + 0.25 * cone + 0.40 * dia) * pow(ndv, 2.0) * (1.0 - smoothstep(0.25, 1.0, s)) * (0.5 + 1.0 * n2.g);
+    // Dry, at full power: a faint glow off the nozzle, only seen at dusk.
+    glow += dry * dry * 0.012 * pow(ndv, 2.0) * (1.0 - smoothstep(0.0, 0.3, s));
+  } else {
+    // Discs across the jet: its glow seen from behind, down its length.
+    let s = z / 5.6;
+    let r = plume_r(L) / max(0.36 * (1.0 - 0.75 * s), 0.05);
+    col = mix(vec3f(0.75, 0.80, 1.0), vec3f(1.0, 0.55, 0.20), sat(smoothstep(0.0, 0.7, s) * 0.6 + 0.6 * r));
+    glow = ab * 0.20 * pow(ndv, 3.0) * pow(sat(1.0 - r * r), 1.5) * (1.0 - smoothstep(0.4, 1.0, s)) * (0.6 + 1.2 * dia + 0.6 * cone) * flick;
+  }
+  glow *= smoothstep(-0.14, 0.06, z);
+  if (glow < 0.0005) { discard; }
+  // (Turned down at night, when the eye has opened up; it still blooms.)
+  return vec4f(col * glow * G.sun_dir.w * mix(0.06, 0.007, night), 0.0);
+}
+
 // Lit colour, normal and SSR weight, and whether the fragment lies in an opening.
 struct Shaded { c: vec4f, n: vec4f, kill: f32, amb: f32 };
 
@@ -906,19 +1217,34 @@ fn surface(in: VOut) -> Shaded {
   let dPy = dpdy(in.P);
   let px = max(length(dPx), length(dPy));
   let duv = max(length(dpdx(in.uv)), length(dpdy(in.uv)));
-  let rel = relief(pt, in.uv, in.L, in.Nl, px);
+  let dLx = dpdx(in.L);
+  let dLy = dpdy(in.L);
+  var rel = relief(pt, in.uv, in.L, in.Nl, px);
+  // The Hornet's paint; its panel lines and rivets, darker than the skin
+  // round them, are taken to lie a little below it.
+  var paint = vec4f(0.0);
+  if (kind() == 2u && pt == P_HORNET) {
+    paint = hornet_paint(in.L, in.Nl, dLx, dLy);
+    rel.x += luma(paint.rgb) * 0.004 * paint.a * (1.0 - smoothstep(0.003, 0.012, px));
+  }
   let hx = dpdx(rel.x);
   let hy = dpdy(rel.x);
   let cuts = pt == P_FUSE || pt == P_COWL || pt == P_LINING;
   var wd = 1.0;
   var wl = 1.0;
   if (cuts) { wd = window(in.L); }
+  // The 747's lining is cut back round its windows by the width of the trim (b747::deck::lining_window).
+  if (kind() == 1u && pt == P_LINING) {
+    // Measured on the skin straight outside (radially from 0.3 m up), less the trim.
+    let rr = normalize(vec2f(in.L.x, in.L.y - 0.3));
+    wd = window(in.L + vec3f(rr * 0.10, 0.0)) - 0.03;
+  }
   if (pt == P_FUSE || pt == P_COWL) { wl = well(in.L); }
   // The well outlines are drawn in plan (z, x); on the steep sides of the
   // belly that stretches distances along the skin, so measure the edge there.
   let wl_s = wl * px / max(length(vec2f(dpdx(wl), dpdy(wl))), 1e-7);
   let td = tear_d(in.L);
-  let kill = (cuts && (wd < 0.0 || wl < 0.0)) || id == M_GLASS || id == M_PROPDISC || td > 0.0;
+  let kill = (cuts && (wd < 0.0 || wl < 0.0)) || id == M_GLASS || id == M_PROPDISC || id == M_PLUME || td > 0.0;
 
   var n0 = in.N;
   if (dot(n0, n0) < 1e-10) { n0 = -in.P; }
@@ -949,8 +1275,13 @@ fn surface(in: VOut) -> Shaded {
 
   switch id {
     case 0u, 1u, 15u: {
-      if (id == 1u) { albedo = livery(L, px * 1.2); }
+      if (id == 1u) { albedo = livery(L, px * 1.2, pt); }
       rough = select(0.13 + 0.08 * ns.g, 0.5 + 0.15 * ns.g, id == 15u);
+      if (pt == P_HORNET && paint.a > 0.5) {
+        // The Hornet's matte tactical greys, as painted; fluid stains (darker and browner) are a little glossier.
+        albedo = paint.rgb * 0.85;
+        rough = 0.48 + 0.14 * ns.g - 0.12 * smoothstep(0.02, 0.10, paint.r - paint.b);
+      }
       // Each skin panel's paint aged a little differently.
       albedo *= 0.985 + 0.03 * fine.a * select(0.4, 1.0, id == 1u);
       if (id == 1u || pt == P_FUSE) {
@@ -967,6 +1298,37 @@ fn surface(in: VOut) -> Shaded {
         albedo = mix(albedo, vec3f(0.12, 0.09, 0.03), bugs * 0.7);
         ssr = 1.0;
       }
+      if (pt == P_PIT) {
+        // The Hornet's cockpit grey: satin, worn where boots and elbows go,
+        // grimier low down, scuffed through to lighter primer here and there.
+        rough = 0.55 + 0.12 * fine.g;
+        albedo *= 0.9 + 0.2 * nz(L * 3.1).r;
+        albedo *= mix(0.7, 1.0, sat((L.y - FLOOR18) / 0.35));
+        let sc = smoothstep(0.80, 0.9, nz(vec3f(L.x * 34.0, L.y * 34.0, L.z * 5.0)).r) * smoothstep(0.45, 0.7, nz(L * 4.3).b);
+        albedo = mix(albedo, albedo * 1.8 + vec3f(0.03), sc * 0.6);
+        rough = mix(rough, 0.4, sc);
+        albedo = mix(albedo, albedo * 0.6, smoothstep(0.62, 0.85, nz(L * 9.0).g) * 0.4);
+      }
+      if (pt == P_NONSLIP) {
+        rough = 0.92;
+        spec_k = 0.4;
+        albedo *= 0.8 + 0.4 * nz(L * 60.0).r;
+        albedo = mix(albedo, vec3f(0.06, 0.055, 0.05), smoothstep(0.5, 0.8, nz(L * 7.0).g) * 0.5);
+      }
+      if (pt == P_STRIPE) {
+        // Yellow and black: diagonal on a face, rings along a tube or strap.
+        let w = in.mat.w;
+        let t = select(in.uv.x + in.uv.y, in.uv.y, w < 0.0) / max(abs(w), 1e-4);
+        let blk = smoothstep(0.47, 0.53, abs(fract(t) - 0.5) * 2.0 + 0.0);
+        albedo = mix(albedo, vec3f(0.012), blk) * (0.85 + 0.25 * fine.r);
+        rough = 0.35 + 0.15 * fine.g;
+      }
+      if (kind() == 1u && (id == 1u || pt == P_SPINNER)) {
+        let fn_ = skin747(Fin(albedo, rough, metal), pt, L, in.Nl, in.uv, in.wear, px);
+        albedo = fn_.c;
+        rough = fn_.rough;
+        metal = fn_.metal;
+      }
       // Window sealant and the edges of the gear wells.
       if (pt == P_FUSE || pt == P_COWL) {
         let gk = smoothstep(0.016 + px, 0.016 - px, wd) * step(-0.001, wd);
@@ -974,7 +1336,7 @@ fn surface(in: VOut) -> Shaded {
         albedo = mix(albedo, vec3f(0.012), max(gk, we * 0.6));
         rough = mix(rough, 0.6, gk);
         ssr *= 1.0 - gk;
-        if (pt == P_COWL && L.z < -2.97) {
+        if (pt == P_COWL && L.z < -2.97 && kind() == 0u) {
           // Cooling air inlets in the nose bowl.
           let e1 = length((vec2f(abs(L.x), L.y) - vec2f(0.235, 0.05)) / vec2f(0.105, 0.068));
           let e2 = length((L.xy - vec2f(0.0, -0.33)) / vec2f(0.11, 0.045));
@@ -1008,11 +1370,46 @@ fn surface(in: VOut) -> Shaded {
       rough = 0.85;
       albedo = mix(albedo, vec3f(0.07, 0.065, 0.058), sat(rel.y * 0.0 + smoothstep(0.3, 0.8, ns.g) * 0.4 + select(0.0, 0.45, pt == P_TREAD && rel.y < 0.3)));
       spec_k = 0.4;
+      if (kind() == 1u) {
+        // An airliner's tyres: near-black, greyed by brake dust and rubber
+        // scrubbed off on landing; the sidewalls a touch glossier.
+        let tread = select(0.0, 1.0, pt == P_TREAD && abs(in.Nl.x) < 0.5);
+        albedo = mix(vec3f(0.022, 0.022, 0.023), vec3f(0.05, 0.049, 0.048), sat(smoothstep(0.3, 0.8, ns.g) * 0.5 + tread * 0.5));
+        rough = mix(0.62, 0.85, tread);
+      }
     }
     case 5u: {
       rough = 0.5 + 0.2 * fine.b;
       spec_k = 0.6;
       albedo *= cav;
+      if (pt == P_LEGEND) {
+        // Printed legends, button faces, scales (deck747.wgsl): white paint
+        // lit from behind at night; annunciators that are on glow by day too.
+        let code = u32(floor(in.mat.w));
+        let lg = legend(code % 16u, code / 16u, in.uv, max(in.wear, 0.05), max(duv, 0.002), fract(in.mat.w) * 100.0);
+        albedo = mix(albedo, lg.col, lg.a);
+        rough = mix(rough, 0.35, lg.a);
+        emit = (lg.glow * mix(0.0, 0.004, night) + lg.lit * mix(0.05, 0.012, night)) * G.sun_dir.w;
+        // (The Hornet's panels are edge-lit in NVG green.)
+        if (kind() == 2u) { emit *= vec3f(0.55, 1.0, 0.62); }
+      }
+      if (pt == P_LINING && kind() == 1u) {
+        // The flight deck's lining: matte, stippled plastic.
+        rough = 0.8 + 0.08 * fine.b;
+        spec_k = 0.45;
+      }
+      if (pt == P_PANEL && kind() == 1u) {
+        // Boeing's grey-brown: a fine texture, scuffs and grime where hands go.
+        rough = 0.55 + 0.15 * fine.g;
+        albedo *= 0.92 + 0.12 * nz(L * 37.0).r;
+        albedo = mix(albedo, albedo * 0.7, smoothstep(0.62, 0.85, nz(L * 6.0).g) * 0.5);
+      }
+      if (pt == P_PANEL && kind() == 2u) {
+        // Black lacquered panels: satin, dusty where they face up, rubbed shiny here and there.
+        rough = 0.45 + 0.12 * fine.g - 0.12 * smoothstep(0.75, 0.92, nz(L * 23.0).r);
+        albedo *= 0.94 + 0.12 * nz(L * 41.0).r;
+        albedo = mix(albedo, vec3f(0.055, 0.054, 0.052), smoothstep(0.55, 0.85, nz(L * 13.0).g) * sat(in.Nl.y * 2.0) * 0.18);
+      }
       if (pt == P_PLACARD) {
         let t = fract(in.uv * vec2f(220.0, 340.0));
         let txt = step(0.3, t.y) * step(t.y, 0.72) * step(0.45, nz(vec3f(in.uv * 300.0, 0.5)).r);
@@ -1023,6 +1420,21 @@ fn surface(in: VOut) -> Shaded {
       rough = 0.95;
       spec_k = 0.15;
       albedo *= cav * (0.9 + 0.2 * fine.r);
+      if (pt == P_MESH) {
+        // Olive mesh: the holes dark, the weave faded by the sun unevenly.
+        albedo *= (1.0 - rel.y * 0.55) * (0.85 + 0.3 * nz(L * 3.7).g);
+        albedo = mix(albedo, albedo * vec3f(1.15, 1.1, 1.25), smoothstep(0.5, 0.8, nz(L * 1.3).r) * 0.5);
+      }
+      if (pt == P_WEBBING) {
+        albedo *= (1.0 - rel.y * 0.4) * (0.9 + 0.2 * nz(L * 9.0).r);
+        spec_k = 0.3;
+      }
+      if (pt == P_FLEECE) {
+        // Sheepskin: tufts of wool, lighter at their tips.
+        let tuft = nz(L * 70.0);
+        albedo *= 0.65 + 0.6 * tuft.r * tuft.g + 0.25 * nz(L * 9.0).b;
+        ao *= 0.75 + 0.25 * tuft.g;
+      }
       let ndv = max(dot(N, -V), 0.0);
       albedo *= 1.0 + 0.35 * pow(1.0 - ndv, 3.0);
     }
@@ -1040,11 +1452,14 @@ fn surface(in: VOut) -> Shaded {
         case 5u: { on = P5.w; k = mix(0.3, 0.8, night); }
         case 6u: { on = step(0.999, P4.z); k = mix(0.05, 0.01, night); }
         case 7u: { on = step(P4.z, 0.001); k = mix(0.05, 0.01, night); }
+        // Formation light strips: pale panels by day, a soft green glow with the navigation lights at night.
+        case 9u: { on = step(999.0, P5.x); k = 0.012 * night; }
         default: { on = 1.0; k = 0.004; }
       }
       emit = in.col.rgb * on * k * G.sun_dir.w;
       if (ch == 5u) { emit *= 0.6 + 0.4 * smoothstep(1.0, 0.0, length(in.uv)); }
       albedo = in.col.rgb * 0.15;
+      if (ch == 9u) { albedo = vec3f(0.40, 0.43, 0.27); rough = 0.4; }
       ssr = 0.5;
     }
     case 9u: { // instrument face under glass
@@ -1061,6 +1476,43 @@ fn surface(in: VOut) -> Shaded {
     }
     case 11u: { // exhaust: heat-tinted, sooted at the outlet
       metal = 0.75;
+      if (kind() == 2u) {
+        // The Hornet's nozzles. in.mat.w: 0 the petals outside, 1 inside the
+        // nozzle, 2 the flame holder at the bottom of it.
+        let part = u32(in.mat.w + 0.5);
+        let s = sat((L.z - 7.15) / 0.85);  // 0 at the shroud .. 1 at the lip
+        if (part == 0u) {
+          // Titanium petals: straw and blue heat tints toward the lip, soot streaked along them.
+          rough = 0.38 + 0.2 * fine.g;
+          metal = 0.9;
+          let streak = nz(vec3f(atan2(L.y + 0.05, abs(L.x) - 0.52) * 2.4, 0.3, L.z * 0.6)).r;
+          albedo = mix(vec3f(0.36, 0.34, 0.32), vec3f(0.30, 0.23, 0.16), smoothstep(0.05, 0.55, s));
+          albedo = mix(albedo, vec3f(0.17, 0.165, 0.20), smoothstep(0.5, 0.9, s) * 0.7);
+          albedo *= (0.55 + 0.6 * streak) * (0.8 + 0.3 * fine.r);
+          albedo = mix(albedo, vec3f(0.03), smoothstep(0.93, 1.0, s) * 0.7);
+        } else {
+          // Sooted black inside; glowing when the burners are lit, and a dull
+          // red from the turbine at full dry power, deep in.
+          rough = 0.85;
+          metal = 0.2;
+          albedo = vec3f(0.035, 0.032, 0.03) * (0.6 + 0.8 * fine.g);
+          let deep = sat((NOZZLE_Z - L.z) / 0.58);
+          let fl = 0.8 + 0.4 * nz(vec3f(L.xy * 4.0, G.time.x * 7.0)).r;
+          let dry = dry_power();
+          var heat = burner() * fl * mix(0.35, 1.3, deep) + dry * dry * 0.03 * deep;
+          if (part == 2u) { heat = burner() * fl * 2.4 + dry * dry * 0.07; }
+          emit = mix(vec3f(1.0, 0.30, 0.06), vec3f(1.0, 0.72, 0.38), sat(heat * 0.6)) * heat * G.sun_dir.w * mix(0.08, 0.014, night);
+          ao = max(ao, 0.3);
+        }
+        break;
+      }
+      if (kind() == 1u) {
+        // A turbofan's nozzle and plug: heat-blued steel, darker toward the outlet.
+        rough = 0.4;
+        albedo = mix(vec3f(0.36, 0.33, 0.30), vec3f(0.10, 0.09, 0.10), sat(fine.r * 0.6 + 0.2)) * (0.75 + 0.4 * ns.g);
+        albedo = mix(albedo, vec3f(0.30, 0.17, 0.09), smoothstep(0.55, 0.8, ns.b) * 0.5);
+        break;
+      }
       rough = 0.45;
       let t = sat((L.y + 0.45) / -0.3);
       albedo = mix(vec3f(0.42, 0.33, 0.20), vec3f(0.18, 0.16, 0.20), t) * (0.6 + 0.6 * fine.r);
@@ -1098,11 +1550,33 @@ fn surface(in: VOut) -> Shaded {
     case 14u: { // backlit display under glass
       albedo = vec3f(0.01);
       rough = 0.05;
-      emit = display(u32(in.mat.w + 0.5), in.uv, max(duv * 0.012, 0.00015)) * G.sun_dir.w * mix(0.09, 0.012, night);
+      let did = u32(in.mat.w + 0.5);
+      if (did >= 40u) {
+        // The Hornet's DDIs, AMPCD, UFC windows and IFEI (pit18.wgsl).
+        emit = display18(did, in.uv, duv) * G.sun_dir.w * mix(0.06, 0.009, night);
+        albedo = vec3f(0.010, 0.012, 0.012);
+        rough = 0.1;
+        ssr = 0.3;
+      } else if (did >= 20u) {
+        // The 747's CRTs: bright enough by day, turned down at night.
+        emit = display747(did, in.uv, duv) * G.sun_dir.w * mix(0.07, 0.01, night);
+        albedo = vec3f(0.012, 0.014, 0.016);
+        rough = 0.12;
+        ssr = 0.3;
+      } else {
+      emit = display(did, in.uv, max(duv * 0.012, 0.00015)) * G.sun_dir.w * mix(0.09, 0.012, night);
+      }
     }
     default: {}
   }
 
+  // The 747's skin seen from the flight deck (slivers at the window cut-outs): insulation blanket.
+  if (kind() == 1u && back && pt == P_FUSE && L.z < -22.0 && !torn()) {
+    albedo = vec3f(0.035, 0.034, 0.032);
+    metal = 0.0;
+    rough = 0.9;
+    ssr = 0.0;
+  }
   // Damage. The inside of a torn skin: primer, stringers and ribs, no paint.
   let exterior = pt == P_WING || pt == P_TAIL || pt == P_CTRL || pt == P_FUSE || pt == P_COWL;
   if (torn() && back && exterior) {
@@ -1166,7 +1640,10 @@ fn surface(in: VOut) -> Shaded {
   let spec = l.sun * ggx(max(dot(N, H), 0.0), a) * vis(ndv, ndl, a) * Fs * ndl * sh * spec_k;
   // Inside the cabin, light bounces around off every surface: a fill that the
   // occlusion term alone would miss.
-  let inside = step(abs(L.x), 0.58) * step(-1.42, L.z) * step(L.z, 1.5) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL);
+  var inside = step(abs(L.x), 0.58) * step(-1.42, L.z) * step(L.z, 1.5) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL);
+  if (kind() == 1u) { inside = step(abs(L.x), 2.2) * step(-29.0, L.z) * step(L.z, -22.4) * step(1.9, L.y) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE); }
+  // The Hornet's cockpit tub, under its canopy.
+  if (kind() == 2u) { inside = step(abs(L.x), 0.56) * step(-6.2, L.z) * step(L.z, -3.1) * step(0.0, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   // (The baked occlusion already counts only the sky seen through the
   // windows; the eye adapts to the dimmer cabin, main.rs / cockpit.rs.)
   let amb_ao = mix(ao * ao * (3.0 - 2.0 * ao), 0.06 + 0.94 * ao, inside);
@@ -1233,6 +1710,7 @@ const GS_Z = -1.30; // cabin::PANEL_Z
 @fragment fn fs_glass(in: VOut) -> @location(0) vec4f {
   let px = max(length(dpdx(in.P)), length(dpdy(in.P)));
   let id = u32(in.mat.x + 0.5);
+  if (id == M_PLUME) { return plume(in); }
   let V = normalize(in.P);
   var N = normalize(in.N);
   let from_inside = dot(N, V) > 0.0;
@@ -1260,6 +1738,8 @@ const GS_Z = -1.30; // cabin::PANEL_Z
     let _b = back;
     return vec4f(col * lit * alpha, alpha);
   }
+  // The Hornet's HUD combiner: the symbology, focused at infinity.
+  if (kind() == 2u && in.L.y > 0.86 && abs(in.L.x) < 0.1 && in.L.z > -5.3 && in.L.z < -5.15) { return hud18(in, px); }
   let d = window(in.L);
   let cov = 1.0 - smoothstep(-px, px, d);
   if (cov <= 0.0) { discard; }
@@ -1269,7 +1749,9 @@ const GS_Z = -1.30; // cabin::PANEL_Z
   // The body frame (rigid): where the eye is, and the window's own axes.
   let ml = transpose(mat3x3f(O.model[0].xyz, O.model[1].xyz, O.model[2].xyz));
   let eye_l = -(ml * O.model[3].xyz);
-  let in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > -0.5 && eye_l.y < 0.85 && eye_l.z > -1.3 && eye_l.z < 1.6;
+  var in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > -0.5 && eye_l.y < 0.85 && eye_l.z > -1.3 && eye_l.z < 1.6;
+  if (kind() == 1u) { in_cabin = from_inside && abs(eye_l.x) < 1.6 && eye_l.y > 2.2 && eye_l.y < 4.8 && eye_l.z > -28.5 && eye_l.z < -22.5; }
+  if (kind() == 2u) { in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > 0.2 && eye_l.y < 1.5 && eye_l.z > -6.3 && eye_l.z < -2.6; }
   let wind = abs(in.Nl.x) < 0.5;
   let tb = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), wind);
   let bb = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.454, 0.891), wind);
@@ -1278,7 +1760,10 @@ const GS_Z = -1.30; // cabin::PANEL_Z
   var env = l.amb * 0.035;
   if (!from_inside) { env = env_reflect(in.P, R, l.upn, true); }
   // A sheet has two faces, and from inside both mirror the cabin.
-  if (in_cabin) { env = cabin_mirror(in.L, ml * R, l, ml * Ls) * 2.0 / (1.0 + F); }
+  if (in_cabin) {
+    env = select(cabin_mirror(in.L, ml * R, l, ml * Ls), deck_mirror(in.L, ml * R, l, ml * Ls), kind() == 1u) * 2.0 / (1.0 + F);
+    if (kind() == 2u) { env = pit_mirror(in.L, ml * R, l, ml * Ls) * 2.0 / (1.0 + F); }
+  }
   let H = normalize(Ls - V);
   let ndl = max(dot(N, Ls), 0.0);
   let glint = l.sun * ggx(max(dot(N, H), 0.0), 0.02) * vis(max(ndv, 1e-3), ndl, 0.02) * ndl * sh * (0.04 + 0.96 * pow(1.0 - max(dot(-V, H), 0.0), 5.0));
@@ -1313,7 +1798,7 @@ const GS_Z = -1.30; // cabin::PANEL_Z
       haze += spots * 0.05;
     }
   }
-  let bugs = smoothstep(0.86, 0.9, nz(L * 12.0).a) * step(L.z, -1.25) * smoothstep(0.55, 0.2, L.y) * (1.0 - smoothstep(0.002, 0.008, px));
+  let bugs = smoothstep(0.86, 0.9, nz(L * 12.0).a) * step(L.z, -1.25) * smoothstep(0.55, 0.2, L.y) * select(1.0, 0.0, kind() == 1u) * (1.0 - smoothstep(0.002, 0.008, px));
   let toward = pow(max(dot(V, Ls), 0.0), 6.0);
   let lit = l.sun * sh * (0.15 + 2.5 * toward) + l.amb * 0.6;
   var rgb = env * F + glint + haze * lit * 0.35 + vec3f(0.05, 0.04, 0.02) * bugs * (l.amb + l.sun * sh * 0.2);
@@ -1356,7 +1841,7 @@ const GS_Z = -1.30; // cabin::PANEL_Z
     let smear = 0.35 + 1.3 * smoothstep(0.3, 0.8, n1.g) + 0.5 * n2.b;
     rgb += l.sun * sh * smear * (0.002 + 0.03 * pow(face, 24.0) + 0.12 * pow(face, 400.0)) * 0.5;
   }
-  if (L.z < -0.95) {
+  if (L.z < -0.95 && kind() == 0u) {
     // Engine oil blown back over the windshield: a brown film, thickest low
     // down, drawn up and back by the airflow into streaks.
     let oil = O.dmg2.x;
@@ -1389,10 +1874,15 @@ const GS_Z = -1.30; // cabin::PANEL_Z
     // by the acrylic and tinted by it (darker in a band along the top of the
     // windshield). Whatever lies in front of the glass is not bent.
     var tint = vec3f(0.95, 0.98, 0.965);
-    if (wind && L.z < -0.95) { tint *= mix(vec3f(1.0), vec3f(0.62, 0.72, 0.69), smoothstep(0.64, 0.77, L.y)); }
+    if (wind && L.z < -0.95 && kind() == 0u) { tint *= mix(vec3f(1.0), vec3f(0.62, 0.72, 0.69), smoothstep(0.64, 0.77, L.y)); }
+    // The 747's laminated, electrically heated glass: a faint green-blue, deeper toward the frame.
+    if (kind() == 1u) { tint = mix(vec3f(0.93, 0.965, 0.955), vec3f(0.80, 0.88, 0.86), 1.0 - smoothstep(0.0, 0.05, -d)); }
+    // The Hornet's stretched acrylic canopy: a faint warm tint.
+    if (kind() == 2u) { tint = vec3f(0.95, 0.95, 0.91); }
     let edge = 1.0 - smoothstep(0.0, 0.08, -d);
     let curve = select(0.0, smoothstep(0.12, 0.45, abs(in.Nl.x)), wind);
-    let bend = glass_bend(g2, edge, curve);
+    // (The 747's laminated glass is far flatter than formed acrylic: a faint waviness only.)
+    let bend = select(glass_bend(g2, edge, curve), glass_bend(g2 * 0.6, 0.0, 0.0) * 0.18, kind() == 1u);
     let dw = (O.model * vec4f(tb * bend.x + bb * bend.y, 0.0)).xyz;
     var seen = textureLoad(t_scene, vec2i(in.clip.xy), 0).rgb;
     let cp = G.view_proj * vec4f(V + dw, 0.0);
@@ -1405,4 +1895,513 @@ const GS_Z = -1.30; // cabin::PANEL_Z
   }
   let alpha = 1.0 - trans;
   return vec4f(rgb * cov, alpha * cov);
+}
+
+// ---------------------------------------------------------------- the 747 (aircraft/b747)
+// Body frame: the origin 31.6 m behind the nose (d = L.z + 31.6), 5.0 m above the ground.
+
+fn sd_box2(p: vec2f, b: vec4f) -> f32 {
+  let c = vec2f((b.x + b.y) * 0.5, (b.z + b.w) * 0.5);
+  let h = vec2f((b.y - b.x) * 0.5, (b.w - b.z) * 0.5);
+  let q = abs(p - c) - h;
+  return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0);
+}
+fn sd_rbox(p: vec2f, h: vec2f, r: f32) -> f32 {
+  let q = abs(p) - h + vec2f(r);
+  return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+// The flight deck windows; matches b747::window.
+fn window747(p: vec3f) -> f32 {
+  let d = p.z + 31.6;
+  if (d < 3.9 || d > 6.7 || p.y < 2.0) { return 1.0; }
+  var best = 1.0;
+  if (d < 5.45) {
+    let ws = array<vec2f, 5>(vec2f(0.13, 3.18), vec2f(1.08, 2.94), vec2f(1.20, 3.05), vec2f(0.84, 3.49), vec2f(0.13, 3.81));
+    best = max(sd_poly(vec2f(abs(p.x), p.y), ws, 5) - 0.06, d - 5.26);
+  }
+  let th = atan2(abs(p.x), p.y - 0.3);
+  var w = array<vec4f, 2>(vec4f(5.30, 5.86, 0.30, 0.55), vec4f(5.98, 6.40, 0.36, 0.55));
+  for (var i = 0; i < 2; i++) {
+    let v = w[i];
+    var q = vec2f(abs(d - (v.x + v.y) * 0.5) - (v.y - v.x) * 0.5, (abs(th - (v.z + v.w) * 0.5) - (v.w - v.z) * 0.5) * 3.4);
+    q += vec2f(0.06);
+    best = min(best, length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - 0.06);
+  }
+  return best;
+}
+// The gear wells; matches b747::well.
+fn well747(p: vec3f) -> f32 {
+  if (p.y > -1.2) { return 1.0; }
+  let q = vec2f(p.z, abs(p.x));
+  var d = sd_box2(q, vec4f(-27.35, -22.95, -0.78, 0.78));
+  d = min(d, sd_box2(q, vec4f(-0.95, 0.45, 1.15, 4.0)));
+  d = min(d, sd_box2(q, vec4f(0.15, 3.05, 1.05, 2.8)));
+  d = min(d, sd_box2(q, vec4f(3.0, 5.75, 1.6, 2.24)));
+  d = min(d, seg_d(q, vec2f(0.85, 5.75), vec2f(-0.30, 2.75)) - 0.36);
+  return d + 0.005;
+}
+// Door outlines on the fuselage sides in (d, y): the five main deck doors
+// each side, the upper deck exit, and the cargo doors on the right.
+fn door747(L: vec3f) -> f32 {
+  let d = L.z + 31.6;
+  var best = 1e3;
+  for (var i = 0; i < 5; i++) {
+    best = min(best, sd_rbox(vec2f(d - DOORS747[i], L.y - 0.92), vec2f(0.595, 0.965), 0.16));
+  }
+  best = min(best, sd_rbox(vec2f(d - 15.2, L.y - 3.15), vec2f(0.42, 0.78), 0.14));
+  if (L.x > 0.0) {
+    best = min(best, sd_rbox(vec2f(d - 13.35, L.y + 1.75), vec2f(1.30, 0.86), 0.12));
+    best = min(best, sd_rbox(vec2f(d - 45.2, L.y + 1.70), vec2f(1.30, 0.86), 0.12));
+    best = min(best, sd_rbox(vec2f(d - 48.75, L.y + 1.45), vec2f(0.56, 0.58), 0.1));
+  }
+  return best;
+}
+// The nearest main deck door: (along, up from its centre, 1 inside it / 0).
+fn door_local747(L: vec3f) -> vec3f {
+  let d = L.z + 31.6;
+  var best = vec2f(1e3);
+  for (var i = 0; i < 5; i++) {
+    let q = vec2f(d - DOORS747[i], L.y - 0.92);
+    if (abs(q.x) < abs(best.x)) { best = q; }
+  }
+  let inside = abs(best.x) < 0.595 && abs(best.y) < 0.965 && abs(L.x) > 2.0;
+  return vec3f(best, select(0.0, 1.0, inside));
+}
+
+// The finish of the 747's paint, after the livery: each skin panel's paint a
+// shade apart, glazed windows, door seams and their markings, the radome's
+// lightning strips, bare leading edges, walkways, grime and soot.
+struct Fin { c: vec3f, rough: f32, metal: f32 };
+fn skin747(f0: Fin, pt: u32, L: vec3f, Nl: vec3f, uv: vec2f, wear: f32, px: f32) -> Fin {
+  var f = f0;
+  let d = L.z + 31.6;
+  let ax = abs(L.x);
+  let side = sign(L.x);
+  if (pt == P_FUSE) {
+    // Panels between the butt joints and the lap joints, each painted a touch apart.
+    let s = abs(uv.y);
+    let pi = floor((d - 1.6) / 6.096);
+    let pj = step(1.7, s) + step(3.6, s) + step(5.6, s) + step(7.7, s);
+    let hp = hash2(vec2f(pi * 1.37 + side * 0.71, pj * 2.91));
+    f.c *= 0.982 + 0.036 * hp;
+    f.c = mix(f.c, f.c * vec3f(1.0, 0.992, 0.972), hash1(pi * 3.1 + pj * 5.7 + side) * 0.7);
+    f.rough += 0.05 * (hash1(pi * 7.3 + pj * 1.9 + side * 2.0) - 0.5);
+    // The radome: its own paint, greyer and duller, and the lightning diverter strips (dashed).
+    if (d < 2.25) {
+      let m = 0.30;
+      let a = atan2(L.x, L.y - m);
+      let k = (fract(a / 6.2831853 * 8.0 + 0.5) - 0.5) / 8.0 * 6.2831853;
+      let r = length(vec2f(L.x, L.y - m));
+      let dash = step(0.35, fract(d / 0.06)) * smoothstep(0.35, 0.55, d) * smoothstep(2.18, 2.05, d);
+      let strip = aline(k * r, 0.012, px) * dash * step(abs(a), 2.6);
+      f.c = mix(f.c * vec3f(0.93, 0.925, 0.90), vec3f(0.30, 0.30, 0.31), strip);
+      f.rough = mix(f.rough + 0.12, 0.35, strip);
+      f.metal = max(f.metal, strip * 0.8);
+      f.c = mix(f.c, vec3f(0.62, 0.62, 0.60), aline(d - 2.2, 0.006, px));
+    }
+    // Glazing: smoky acrylic in a grey frame, smooth as glass.
+    var ws = 1.0;
+    if (ax > 1.3 && L.y > -0.2) { ws = cabin_win_sd747(L); }
+    if (ws < 0.03) {
+      let pane = afill(ws + 0.010, px);
+      let frame = afill(ws, px) - pane;
+      f.c = mix(f.c, vec3f(0.20, 0.205, 0.21), frame);
+      f.c = mix(f.c, vec3f(0.012, 0.014, 0.017), pane);
+      f.rough = mix(f.rough, 0.025, pane);
+      f.metal *= 1.0 - afill(ws, px);
+    }
+    // Door gaps, and on each main door its handle flap with a red outline
+    // and the OPEN arrow; the cargo doors' latch row.
+    if (ax > 1.5) {
+      let dd = door747(L);
+      f.c *= 1.0 - 0.75 * aline(dd, 0.005, px);
+      let dl = door_local747(L);
+      if (dl.z > 0.0) {
+        let q = dl.xy - vec2f(0.0, 0.08);
+        let hd = sd_rbox(q, vec2f(0.16, 0.045), 0.02);
+        f.c = mix(f.c, vec3f(0.06), afill(hd + 0.004, px) * 0.35);
+        let red = aline(sd_rbox(q, vec2f(0.24, 0.10), 0.03), 0.008, px);
+        let qa = vec2f(q.x * side, q.y + 0.17);
+        let arrow = afill(max(abs(qa.y) - 0.012, abs(qa.x) - 0.14), px) + afill(max(abs(qa.y) - 0.05 + (qa.x - 0.10) * 0.9, -(qa.x - 0.10)), px);
+        f.c = mix(f.c, vec3f(0.55, 0.035, 0.025), sat(red + arrow * 0.9));
+      }
+      if (L.x > 0.0 && L.y < -0.7) {
+        for (var i = 0; i < 2; i++) {
+          let c = select(45.2, 13.35, i == 0);
+          let qx = d - c;
+          if (abs(qx) < 1.2) {
+            let lp = (fract(qx / 0.4 + 0.5) - 0.5) * 0.4;
+            f.c *= 1.0 - 0.5 * afill(sd_rbox(vec2f(lp, L.y + 2.50), vec2f(0.05, 0.025), 0.01), px);
+          }
+        }
+      }
+    }
+    // The air conditioning packs' ram air inlets in the belly fairing ahead of
+    // the wing (a ramp widening aft into a dark mouth), and their exhaust louvres behind.
+    if (L.y < -1.5 && d > 21.5 && d < 29.0) {
+      let t = (d - 21.8) / 1.7;
+      let w = 0.06 + 0.16 * sat(t);
+      let q = vec2f(d - 22.65, ax - 1.25);
+      let ramp = max(abs(q.x) - 0.85, abs(q.y) - w);
+      let inside = afill(ramp, px);
+      f.c = mix(f.c, f.c * mix(0.75, 0.05, smoothstep(0.4, 1.0, t)), inside);
+      f.c *= 1.0 - 0.5 * aline(ramp, 0.004, px);
+      f.rough = mix(f.rough, 0.6, inside * smoothstep(0.6, 1.0, t));
+      let lq = vec2f(d - 27.6, ax - 1.15);
+      let louv = sd_rbox(lq, vec2f(0.45, 0.22), 0.03);
+      let slat = 0.5 + 0.5 * cos((d - 27.6) / 0.06 * 3.14159);
+      f.c = mix(f.c, f.c * (0.25 + 0.5 * slat), afill(louv, px) * (1.0 - smoothstep(0.02, 0.05, px)) + afill(louv, px) * smoothstep(0.02, 0.05, px) * 0.5);
+      f.c *= 1.0 - 0.5 * aline(louv, 0.004, px);
+    }
+    // Static ports on the nose: polished discs in a red no-paint ring.
+    if (ax > 1.5 && d > 7.6 && d < 8.6 && abs(L.y + 0.35) < 0.3) {
+      let q = vec2f(d - 8.1, L.y + 0.35);
+      let sp = length(vec2f(abs(q.x) - 0.12, q.y));
+      f.c = mix(f.c, vec3f(0.55, 0.035, 0.025), aline(sd_rbox(q, vec2f(0.24, 0.10), 0.04), 0.008, px));
+      let disc = afill(sp - 0.035, px);
+      f.c = mix(f.c, vec3f(0.75, 0.76, 0.78), disc);
+      f.metal = max(f.metal, disc);
+      f.rough = mix(f.rough, 0.15, disc);
+    }
+  }
+  if (pt == P_WING || pt == P_CTRL || (pt == P_TAIL && ax > 0.9)) {
+    let s = abs(uv.x);
+    let av = abs(uv.y);
+    let upper = uv.y > 0.0;
+    // Skin planks running spanwise, each a slightly different grey.
+    let hp = hash2(vec2f(floor(av / 0.62), floor(s / 6.2) + side * 0.5 + f32(pt) * 3.0));
+    f.c *= 0.955 + 0.09 * hp;
+    f.rough += 0.06 * (hp - 0.5);
+    // Grime drawn back along the chord by the airflow; heavier underneath and
+    // on the flaps, sooty behind the engines.
+    let g = nz(vec3f(L.x * 2.2, L.y * 2.2, L.z * 0.10)).r;
+    let gg = nz(vec3f(L.x * 9.0, L.y * 9.0, L.z * 0.4)).g;
+    let dirt = smoothstep(0.35, 0.85, g) * (0.6 + 0.5 * gg) * select(0.16, 0.08, upper);
+    f.c *= 1.0 - dirt;
+    f.rough += dirt * 0.6;
+    if (!upper && pt != P_TAIL && L.z < 12.0) {
+      let e = eng747(L);
+      let soot = exp(-e.x * e.x / 1.4) * smoothstep(5.0, 7.5, e.z) * (0.5 + 0.5 * gg);
+      f.c = mix(f.c, vec3f(0.06, 0.055, 0.05), sat(soot * 0.35));
+    }
+    // Bare, polished leading edges (the wing's and the stabiliser's).
+    if (pt != P_CTRL) {
+      let bare = smoothstep(0.08, 0.14, wear) * select(1.0, 0.0, pt == P_TAIL && ax > 30.0);
+      let polish = 0.85 + 0.15 * nz(vec3f(L.x * 0.8, L.y * 30.0, L.z * 30.0)).r;
+      f.c = mix(f.c, vec3f(0.58, 0.59, 0.61) * polish * (1.0 - 0.25 * dirt), bare);
+      f.metal = mix(f.metal, 1.0, bare);
+      f.rough = mix(f.rough, 0.38 + 0.12 * gg, bare);
+    }
+    // The walkway over the wing root, outlined in black, and the no-step
+    // lines along the flaps' and spoilers' front edges.
+    if (upper && pt == P_WING && s < 13.0 && L.z < 12.0) {
+      let c = chord747(s);
+      let inr = step(3.9, s) * step(s, 11.6);
+      let ina = step(0.17 * c, av) * step(av, 0.56 * c);
+      let w = (aline(s - 3.9, 0.02, px) + aline(s - 11.6, 0.02, px)) * ina + (aline(av - 0.17 * c, 0.02, px) + aline(av - 0.56 * c, 0.02, px)) * inr;
+      f.c = mix(f.c, vec3f(0.02), sat(w) * 0.85);
+      // A non-slip finish inside it.
+      f.rough = mix(f.rough, 0.7, inr * ina);
+      f.c *= 1.0 - 0.06 * inr * ina;
+    }
+    if (upper && pt == P_WING && s > 3.4 && s < 24.0 && L.z < 12.0) {
+      f.c = mix(f.c, vec3f(0.02), aline(av - 0.575 * chord747(s), 0.012, px) * 0.8);
+    }
+  }
+  if (pt == P_NACELLE) {
+    let e = eng747(L);
+    let r = length(e.xy);
+    if (r < 1.34) {
+      // Oil and exhaust grime along the bottom of the cowls, soot at the sleeve's end.
+      let bot = sat(-e.y / r);
+      let st = nz(vec3f(L.x * 6.0, L.y * 6.0, L.z * 0.25)).r;
+      f.c *= 1.0 - 0.18 * bot * bot * smoothstep(0.3, 0.8, st) * smoothstep(0.5, 2.5, e.z);
+      f.c *= 1.0 - 0.25 * smoothstep(2.55, 2.95, e.z);
+      // Each cowl panel a shade apart.
+      f.c *= 0.975 + 0.04 * hash1(step(0.95, e.z) + step(1.9, e.z) * 2.0 + side * 5.0 + e.w * 9.0);
+    } else {
+      // The pylon: a little grimier toward its aft end.
+      f.c *= 1.0 - 0.10 * smoothstep(3.0, 7.0, e.z) * smoothstep(0.3, 0.8, nz(L * vec3f(3.0, 3.0, 0.3)).r);
+    }
+  }
+  if (pt == P_SPINNER) {
+    // A dark spinner with a white swirl, so ground crew can see the fan turn.
+    let e = eng747(L);
+    let r = length(e.xy);
+    let a = atan2(e.x, e.y) * side;
+    let k = wrapa(a - r * 9.0);
+    let band = aline(k * max(r, 0.02), 0.03, px) * smoothstep(0.03, 0.06, r) * step(e.z, 1.13);
+    f.c = mix(vec3f(0.035, 0.036, 0.04), vec3f(0.80), band);
+    f.rough = 0.22;
+    f.metal = 0.0;
+  }
+  return f;
+}
+
+// Cabin windows on the skin (there is no cabin behind them): 10 x 15 in,
+// every 20 in along the main deck, and along the upper deck; the small
+// window in each door. Signed distance (m) to the nearest pane.
+var<private> DOORS747: array<f32, 5> = array<f32, 5>(9.50, 18.80, 30.61, 40.74, 55.14);
+fn cabin_win_sd747(L: vec3f) -> f32 {
+  let d = L.z + 31.6;
+  var sd = 1.0;
+  if (abs(L.x) > 2.3 && abs(L.y - 0.69) < 0.3 && d > 2.4 && d < 57.8) {
+    var near_door = false;
+    let k = (fract((d - 2.4) / 0.508) - 0.5) * 0.508;
+    // (Whole windows are left out beside the doors, not cut through.)
+    for (var i = 0; i < 5; i++) { if (abs(d - k - DOORS747[i]) < 0.9) { near_door = true; } }
+    if (!near_door) {
+      sd = sd_rbox(vec2f(k, L.y - 0.69), vec2f(0.127, 0.19), 0.07);
+    }
+  }
+  if (abs(L.x) > 1.3 && abs(L.y - 3.42) < 0.3 && d > 9.6 && d < 22.3) {
+    let k = (fract((d - 9.6) / 0.508) - 0.5) * 0.508;
+    if (abs(d - k - 15.2) > 0.6) { sd = min(sd, sd_rbox(vec2f(k, L.y - 3.42), vec2f(0.127, 0.18), 0.07)); }
+  }
+  if (abs(L.x) > 2.3 && abs(L.y - 1.32) < 0.2) {
+    for (var i = 0; i < 5; i++) { sd = min(sd, sd_rbox(vec2f(d - DOORS747[i], L.y - 1.32), vec2f(0.11, 0.15), 0.06)); }
+  }
+  if (abs(L.x) > 1.3 && abs(L.y - 3.42) < 0.3) { sd = min(sd, sd_rbox(vec2f(d - 15.2, L.y - 3.42), vec2f(0.11, 0.15), 0.06)); }
+  return sd;
+}
+fn cabin_windows747(L: vec3f, aa: f32) -> f32 { return smoothstep(aa, -aa, cabin_win_sd747(L)); }
+
+// A line |d| < hw wide, filtered over a footprint px: it fades to its average
+// coverage once it is thinner than a pixel instead of vanishing or aliasing.
+fn aline(d: f32, hw: f32, px: f32) -> f32 {
+  let w = max(hw, px * 0.5);
+  return sat((w - abs(d)) / max(px, 1e-5) + 0.5) * (hw / w);
+}
+// Filled shape (sd < 0) filtered the same way.
+fn afill(sd: f32, px: f32) -> f32 { return sat(0.5 - sd / max(px, 1e-5)); }
+
+// The nearest engine: (x outboard of its axis, y above it, z behind its inlet lip, inboard 1/outboard 0).
+fn eng747(L: vec3f) -> vec4f {
+  let ib = abs(L.x) < 16.3;
+  let ex = select(21.0, 11.68, ib);
+  return vec4f(L.x - sign(L.x) * ex, L.y - select(-1.58, -2.5, ib), L.z - select(0.81, -8.36, ib), select(0.0, 1.0, ib));
+}
+
+const B_BELLY = vec3f(0.46, 0.48, 0.51);
+const B_GREY = vec3f(0.34, 0.36, 0.39);
+const B_NAVY = vec3f(0.012, 0.03, 0.095);
+const B_RED = vec3f(0.42, 0.025, 0.02);
+
+// The 747's paint: white over a grey belly, a navy cheatline with a red
+// pinstripe sweeping up the tail, grey wings, a navy fin with a white emblem.
+fn livery747(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  let d = L.z + 31.6;
+  let ax = abs(L.x);
+  let fin = ax < 0.9 && L.y > 3.9 && d > 52.0;
+  if (fin) {
+    var c = B_NAVY;
+    // The emblem: a white ring with three swept bands inside, a red ring outside it.
+    let q = vec2f(d - 64.2, L.y - 3.6);
+    let r = length(q);
+    let ring = smoothstep(aa, -aa, abs(r - 1.68) - 0.09);
+    let red = smoothstep(aa, -aa, abs(r - 1.92) - 0.035);
+    let band = abs(fract((q.x * 0.55 + q.y) / 0.95 + 0.25) - 0.5) - 0.13;
+    let inner = smoothstep(aa, -aa, band) * smoothstep(1.5 + aa, 1.5 - aa, r);
+    c = mix(c, WHITE_PAINT, max(ring, inner));
+    c = mix(c, B_RED, red);
+    return c;
+  }
+  if (ax > 30.5 && (pt == P_TAIL || L.y > 1.6)) { return B_NAVY; }
+  if (pt == P_WING || pt == P_CTRL || pt == P_TAIL) { return B_GREY; }
+  if (pt == P_NACELLE) { return WHITE_PAINT; }
+  // Unpatterned painted parts: the flap track fairings under the wings are
+  // wing grey, the gear doors belly grey.
+  if (pt == 0u) { return select(B_GREY, B_BELLY, ax < 6.0); }
+  var c = WHITE_PAINT;
+  // Grey belly below a line that rises with the tail's upsweep.
+  let yb = -1.15 + max(d - 46.0, 0.0) * 0.17 - max(4.0 - d, 0.0) * 0.12;
+  c = mix(c, B_BELLY, smoothstep(yb + aa, yb - aa, L.y));
+  // The cheatline under the windows, sweeping up over the tail cone.
+  if (d > 1.4 && d < 68.5 && ax > 0.2) {
+    let rise = max(d - 50.0, 0.0) * 0.16;
+    let taper = smoothstep(1.4, 4.0, d) * (1.0 - smoothstep(64.0, 68.5, d));
+    let y0 = 0.17 + rise;
+    let navy = smoothstep(aa, -aa, abs(L.y - y0) - 0.13 * taper);
+    let pin = smoothstep(aa, -aa, abs(L.y - y0 - 0.215 * taper) - 0.022 * taper);
+    c = mix(c, B_NAVY, navy);
+    c = mix(c, B_RED, pin);
+  }
+  // Registration on the rear fuselage, reading nose-first on the left.
+  if (ax > 0.5 && d > 54.5 && d < 60.5 && L.y > 1.3 && L.y < 2.1) {
+    let reg = pack(10u, 7u, 4u, 7u, 12u, 11u);
+    let ink = label_code(vec2f((57.5 - d) * sign(L.x), L.y), vec2f(0.0, 1.7), reg, 6u, 0.5, aa);
+    c = mix(c, B_NAVY, ink);
+  }
+  // The cabin windows.
+  c = mix(c, vec3f(0.018, 0.02, 0.025), cabin_windows747(L, aa));
+  return c;
+}
+
+fn weather747(L: vec3f, N: vec3f, base: vec3f, belly: f32, n: vec4f) -> vec4f {
+  var c = base;
+  // Streaks of grime back along the belly from the drains, and a darker
+  // patch behind the APU exhaust.
+  let streak = nz(vec3f(L.x * 1.5, L.y * 1.5, L.z * 0.06)).r;
+  c *= 1.0 - 0.08 * belly * smoothstep(0.4, 0.8, streak);
+  let d = L.z + 31.6;
+  let fine = nz(vec3f(L.x * 8.0, L.y * 8.0, L.z * 0.3)).g;
+  // Hydraulic fluid and brake dust swept back from the gear wells, brownish.
+  if (L.y < -0.6 && L.z > -1.5 && L.z < 24.0) {
+    let k = smoothstep(-1.5, 2.0, L.z) * (1.0 - smoothstep(10.0, 24.0, L.z)) * sat(-L.y - 0.6) * smoothstep(0.35, 0.75, streak) * (0.5 + 0.7 * fine);
+    c = mix(c, c * vec3f(0.62, 0.55, 0.48), sat(k * 0.55));
+  }
+  // Drain masts under the belly: a stain trailing from each.
+  for (var i = 0; i < 2; i++) {
+    let z0 = select(15.4, -15.6, i == 0);
+    let t = L.z - z0;
+    if (t > 0.0 && L.y < -2.0) {
+      let k = exp(-L.x * L.x / (0.02 + t * 0.012)) * exp(-t / 5.0) * (0.5 + 0.6 * fine);
+      c = mix(c, c * vec3f(0.55, 0.50, 0.44), sat(k * 0.7));
+    }
+  }
+  // Rain has run down from the window frames and door seams on the sides.
+  if (abs(L.x) > 2.0 && L.y > -1.2 && L.y < 3.8) {
+    let run = nz(vec3f(L.z * 3.0, L.y * 0.12, L.x * 0.1)).r;
+    let below = select(0.0, 1.0, L.y < 0.5) * smoothstep(-1.2, 0.3, L.y);
+    c *= 1.0 - 0.035 * smoothstep(0.55, 0.85, run) * (0.4 + 0.6 * below);
+  }
+  // The wing-to-body fairing's lower edge and the keel beam: scuffed, darker.
+  if (L.y < -2.6 && abs(L.z) < 18.0) { c *= 1.0 - 0.06 * smoothstep(0.5, 0.8, nz(L * 1.3).b); }
+  if (d > 68.0) { c = mix(c, vec3f(0.03), smoothstep(68.6, 69.8, d) * 0.7); }
+  return vec4f(c, 0.08 * belly * n.b);
+}
+
+// Chord of the wing at a span station (plan view).
+fn chord747(x: f32) -> f32 {
+  let le = select(37.086 + 0.841 * (x - 21.0), 18.06 + 0.906 * x, x < 21.0);
+  let te = select(39.151 + 0.58 * (x - 13.4), 34.93 + 0.315 * x, x < 13.4);
+  return te - le;
+}
+
+// The 747's panel seams and rivet rows (height, seam dirt, rivets).
+fn relief747(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
+  var h = 0.0;
+  var dirt = 0.0;
+  var rv = 0.0;
+  let gw = max(0.0012, px * 0.9);
+  let ga = 0.0007 * min(1.0, 0.0018 / gw);
+  let rr = 0.004;
+  let rf = 1.0 - smoothstep(rr * 0.5, rr * 1.6, px);
+  switch pt {
+    case 1u: {
+      let d = L.z + 31.6;
+      let s = abs(uv.y);
+      // A rivet row on every frame (20 in apart), a butt joint every twelfth.
+      let fr = (fract(d / 0.508 + 0.5) - 0.5) * 0.508;
+      rv = max(rv, rivets(s, abs(fr), 0.04, rr) * rf * 0.6);
+      let bj = (fract((d - 1.6) / 6.096 + 0.5) - 0.5) * 6.096;
+      h -= ga * line(bj, gw);
+      dirt += line(bj, gw * 2.5);
+      var laps = array<f32, 4>(1.7, 3.6, 5.6, 7.7);
+      for (var i = 0; i < 4; i++) {
+        let ds = s - laps[i];
+        h -= ga * line(ds, gw);
+        dirt += line(ds, gw * 2.0);
+        rv = max(rv, rivets(d, abs(abs(ds) - 0.014), 0.035, rr) * rf);
+      }
+      if (abs(L.x) > 1.5) {
+        let dd = door747(L);
+        h -= ga * 2.0 * line(dd, gw * 1.3);
+        dirt += line(dd, gw * 3.0);
+        // The panes sit a little in from the skin, the edge of the opening bevelled.
+        let ws = cabin_win_sd747(L);
+        h -= 0.006 * smoothstep(0.004, -0.010, ws) * (1.0 - smoothstep(0.004, 0.012, px));
+        dirt += 0.5 * line(ws - 0.002, gw * 1.5);
+        // Each door's flush handle flap, and the hinged access panels on the belly.
+        let dl = door_local747(L);
+        if (dl.z > 0.0) {
+          let hd = sd_rbox(dl.xy - vec2f(0.0, 0.08), vec2f(0.16, 0.045), 0.02);
+          h -= ga * 1.5 * line(hd, gw);
+          dirt += line(hd, gw * 2.0);
+        }
+      }
+      if (L.y < -1.5) {
+        let pz = (fract(L.z / 1.524 + 0.5) - 0.5) * 1.524;
+        let bp = sd_rbox(vec2f(pz, abs(L.x) - 0.9), vec2f(0.28, 0.20), 0.03);
+        let keep = step(0.55, hash1(floor(L.z / 1.524) + sign(L.x) * 0.37));
+        h -= ga * line(bp, gw) * keep;
+        dirt += line(bp, gw * 2.0) * keep;
+        rv = max(rv, rivets(pz + abs(L.x) * 3.0, abs(bp + 0.012), 0.04, rr) * rf * keep);
+      }
+      h += rv * 0.0008;
+    }
+    case 2u, 5u: {
+      let s = abs(uv.x);
+      let av = abs(uv.y);
+      let c = select(chord747(s), 6.0, pt == 5u);
+      rv = max(rv, rivets(av, (fract(s / 0.6 + 0.5) - 0.5) * 0.6, 0.045, rr) * rf);
+      rv = max(rv, rivets(s, av - 0.15 * c, 0.04, rr) * rf);
+      rv = max(rv, rivets(s, av - 0.62 * c, 0.04, rr) * rf);
+      let le = av - 0.12 * c;
+      h -= ga * line(le, gw);
+      dirt += line(le, gw * 2.0);
+      h += rv * 0.0008;
+    }
+    case 3u: {
+      let dd = (fract(abs(uv.x) / 0.5) - 0.5) * 0.5;
+      h -= ga * 0.7 * line(dd, gw);
+      dirt += 0.3 * line(dd, gw * 2.0);
+    }
+    case 7u: { // the flight deck lining: panel joints, a fine grain
+      let d = L.z + 31.6;
+      let j = (fract((d - 4.6) / 0.62 + 0.5) - 0.5) * 0.62;
+      h -= 0.0012 * line(j, max(0.002, px));
+      dirt += 0.4 * line(j, max(0.004, px * 2.0));
+      h += 0.00012 * nz(L * 50.0).r * (1.0 - smoothstep(0.0005, 0.002, px));
+    }
+    case 8u: {
+      if (abs(Nl.x) < 0.7) {
+        let t = fract(L.x / 0.065 + 0.5) * 2.0 - 1.0;
+        h += 0.004 * sqrt(max(1.0 - t * t, 0.0));
+        dirt += smoothstep(0.85, 1.0, abs(t));
+      }
+      h += 0.0004 * nz(L * 60.0).g * (1.0 - smoothstep(0.0005, 0.002, px));
+    }
+    case 9u: { h += 0.0015 * nz(L * 45.0).r * (1.0 - smoothstep(0.001, 0.004, px)); }
+    case 10u: { h += 0.00012 * nz(L * 220.0).r * (1.0 - smoothstep(0.0002, 0.0009, px)); }
+    case 12u: { h += 0.00025 * sin((L.x + L.y * 1.3 + L.z * 0.7) * 2600.0) * (1.0 - smoothstep(0.0002, 0.0008, px)); }
+    case 15u: { h += 0.003 * nz(L * 70.0).r * (1.0 - smoothstep(0.001, 0.004, px)); }
+    case 13u: {
+      // Inlet cowl / fan cowl / reverser joints round the nacelle, and the
+      // fan cowl halves' hinge line on top and latch line underneath.
+      let e = eng747(L);
+      let r = length(e.xy);
+      if (r < 1.34) {
+        let a = atan2(e.x, e.y);
+        var cj = min(abs(e.z - 0.95), abs(e.z - 1.90));
+        h -= ga * 1.4 * line(cj, gw);
+        dirt += line(cj, gw * 2.5);
+        let ls = min(abs(a), 3.14159 - abs(a)) * r;
+        let on = step(0.95, e.z) * step(e.z, 2.95);
+        h -= ga * line(ls, gw) * on;
+        dirt += line(ls, gw * 2.0) * on;
+        rv = max(rv, rivets(e.z, abs(cj - 0.016), 0.03, rr) * rf);
+        rv = max(rv, rivets(r * a, abs(e.z - 0.25), 0.035, rr) * rf);
+        h += rv * 0.0008;
+      } else {
+        let sj = uv.y - 0.25;
+        h -= ga * line(sj, gw);
+        dirt += line(sj, gw * 2.5);
+      }
+    }
+    case 6u: {
+      let ax = abs(L.x);
+      var cs = array<f32, 5>(0.44, 1.36, 2.48, 4.94, 6.06);
+      var c = cs[0];
+      for (var i = 1; i < 5; i++) { if (abs(ax - cs[i]) < abs(ax - c)) { c = cs[i]; } }
+      if (abs(Nl.x) < 0.6) {
+        let o = abs(ax - c);
+        let gd = min(abs(o - 0.07), abs(o - 0.16));
+        h -= 0.003 * line(gd, max(0.005, px));
+        dirt += line(gd, max(0.006, px));
+      }
+    }
+    default: {}
+  }
+  return vec3f(h, sat(dirt) * min(1.0, 0.003 / gw), rv);
 }

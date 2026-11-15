@@ -380,10 +380,17 @@ impl Weather {
 
     /// The start screen's version: local time and date at the chosen spot
     /// (the clock is set from them on take-off), then the sky and the wind.
-    pub fn start_controls(&mut self, ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64) {
+    /// The start screen's weather: presets, sky and wind.
+    pub fn start_weather(&mut self, ui: &mut egui::Ui) {
         self.presets(ui);
         ui.add_space(4.0);
-        section(ui, "DAY", |ui| {
+        self.sky_controls(ui);
+        self.wind_controls(ui);
+    }
+
+    /// The start screen's time: local time of day and the date.
+    pub fn start_time(ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64) {
+        egui::Grid::new("start_time").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
             ui.label("Local time");
             add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v)));
             ui.end_row();
@@ -391,8 +398,18 @@ impl Weather {
             add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| month_day(v)));
             ui.end_row();
         });
-        self.sky_controls(ui);
-        self.wind_controls(ui);
+    }
+
+    /// A few words for the weather: the preset it matches, else the cloud
+    /// cover and wind.
+    pub fn summary(&self) -> String {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-3 * (1.0 + b.abs());
+        for &(name, c, b, d, s, a, h, w, g) in PRESETS {
+            if near(self.clouds as f64, c as f64) && near(self.cloud_base as f64, b as f64) && near(self.cloud_depth as f64, d as f64) && near(self.storms as f64, s as f64) && near(self.alto as f64, a as f64) && near(self.haze as f64, h as f64) && near(self.wind as f64, w as f64) && near(self.gusts as f64, g as f64) {
+                return name.to_string();
+            }
+        }
+        format!("{:.0}% cloud · {:.0} kt", self.clouds * 100.0, self.wind * 1.94384)
     }
 
     fn day_controls(&mut self, ui: &mut egui::Ui, utc: &mut f64, doy: &mut f64, lon: f64) {
@@ -490,7 +507,7 @@ fn add(ui: &mut egui::Ui, s: Slider) -> egui::Response {
     r
 }
 
-fn month_day(doy: f64) -> String {
+pub fn month_day(doy: f64) -> String {
     const M: [(&str, u32); 12] = [("Jan", 31), ("Feb", 28), ("Mar", 31), ("Apr", 30), ("May", 31), ("Jun", 30), ("Jul", 31), ("Aug", 31), ("Sep", 30), ("Oct", 31), ("Nov", 30), ("Dec", 31)];
     let mut d = doy.max(0.0) as u32 % 365;
     for (name, len) in M {

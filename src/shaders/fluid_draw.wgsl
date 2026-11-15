@@ -100,7 +100,10 @@ fn flow_noise(p: vec3f, vel: vec3f, tm: f32, f: f32) -> vec4f {
     var emitter: f32;
     // Near the top and the open sides the smoke thins out: beyond them it is particles.
     let edge = min(min(pl.x, size.x - pl.x), min(pl.y, size.y - pl.y));
-    let topfade = smoothstep(size.z, size.z - 12.0, pl.z) * smoothstep(0.0, 8.0, edge);
+    // (over more metres in a coarse grid, or a dense plume ends in a wall)
+    let fade_s = max(8.0, 8.0 + (h - 1.2) * 12.0);
+    let fade_t = max(12.0, 12.0 + (h - 1.2) * 16.0);
+    let topfade = smoothstep(size.z, size.z - fade_t, pl.z) * smoothstep(0.0, fade_s, edge);
     if (U.ax_n.w > 0.0) {
       // Carried with the flow, but no faster than a few m/s: where the gas
       // moves fast its shear would smear the noise into streaks.
@@ -136,7 +139,10 @@ fn flow_noise(p: vec3f, vel: vec3f, tm: f32, f: f32) -> vec4f {
       // Fresh soot is nearly black; dust is pale earth; fuel mist is light.
       let alb = (soot_s * vec3f(0.23, 0.21, 0.19) + dust_s * vec3f(0.55, 0.47, 0.38) + fuel_s * vec3f(0.32, 0.3, 0.27)) / max(sig, 1e-6);
       let sunl = lgt.sun * (exp(-lg.x) * phase + 0.08 * exp(-lg.x * 0.3) / (4.0 * PI));
-      let amb = sky * exp(-lg.z * 0.3) + bounce;
+      // (the sky's light is dimmed by the smoke straight overhead; under a
+      // plume hundreds of metres wide much of it still comes in from the
+      // sides, so a coarse grid's tall columns shade less)
+      let amb = sky * exp(-lg.z * 0.3 / max(1.0, h / 1.2)) + bounce;
       let fire = fire_col * lg.y * flame * 0.5;
       let Ls = alb * (sunl + amb + fire);
       let tk = fl_kelvin(s.y);

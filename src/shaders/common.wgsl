@@ -43,11 +43,28 @@ struct Globals {
   // north axis + first vertex. Their outlines, two vertices (east, north) a row.
   cut: array<vec4f, 48>,
   cut_v: array<vec4f, 128>,
-  // Cloud shadow map (render.rs CloudShadow, see cloud_sun): the one to look up, then
-  // the one being drawn. Each: centre direction + inner half size; east axis + outer
-  // half size; north axis + first layer; base and top of its bands, valid.
-  cs: array<vec4f, 8>,
+  // Cloud shadow maps (render.rs CloudShadow, see cloud_sun): the one lookups read
+  // (t_cshadow), then the one being drawn. Each, six vec4s: anchor centre direction
+  // + inner half size; east axis + outer half size; north axis + first layer; base
+  // and top of its bands, centre (m, east and north of the anchor on its tangent
+  // plane); the sun it was drawn for + valid; the cloud drift (G.weather.xyz) when
+  // it was begun. The looked-up one is a cross-fade of two maps, with their sun and
+  // drift blended the same way.
+  cs: array<vec4f, 12>,
   alto: vec4f,       // mid-level cloud: amount 0..1, height (m)
+  // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
+  // toward (east, north); wind (m/s), significant wave height (m), whitecap
+  // cover, 1; slope covariance (east-east, north-north, east-north) of the
+  // ripples shorter than any cascade; then at 3 + 9 c + m the slope covariance
+  // cascade c's mip level m no longer holds (see `ocean_lost`).
+  ocean: array<vec4f, 30>,
+  shore_vp: mat4x4f, // camera-relative to the shore distance field (shore.rs)
+  shore: vec4f,      // field valid, metres per texel, farthest distance kept (m), side of the square (m)
+  // Churned white water where a crash went in, two each: centre (camera-relative)
+  // + radius (m, 0 = none); strength 0..1, age (s), seed.
+  foam: array<vec4f, 16>,
+  // The start screen: x = 1 while it shows (deep-space sky, no clouds).
+  start: vec4f,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -69,8 +86,15 @@ struct Globals {
 @group(0) @binding(14) var s_detail: sampler;
 // Where the photorealistic 3D tiles are drawn, seen from above (tiles3d.rs).
 @group(0) @binding(15) var t_photo: texture_2d<f32>;
-// Cloud shadow map, two cascades double-buffered (see cloud_sun).
+// Cloud shadow map, the two cascades (see cloud_sun).
 @group(0) @binding(16) var t_cshadow: texture_2d_array<f32>;
+// The ocean's three wave cascades (ocean.wgsl): layer c = (Dx, Dy, height,
+// Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy); layer 6 the whitecaps on
+// cascade 0's grid (foam cover, fresh foam, fold threshold on the Jacobian, 0).
+@group(0) @binding(17) var t_ocean: texture_2d_array<f32>;
+// Distance to the shore (shore.rs): metres to the nearest land, seaward
+// direction (east, north), 1.
+@group(0) @binding(18) var t_shore: texture_2d<f32>;
 
 // GPU particles (explosions, smoke, dust, spray) and their simulation constants.
 struct Particle {
@@ -200,7 +224,7 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
     let sm = MIE_S * d.y;
     // Air in the shadow of a cloud gets no sunlight (light shafts through the gaps);
     // under a closed deck the light that remains is the deck's dull grey.
-    let cl = cloud_sun(p);
+    let cl = cloud_sun(p, false);
     var msl = ms_lut(h, mu);
     msl = mix(msl, vec3f(luma(msl)), cl.closed * 0.75) * (1.0 - 0.45 * cl.closed);
     var S = sun_trans(h, mu) * cl.vis * (sr * pr + vec3f(sm * pm)) + msl * (sr + vec3f(sm));
@@ -449,15 +473,39 @@ fn cloud_density(pp: vec3f, h: f32, cheap: bool) -> f32 {
 // in w how closed the deck is there (1 = overcast).
 // vis: the share of direct sunlight left (with the forward-scattered glow that
 // thinner cloud lets through); closed: the deck overhead, for points under it.
+// hq: smooth (cubic B-spline) filtering, for surfaces; the haze marches, which
+// call it many times a pixel, take one bilinear fetch.
 struct CloudSun { vis: f32, closed: f32 };
-fn cloud_sun(pc: vec3f) -> CloudSun {
+const CS_RES = 1024.0;
+fn cs_fetch(uv: vec2f, layer: i32, hq: bool) -> vec4f {
+  if (!hq) { return textureSampleLevel(t_cshadow, s_clamp, uv, layer, 0.0); }
+  // Cubic B-spline from four bilinear taps: no texel corners in the shadow's outline.
+  let p = uv * CS_RES - 0.5;
+  let i = floor(p);
+  let f = p - i;
+  let f2 = f * f;
+  let f3 = f2 * f;
+  let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  let w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+  let w3 = f3 / 6.0;
+  let g0 = w0 + w1;
+  let g1 = w2 + w3;
+  let c0 = (i - 0.5 + w1 / g0) / CS_RES;
+  let c1 = (i + 1.5 + w3 / g1) / CS_RES;
+  return g0.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, c0, layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c1.x, c0.y), layer, 0.0))
+       + g1.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c0.x, c1.y), layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, c1, layer, 0.0));
+}
+fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   var o = CloudSun(1.0, 0.0);
   let base = G.cs[3].x;
   let top = G.cs[3].y;
   let r = length(pc);
   let h = r - G.planet.w;
-  if (G.cs[3].z < 0.5 || h >= top) { return o; }
-  let sun = G.sun_dir.xyz;
+  if (G.cs[4].w < 0.5 || G.start.x > 0.0 || h >= top) { return o; }
+  // The sun the maps were drawn for (it differs from this frame's by a fraction
+  // of a degree while the clock runs fast).
+  let sun = G.cs[4].xyz;
   let mu = dot(pc / r, sun);
   let R = G.planet.w + base;
   // Exactly along the sun (a low sun's rays cross the base tens of km away): forward
@@ -467,16 +515,21 @@ fn cloud_sun(pc: vec3f) -> CloudSun {
     let s = ray_sphere(pc, -sun, R);
     ts = select((base - h) / max(mu, 0.04), -s.x, s.x > 0.0);
   }
-  let qn = normalize(pc + sun * ts);
-  let loc = vec2f(dot(qn, G.cs[1].xyz), dot(qn, G.cs[2].xyz)) / max(dot(qn, G.cs[0].xyz), 0.5) * R;
-  let L = i32(G.cs[2].w);
+  // The clouds have drifted on with the wind since the maps were drawn.
+  let qn = normalize(pc + sun * ts + (G.weather.xyz - G.cs[5].xyz));
+  let loc = vec2f(dot(qn, G.cs[1].xyz), dot(qn, G.cs[2].xyz)) / max(dot(qn, G.cs[0].xyz), 0.5) * R - G.cs[3].zw;
   let ui = loc / G.cs[0].w * 0.5 + 0.5;
   let uo = loc / G.cs[1].w * 0.5 + 0.5;
   let ei = max(abs(ui.x - 0.5), abs(ui.y - 0.5)) * 2.0;
   let eo = max(abs(uo.x - 0.5), abs(uo.y - 0.5)) * 2.0;
   if (eo >= 1.0) { return o; }
-  var v = textureSampleLevel(t_cshadow, s_clamp, uo, L + 1, 0.0);
-  if (ei < 1.0) { v = mix(textureSampleLevel(t_cshadow, s_clamp, ui, L, 0.0), v, smoothstep(0.8, 0.98, ei)); }
+  var v: vec4f;
+  if (ei < 0.8) {
+    v = cs_fetch(ui, 0, hq);
+  } else {
+    v = cs_fetch(uo, 1, hq);
+    if (ei < 1.0) { v = mix(cs_fetch(ui, 0, hq), v, smoothstep(0.8, 0.98, ei)); }
+  }
   // Optical depth still above this point.
   let f = sqrt(clamp((h - base) / (top - base), 0.0, 1.0)) * 3.0;
   let below = select(select(mix(v.y, v.z, f - 2.0), mix(v.x, v.y, f - 1.0), f < 2.0), v.x * f, f < 1.0);
@@ -505,40 +558,42 @@ fn cirrus(pp: vec3f) -> f32 {
 fn wave_coord(p: vec3f) -> vec2f {
   return vec2f(dot(p, G.east.xyz) + G.east.w, dot(p, G.north.xyz) + G.north.w);
 }
-// Sea state: x = swell amplitude scale, y = ripple strength, by water wclass and latitude.
-fn sea_state(wclass: f32, sinlat: f32, shore: f32) -> vec2f {
-  let rough = 1.0 + 0.8 * smoothstep(0.55, 0.85, abs(sinlat));
-  var s = vec2f(1.0, 1.0) * rough;                 // ocean
-  if (wclass > 2.5) { s = vec2f(0.03, 0.55); }      // river
-  else if (wclass > 1.5) { s = vec2f(0.12, 0.7); }  // lake
-  return vec2f(s.x * mix(0.25, 1.0, shore), s.y);
+// Position in the ocean's own coordinates (m, east and north), which wrap at a
+// multiple of every cascade's size (ocean.rs WRAP).
+fn ocean_coord(p: vec3f) -> vec2f {
+  return vec2f(dot(p, G.east.xyz), dot(p, G.north.xyz)) + G.ocean[0].xy;
 }
-// Sum of sharpened directional swells. Returns (height, d/dx, d/dy) for unit sea
-// state. Waves shorter than lam_cut fade out so coarse geometry or distant
-// pixels never see detail they cannot resolve.
-fn swell(x: vec2f, t: f32, lam_cut: f32) -> vec3f {
+// Slope covariance (east-east, north-north, east-north) of the waves that
+// cascade c loses when read at mip level lv (ocean.rs `lost_slopes`).
+fn ocean_lost(c: i32, lv: f32) -> vec3f {
+  let l = clamp(lv, 0.0, 8.0);
+  let i = i32(floor(l));
+  let j = min(i + 1, 8);
+  return mix(G.ocean[3 + c * 9 + i].xyz, G.ocean[3 + c * 9 + j].xyz, l - f32(i));
+}
+fn ocean_size(c: i32) -> f32 { return select(select(6.0, 250.0 / 6.0, c == 1), 250.0, c == 0); }
+// Sea state: how much of each wave cascade (about 250 m, 40 m and 6 m across)
+// a stretch of water shows, by its class, latitude and how open it is (shore:
+// 0 by the coast, 1 out on open water). Short fetch - bays, lakes, rivers -
+// keeps the short chop and loses the long waves and the swell. ocean.rs
+// `sea_state` mirrors it for the floating aircraft.
+fn sea_state(wclass: f32, sinlat: f32, shore: f32) -> vec3f {
+  if (wclass > 2.5) { return vec3f(0.0, 0.1, 0.45); }   // river
+  if (wclass > 1.5) { return vec3f(0.05, 0.45, 0.85); } // lake
+  let rough = 1.0 + 0.3 * smoothstep(0.55, 0.85, abs(sinlat));
+  return vec3f(rough * mix(0.3, 1.0, shore), mix(0.75, 1.0, shore), 1.0);
+}
+// Sideways (x = east, y = north) and vertical displacement of the sea surface
+// above ocean coordinates x, filtered for a vertex spacing of sp metres;
+// w = sea_state.
+fn ocean_disp(x: vec2f, sp: f32, w: vec3f) -> vec3f {
   var o = vec3f(0.0);
-  var lam = 173.0;
-  var ang = 0.6;
-  // Wave groups: sets of bigger waves drifting through calmer water.
-  let grp = textureSampleLevel(t_wave, s_repeat, x / 900.0 + vec2f(t * 0.004, 0.0), 0.0).a;
-  let grp2 = textureSampleLevel(t_wave, s_repeat, x.yx / 2300.0 - vec2f(0.0, t * 0.002), 0.0).a;
-  let env = 0.35 + 1.3 * grp * grp2 * 2.0;
-  for (var i = 0; i < 8; i++) {
-    let w = smoothstep(lam_cut, lam_cut * 2.0, lam);
-    if (w > 0.0) {
-      let k = 2.0 * PI / lam;
-      let dir = vec2f(cos(ang), sin(ang));
-      let th = dot(dir, x) * k - sqrt(9.81 * k) * t + f32(i) * 1.7 + grp * 5.0;
-      let a = lam * 0.0052 * w * env;
-      let s = (sin(th) + 1.0) * 0.5;
-      o.x += a * (2.0 * pow(s, 1.5) - 1.0);
-      let dh = a * 1.5 * sqrt(s) * cos(th) * k;
-      o.y += dh * dir.x;
-      o.z += dh * dir.y;
+  for (var c = 0; c < 3; c++) {
+    let L = ocean_size(c);
+    let lod = log2(max(2.0 * sp * 256.0 / L, 1.0));
+    if (lod < 8.0 && w[c] > 0.0) {
+      o += textureSampleLevel(t_ocean, s_repeat, x / L, c, lod).xyz * w[c];
     }
-    lam *= 0.66;
-    ang += 0.83 + f32(i) * 0.61;
   }
   return o;
 }
@@ -889,7 +944,7 @@ fn light_at_nv(P: vec3f) -> Light {
   let upn = pp / r;
   let h = r - G.planet.w;
   let mu = dot(upn, G.sun_dir.xyz);
-  let sun = sun_trans(h, mu) * G.sun_dir.w * cloud_sun(pp).vis;
+  let sun = sun_trans(h, mu) * G.sun_dir.w * cloud_sun(pp, true).vis;
   // Skylight falls off steeply once the sun is down: about half a decade per
   // 3 degrees of twilight (the exp term), so a street at blue hour is far
   // darker than the glowing sky above it rather than as bright as overcast day.

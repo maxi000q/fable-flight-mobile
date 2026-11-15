@@ -16,6 +16,8 @@ struct Tile {
     gpu: TileGpu,
     heights: Vec<f32>,
     water: Vec<bool>,
+    /// how much of the ocean's long waves the water shows (sources.rs TileData::sea)
+    sea: Vec<f32>,
     last_used: u64,
     /// imagery source it was made with; a different one gets it made again
     generation: u32,
@@ -98,6 +100,8 @@ pub struct BHit {
     pub bridge: bool,
     pub tile: TileId,
     pub idx: usize,
+    /// footprint area (m²)
+    pub area: f32,
 }
 
 /// A standing tree, as the physics sees it.
@@ -182,6 +186,8 @@ pub struct World {
     pub lod_k: f64,
     pub buildings_on: bool,
     draw: Vec<TileId>,
+    /// selected tiles out of view but near the camera: for the shore masks (shore.rs)
+    draw_shore: Vec<TileId>,
     draw_b: Vec<TileId>,
     wanted: Vec<(f32, TileId)>,
     in_view: Vec<bool>,
@@ -196,6 +202,8 @@ pub struct World {
     fields: HashMap<u32, FSlot>,
     /// photorealistic 3D tiles near the aircraft (taken out while it updates)
     photo: Option<Box<crate::tiles3d::Photo>>,
+    /// the waves (their CPU copy, so what floats rides what is drawn)
+    pub ocean: crate::ocean::Ocean,
 }
 
 #[derive(Clone)]
@@ -215,7 +223,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -417,6 +425,12 @@ impl World {
                 let h = (g(x0, y0) * (1.0 - fx) + g(x0 + 1, y0) * fx) * (1.0 - fy) + (g(x0, y0 + 1) * (1.0 - fx) + g(x0 + 1, y0 + 1) * fx) * fy;
                 let w = t.water[(y + 0.5) as usize * GV + (x + 0.5) as usize];
                 let mut h = h as f64;
+                // Water rides the ocean's long waves, as much as it shows them.
+                let s = |i: usize, j: usize| t.sea[j * GV + i];
+                let sea = (s(x0, y0) * (1.0 - fx) + s(x0 + 1, y0) * fx) * (1.0 - fy) + (s(x0, y0 + 1) * (1.0 - fx) + s(x0 + 1, y0 + 1) * fx) * fy;
+                if w && sea > 0.0 {
+                    h += sea as f64 * self.ocean.height(geo::lla_to_pos(lat, lon, h));
+                }
                 if !self.craters.is_empty() {
                     let p = geo::lla_to_pos(lat, lon, h);
                     for (c, r) in &self.craters {
@@ -452,7 +466,7 @@ impl World {
             let p = [u as f32, v as f32];
             for (i, f) in b.footprints.iter().enumerate() {
                 if f.alive && p[0] >= f.min[0] && p[0] <= f.max[0] && p[1] >= f.min[1] && p[1] <= f.max[1] && buildings::point_in_ring(p, &f.ring) {
-                    return Some(BHit { base: f.base as f64, top: f.top as f64, bridge: f.kind == 1, tile: id, idx: i });
+                    return Some(BHit { base: f.base as f64, top: f.top as f64, bridge: f.kind == 1, tile: id, idx: i, area: f.area });
                 }
             }
         }
@@ -641,6 +655,12 @@ impl World {
 
     /// Footprints of small buildings whose centre is within `r` of a point.
     /// (Under the 3D tiles too: they are cut out of the mesh when they come down.)
+    /// A standing building's base, top and footprint area.
+    pub fn footprint(&self, tile: TileId, idx: usize) -> Option<(f64, f64, f32)> {
+        let Some(BSlot::Ready(b)) = self.builds.get(&tile) else { return None };
+        b.footprints.get(idx).filter(|f| f.alive).map(|f| (f.base as f64, f.top as f64, f.area))
+    }
+
     pub fn buildings_near(&self, p: DVec3, r: f64, max_area: f32) -> Vec<(TileId, usize)> {
         let (lat, lon, _) = geo::pos_to_lla(p);
         let id = TileId::at(lat, lon, DATA_ZOOM);
@@ -811,7 +831,7 @@ impl World {
                     let slot = match res {
                         Ok(td) => {
                             bytes += crate::render::tile_bytes(&td);
-                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), heights: td.heights, water: td.water, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
+                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), heights: td.heights, water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
                         }
                         Err(e) => {
                             log::debug!("tile {id:?} failed: {e}");
@@ -865,6 +885,7 @@ impl World {
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let gh = self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
         self.draw.clear();
+        self.draw_shore.clear();
         self.wanted.clear();
         for y in 0..4 {
             for x in 0..4 {
@@ -1184,8 +1205,27 @@ impl World {
         }
         if fr.sphere(center - cam, radius) {
             self.draw.push(id);
+        } else if (center - cam).length() - radius < crate::shore::WIDE_HALF * 1.6 {
+            self.draw_shore.push(id);
         }
         true
+    }
+
+    /// Terrain tiles out of view that reach into the shore mask's square
+    /// (centre `c`, both camera-relative), with their uniforms as `draw_lists`.
+    pub fn shore_tiles(&self, cam: DVec3, c: DVec3) -> Vec<(&TileGpu, [f32; 12])> {
+        let mut out = Vec::new();
+        for id in &self.draw_shore {
+            if let Some(Slot::Ready(t)) = self.tiles.get(id) {
+                let o = t.center - cam;
+                if (o - c).length() - t.radius > crate::shore::WIDE_HALF * 1.45 {
+                    continue;
+                }
+                let o = o.as_vec3();
+                out.push((&t.gpu, [o.x, o.y, o.z, (id.width_m() / GRID as f64) as f32, id.z as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+            }
+        }
+        out
     }
 
     /// Terrain tiles and detail tiles to draw. `focus` and `casc` (radius of

@@ -115,6 +115,8 @@ pub struct Domain {
     pub n: DVec3,
     pub u: DVec3,
     pub h: f64,
+    /// how much coarser than for a light aircraft (see `new`)
+    pub sc: f32,
     /// height of the ground at the site above the domain floor
     pub ground_z: f32,
     pub time: f32,
@@ -131,17 +133,22 @@ impl Domain {
     /// `slide`: which way the wreck is going; `wind`: the wind (planet frame).
     /// The grid reaches further both ways: the wreck burns along its path and
     /// the smoke leans downwind.
-    pub fn new(site: DVec3, slide: DVec3, wind: DVec3, power: f32) -> Self {
+    /// `size`: how big the aircraft is next to a light single (1); a big
+    /// jet's fireball is several times wider, so the cells are coarser.
+    pub fn new(site: DVec3, slide: DVec3, wind: DVec3, power: f32, size: f32) -> Self {
         let (e, n, u) = geo::enu(site);
-        let h = (0.62 + 0.26 * power as f64).clamp(0.78, 1.2);
+        let sc = (size.max(1.0) as f64).powf(0.75);
+        let h = (0.62 + 0.26 * power as f64).clamp(0.78, 1.2) * sc;
         let w = FN[0] as f64 * h;
         let flat = |v: DVec3| DVec3::new(v.dot(e), v.dot(n), 0.0);
         let (s, wd) = (flat(slide).normalize_or_zero(), flat(wind));
         let lean = (wd.length() / 6.0).min(1.0);
-        let off = (s * 0.1 + wd.normalize_or_zero() * 0.22 * lean) * w;
-        let below = 14.0;
+        // A heavy wreck goes on a long way, burning: more of the grid ahead.
+        let ahead = if size > 2.0 { 0.2 } else { 0.1 };
+        let off = (s * ahead + wd.normalize_or_zero() * 0.22 * lean) * w;
+        let below = 14.0 * sc.sqrt();
         let corner = site + e * (off.x - w * 0.5) + n * (off.y - w * 0.5) - u * below;
-        Self { site, corner, e, n, u, h, ground_z: below as f32, time: 0.0, reset: true, obst_t: 0.0, ground: None, vol_lift: 0.0 }
+        Self { site, corner, e, n, u, h, sc: sc as f32, ground_z: below as f32, time: 0.0, reset: true, obst_t: 0.0, ground: None, vol_lift: 0.0 }
     }
 
     pub fn size(&self) -> Vec3 {
@@ -302,8 +309,11 @@ impl Domain {
         let u = FU {
             a: [sdt, self.h as f32, self.time, gsrc.len() as f32],
             wind: [w.x, w.y, w.z, 3.5],
-            k1: [10.0, 0.5, 0.1, 0.7],
-            k2: [0.8, 1.55, 0.35, 0.012],
+            // (a bigger fireball loses its heat more slowly)
+            k1: [10.0, 0.5 / self.sc.sqrt(), 0.1, 0.7],
+            // (soot per fuel burnt: a big fire is seen through so much more of
+            // it that at a small one's yield it would be a black wall)
+            k2: [0.8 / self.sc.sqrt(), 1.55, 0.35, 0.012],
             k3: [0.06, 0.5, 2.5, 0.06],
             sun: [sl.x, sl.y, sl.z, 1.7],
             ext: [1.8, 0.9, 0.1, 0.035],
@@ -311,10 +321,12 @@ impl Domain {
             ax_e: [self.e.x as f32, self.e.y as f32, self.e.z as f32, self.ground_z],
             ax_n: [self.n.x as f32, self.n.y as f32, self.n.z as f32, 1.0],
             ax_u: [self.u.x as f32, self.u.y as f32, self.u.z as f32, 1.0],
-            k4: [25.0, 0.2, 1.2, 1.0],
+            // (the turbulence's eddies grow with the cells, or they would be finer than the grid)
+            k4: [25.0, 0.2 / self.sc, 1.2, 1.0],
             coarse: {
-                let cs = crate::render::VOL_CELL;
-                let c = self.local(Vec3::ZERO) + Vec3::new(-cs * crate::render::VOL_N[0] as f32 * 0.5, -cs * crate::render::VOL_N[1] as f32 * 0.5, crate::render::VOL_ZMIN - self.vol_lift);
+                // (as main.rs places the volume: coarser round a big fire)
+                let cs = crate::render::VOL_CELL * self.sc;
+                let c = self.local(Vec3::ZERO) + Vec3::new(-cs * crate::render::VOL_N[0] as f32 * 0.5, -cs * crate::render::VOL_N[1] as f32 * 0.5, crate::render::VOL_ZMIN * self.sc - self.vol_lift);
                 [c.x, c.y, c.z, cs]
             },
         };

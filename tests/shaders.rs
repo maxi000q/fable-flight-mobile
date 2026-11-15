@@ -23,11 +23,12 @@ fn shaders_validate() {
     let mut ok = check("noise3d", include_str!("../src/shaders/noise3d.wgsl"));
     ok &= check("resolve", include_str!("../src/shaders/resolve.wgsl"));
     ok &= check("detail", include_str!("../src/shaders/detail.wgsl"));
+    ok &= check("ocean", include_str!("../src/shaders/ocean.wgsl"));
+    ok &= check("shore", include_str!("../src/shaders/shore.wgsl"));
     for (name, src) in [
         ("lut", include_str!("../src/shaders/lut.wgsl")),
         ("terrain", include_str!("../src/shaders/terrain.wgsl")),
         ("photo", include_str!("../src/shaders/photo.wgsl")),
-        ("plane", include_str!("../src/shaders/plane.wgsl")),
         ("post", include_str!("../src/shaders/post.wgsl")),
         ("particles_sim", include_str!("../src/shaders/particles_sim.wgsl")),
         ("particles_draw", include_str!("../src/shaders/particles_draw.wgsl")),
@@ -49,5 +50,6 @@ fn shaders_validate() {
     for (name, src) in [("composite", include_str!("../src/shaders/composite.wgsl")), ("clouds", include_str!("../src/shaders/clouds.wgsl"))] {
         ok &= check(name, &format!("{common}\n{sky}\n{src}"));
     }
+    // plane.wgsl takes the 747 deck's string table: checked in b747::deck's tests.
     assert!(ok, "shader errors above");
 }
