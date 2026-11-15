@@ -71,14 +71,40 @@ fn finish(scene: vec3f, in: FsIn) -> vec4f {
   c += (ign(in.pos.xy + 17.0) - 0.5) / 255.0;
   return vec4f(c, 1.0);
 }
+// The frame at a window pixel when it was drawn at another resolution
+// (graphics settings): bilinear when upscaling; supersampled frames average
+// four bilinear taps over the window pixel's footprint (a box filter).
+fn scaled(uv: vec2f) -> vec4f {
+  if (G.quality.y > 1.001) {
+    let o = 0.25 * G.quality.zw;
+    return 0.25 * (textureSampleLevel(t_src, s_clamp, uv + vec2f(-o.x, -o.y), 0.0) + textureSampleLevel(t_src, s_clamp, uv + vec2f(o.x, -o.y), 0.0)
+                 + textureSampleLevel(t_src, s_clamp, uv + vec2f(-o.x, o.y), 0.0) + textureSampleLevel(t_src, s_clamp, uv + vec2f(o.x, o.y), 0.0));
+  }
+  return textureSampleLevel(t_src, s_clamp, uv, 0.0);
+}
+fn native() -> bool { return abs(G.quality.y - 1.0) < 0.001 || G.quality.y <= 0.0; }
 @fragment fn fs_final(in: FsIn) -> @location(0) vec4f {
-  return finish(textureSampleLevel(t_src, s_clamp, in.uv, 0.0).rgb, in);
+  return finish(scaled(in.uv).rgb, in);
 }
 // After temporal anti-aliasing (taa.wgsl), whose alpha says how much each
 // pixel is moving: what moves has been softened by the blend, so sharpen it
 // back, never past the brightest or darkest of its neighbours (no halos).
 const TAA_SHARPEN = 0.8;
 @fragment fn fs_final_taa(in: FsIn) -> @location(0) vec4f {
+  if (!native()) {
+    // The same sharpening at another resolution, over the larger of a frame
+    // texel and a window pixel (so an upscaled frame gets its edges back).
+    let d = max(1.0 / vec2f(textureDimensions(t_src)), G.quality.zw);
+    let c = scaled(in.uv);
+    let n = scaled(in.uv + vec2f(0.0, -d.y)).rgb;
+    let s = scaled(in.uv + vec2f(0.0, d.y)).rgb;
+    let w = scaled(in.uv + vec2f(-d.x, 0.0)).rgb;
+    let e = scaled(in.uv + vec2f(d.x, 0.0)).rgb;
+    let lo = min(min(min(n, s), min(w, e)), c.rgb);
+    let hi = max(max(max(n, s), max(w, e)), c.rgb);
+    let k = TAA_SHARPEN * max(c.a, select(0.0, 0.35, G.quality.y < 1.0));
+    return finish(clamp(c.rgb + (c.rgb - (n + s + w + e) * 0.25) * k, lo, hi), in);
+  }
   let px = vec2i(in.pos.xy);
   let dmax = vec2i(textureDimensions(t_src)) - 1;
   let c = textureLoad(t_src, px, 0);

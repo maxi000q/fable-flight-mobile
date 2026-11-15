@@ -168,8 +168,6 @@ pub fn crater_profile(d: f64) -> f64 {
 /// cars (lights.wgsl units; an airliner's nav light is 40).
 const CAR_HEAD: f32 = 60.0;
 const CAR_TAIL: f32 = 12.0;
-/// How far off moving cars are drawn (m).
-const CAR_FAR: f64 = 2200.0;
 
 const LOD_MID: f32 = buildings::BFAR[1];
 const LOD_FINE: f32 = 700.0;
@@ -184,6 +182,18 @@ pub struct World {
     in_flight: usize,
     pub max_zoom: u8,
     pub lod_k: f64,
+    /// multiplies how far out building (and tree) tiles are loaded (graphics settings)
+    pub reach_k: f64,
+    /// graphics settings: multiplies the distances buildings change level of
+    /// detail at (buildings.wgsl `city_k`)
+    pub city_k: f32,
+    /// graphics settings: how far out trees are drawn (m), and the factor on
+    /// the distance they turn into impostors at (trees.wgsl `tree_far`, `tree_imp_k`)
+    pub tree_far: f32,
+    pub tree_imp_k: f32,
+    /// graphics settings: share of the cars on the roads (0..1), how far off
+    /// moving and parked cars are drawn (m)
+    pub cars: (f32, f64, f64),
     pub buildings_on: bool,
     draw: Vec<TileId>,
     /// selected tiles out of view but near the camera: for the shore masks (shore.rs)
@@ -223,7 +233,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -257,9 +267,10 @@ impl World {
     #[allow(clippy::too_many_arguments)]
     fn photo_car_light<'a>(&self, photo: &'a crate::tiles3d::Photo, streets: &mut Option<Option<crate::tiles3d::Streets<'a>>>, b: &BTile, i: usize, c: &Car, pos: DVec3, dir: Vec3, cam: DVec3, out: &mut Vec<crate::airfield::Light>) {
         use crate::airfield::Light;
-        // Cars are drawn out to 2.2 km; their lights fade out before that,
-        // so the traffic has no edge.
-        const FADE: f64 = 600.0;
+        // Cars are drawn out to `cars.1` (2.2 km at High); their lights fade
+        // out before that, so the traffic has no edge.
+        let car_far = self.cars.1;
+        let fade = (car_far * 0.27).max(1.0);
         let d = (pos - cam).length();
         // Room left for the aircraft and the obstruction lights.
         if out.len() + 4 > crate::render::MAX_DYN_LIGHTS - 1024 || !self.frustum.as_ref().map(|f| f.sphere(pos - cam, 8.0)).unwrap_or(true) {
@@ -280,7 +291,7 @@ impl World {
             c.street.set(((st - road) as f32, frame));
             st
         };
-        let k = ((CAR_FAR - d) / FADE).clamp(0.0, 1.0) as f32;
+        let k = ((car_far - d) / fade).clamp(0.0, 1.0) as f32;
         let n = pos.normalize();
         let base = (n * (geo::R + street) - cam).as_vec3();
         let u = n.as_vec3();
@@ -779,10 +790,16 @@ impl World {
             }
         };
         let photo = self.photo.as_deref().filter(|_| sun < 0.15);
+        let (share, car_far, parked_far) = self.cars;
+        if share <= 0.0 {
+            return;
+        }
+        // Each car has its own rank: the settings keep the lower share of them.
+        let activity = activity * share;
         for id in &self.draw_b {
             let Some(BSlot::Ready(b)) = self.builds.get(id) else { continue };
             let d = (b.center - cam).length() - b.radius;
-            if d > CAR_FAR {
+            if d > car_far {
                 continue;
             }
             let lit = photo.filter(|p| p.covers(b.center));
@@ -794,7 +811,7 @@ impl World {
                 }
                 let (p, dir) = cars::pose(&b.net, c, up);
                 let pos = b.center + (p + c.shift).as_dvec3();
-                if (pos - cam).length_squared() < CAR_FAR * CAR_FAR {
+                if (pos - cam).length_squared() < car_far * car_far {
                     let fwd = if c.dir == glam::Vec3::ZERO { dir } else { c.dir };
                     push(pos, fwd, up, c.model, c.col, out);
                     if let Some(photo) = lit {
@@ -802,10 +819,10 @@ impl World {
                     }
                 }
             }
-            if d < 1100.0 {
+            if d < parked_far {
                 for p in &b.parked {
                     let pos = b.center + p.pos.as_dvec3();
-                    if (pos - cam).length_squared() < 1100.0 * 1100.0 {
+                    if (pos - cam).length_squared() < parked_far * parked_far {
                         push(pos, p.fwd, p.up, p.model, p.col, out);
                     }
                 }
@@ -901,7 +918,7 @@ impl World {
         if self.buildings_on && agl < 7000.0 && clat.abs() < 1.45 {
             let c = TileId::at(clat, clon, DATA_ZOOM);
             let w = c.width_m();
-            let reach = (4500.0 + agl * 0.6).min(7500.0);
+            let reach = (4500.0 + agl * 0.6).min(7500.0) * self.reach_k;
             let n = (reach / w).ceil() as i64;
             let size = 1i64 << DATA_ZOOM;
             for dy in -n..=n {
@@ -924,7 +941,7 @@ impl World {
                             let dist = ((b.center - cam).length() - b.radius) as f32;
                             b.shown += real_dt;
                             // Towers carry their detail farther (buildings::HCLASS).
-                            let (mid, fine) = (LOD_MID * b.tall, LOD_FINE * b.tall);
+                            let (mid, fine) = (LOD_MID * b.tall * self.city_k, LOD_FINE * b.tall * self.city_k);
                             b.mid_t = if dist < mid { b.mid_t + real_dt } else if dist > mid * 1.1 { 0.0 } else { b.mid_t };
                             b.fine_t = if dist < fine { b.fine_t + real_dt } else if dist > fine * 1.2 { 0.0 } else { b.fine_t };
                             if b.gpu.is_some() {
@@ -1257,11 +1274,13 @@ impl World {
                     mask |= 1 << c;
                 }
             }
-            if dist < 3300.0 && g.trees.is_some() {
+            // (how far out trees are drawn and where they become impostors: the graphics settings)
+            let imp_dist = IMP_DIST * self.tree_imp_k;
+            if dist < self.tree_far + 100.0 && g.trees.is_some() {
                 for ch in &b.chunks {
                     let cp = b.center + ch.center.as_dvec3();
                     let dc = (cp - cam).length() as f32;
-                    if dc - ch.radius > 3200.0 {
+                    if dc - ch.radius > self.tree_far {
                         continue;
                     }
                     let seen = self.frustum.as_ref().map(|f| f.sphere(cp - cam, ch.radius as f64 + 25.0)).unwrap_or(true);
@@ -1284,7 +1303,7 @@ impl World {
                     // each tree to the one for its own distance. In view, only
                     // trees short of IMP_DIST are drawn as models; the simpler
                     // ones are for the shadows.
-                    let close = dc - ch.radius < IMP_DIST * (1.0 + LOD_JITTER);
+                    let close = dc - ch.radius < imp_dist * (1.0 + LOD_JITTER);
                     for lod in 0..LODS - 1 {
                         let (lo, hi) = lod_span(lod);
                         if dc + ch.radius < lo || dc - ch.radius >= hi {
@@ -1299,7 +1318,7 @@ impl World {
                         }
                     }
                     // Further off, the trees are impostors.
-                    if seen && dc + ch.radius >= IMP_DIST * (1.0 - LOD_JITTER) {
+                    if seen && dc + ch.radius >= imp_dist * (1.0 - LOD_JITTER) {
                         for (variant, first, count) in &ch.runs {
                             tb.push(TreeDraw { mesh: *variant as u32, first: *first, count: *count, view: true, casc: 0, close: false, imp: true, fixed: false });
                         }
@@ -1323,7 +1342,7 @@ impl World {
                         let t = &b.trees[*i as usize];
                         let to = Vec3::new(t.a[0], t.a[1], t.a[2]) - lp;
                         // Past IMP_DIST the tree is an impostor and has no cards.
-                        if t.a[3] > 0.0 && to.length() < IMP_DIST * 1.01 * tree_jit(t.a) && seen(to, 26.0 * t.a[3]) {
+                        if t.a[3] > 0.0 && to.length() < imp_dist * 1.01 * tree_jit(t.a) && seen(to, 26.0 * t.a[3]) {
                             found.push((ring(to.length_squared()) | b.tree_var[*i as usize] as u16, *t));
                         }
                     }
@@ -1361,14 +1380,24 @@ impl World {
             let lod = [fade(b.mid_t - 0.3, 1.2), fade(b.fine_t - 0.6, 1.6), fade(b.shown, 1.0)];
             // How many height classes, tallest first, are near enough for their
             // full geometry, their middle level and their finest level.
-            let reach = [buildings::BFAR[1], LOD_MID, LOD_FINE].map(|r| buildings::HCLASS.iter().take_while(|c| dist < r * c.1).count() as u8);
+            let ck = self.city_k;
+            // How many height classes have every building inside the distance
+            // where their full geometry, middle and finest levels start to
+            // dissolve, with those levels done fading in: nothing of them is
+            // cut away this frame, so they can be drawn without a discard.
+            let maxd = o.length() + b.radius as f32;
+            let inside = |r: f32| buildings::HCLASS.iter().take_while(|c| maxd < r * c.1 * ck).count() as u8;
+            let settled = [inside(buildings::BFAR[0]), if lod[0] >= 1.0 { inside(buildings::BFAR[0]) } else { 0 }, if lod[1] >= 1.0 { inside(buildings::FINE_FADE) } else { 0 }];
+            let reach = [buildings::BFAR[1], LOD_MID, LOD_FINE].map(|r| buildings::HCLASS.iter().take_while(|c| dist < r * c.1 * ck).count() as u8);
             details.push(DetailDraw {
                 gpu: g,
                 u: [o.x, o.y, o.z, 0.0, b.ax[0], b.ax[1], b.ax[2], b.ax[3], b.ay[0], b.ay[1], b.ay[2], b.ay[3], lod[0], lod[1], lod[2], 0.0],
                 view: *view,
                 near: dist < 3000.0,
-                far: if o.length() + (b.radius as f32) < buildings::BFAR[0] { 0 } else if reach[0] == 0 { 2 } else { 1 },
+                far: if o.length() + (b.radius as f32) < buildings::BFAR[0] * ck { 0 } else if reach[0] == 0 { 2 } else { 1 },
                 reach,
+                settled,
+                radius: b.radius as f32,
                 casc: mask,
                 trees: tb.take(),
                 close: near,

@@ -415,10 +415,12 @@ fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, b
   let St = vec3f(dot(G.sun_dir.xyz, Tw), dot(G.sun_dir.xyz, Bw), dot(G.sun_dir.xyz, N));
   let sh = shadow_at(P, N);
   // Close up, windows get depth: a recess, and a room behind the glass.
-  let inner = f.aa * (1.0 - smoothstep(350.0, 750.0, dist));
+  // (out to distances the graphics settings' city detail scales)
+  let ck = city_k();
+  let inner = f.aa * (1.0 - smoothstep(350.0 * ck, 750.0 * ck, dist));
   var gl = f.glass;
   // Pane-by-pane tilt only where single panes are resolved; further out it would shimmer.
-  var tilt = f.tilt * f.aa * (1.0 - smoothstep(600.0, 1400.0, dist));
+  var tilt = f.tilt * f.aa * (1.0 - smoothstep(600.0 * ck, 1400.0 * ck, dist));
   var q = f.cell.xy;
   var gsun = sh;
   var room = vec3f(0.0);

@@ -14,6 +14,8 @@ const CLOUD_DIST: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// Share of each pixel's light that is ambient (sky and bounce), and the
 /// ambient occlusion that darkens it.
 pub(crate) const AMB: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Side of the sun's shadow map unless the graphics settings say otherwise
+/// (`Renderer::set_shadow_res`; the shaders read the size off the texture).
 const SHADOW_RES: u32 = 4096;
 pub const CASCADES: usize = 3;
 pub(crate) const MSAA: u32 = 4;
@@ -38,8 +40,6 @@ pub const MAX_FIELDS: usize = 8;
 pub const MAX_DYN_LIGHTS: usize = 8192;
 /// Shadow map layer that only the aircraft casts into, a few metres across.
 pub const PLANE_LAYER: usize = CASCADES;
-/// Resolution of the part of that layer it uses.
-pub const PLANE_SHADOW_RES: u32 = SHADOW_RES;
 /// Photorealistic 3D tiles drawn at once, and the side of their coverage mask
 /// (texels; it spans 2 * tiles3d::MASK_HALF metres).
 const MAX_PHOTO: u64 = 4096;
@@ -140,6 +140,12 @@ pub struct Globals {
     pub foam: [[f32; 4]; 16],
     /// the start screen: x = 1 while it shows (deep-space sky, no clouds)
     pub start: [f32; 4],
+    /// graphics settings (set by the renderer): cloud step length (1 = High),
+    /// render resolution scale, 1 / window width and height (the tonemap's output)
+    pub quality: [f32; 4],
+    /// graphics settings (graphics.rs): building LOD distance factor, tree
+    /// impostor distance factor, how far out trees are drawn (m); 0 = High
+    pub detail: [f32; 4],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
@@ -573,6 +579,12 @@ pub struct DetailDraw<'a> {
     /// how many height classes (buildings::HCLASS, tallest first) are close
     /// enough for their full geometry, their middle and their finest level
     pub reach: [u8; 3],
+    /// how many height classes (tallest first) have all their full geometry,
+    /// middle and finest level inside the distance where it starts to
+    /// dissolve, and done fading in (drawn without a discard, see `fs_whole`)
+    pub settled: [u8; 3],
+    /// the tile's bounding sphere
+    pub radius: f32,
     pub casc: u8,
     pub trees: Vec<TreeDraw>,
     pub close: Vec<NearDraw>,
@@ -712,6 +724,15 @@ pub struct Renderer {
     bg0_shadow: wgpu::BindGroup,
     lut_sky: wgpu::TextureView,
     shadow: Vec<wgpu::TextureView>,
+    /// side of the shadow map's layers (texels)
+    shadow_res: u32,
+    bg0_src: Bg0Src,
+    /// render resolution as a share of the window's (graphics settings)
+    scale: f32,
+    /// ambient occlusion on (off: the AO texture is cleared to unoccluded)
+    pub ao: bool,
+    /// cloud raymarch step length relative to High (clouds.wgsl)
+    pub cloud_step: f32,
     casc_ub: wgpu::Buffer,
     bg_casc: wgpu::BindGroup,
     bg_tileu: wgpu::BindGroup,
@@ -780,6 +801,8 @@ pub struct Renderer {
     tess_nidx: u32,
     cell_ibuf: wgpu::Buffer,
     p_build: wgpu::RenderPipeline,
+    /// the same without any discard in the fragment shader (`fs_whole`)
+    p_build_whole: wgpu::RenderPipeline,
     p_build_shadow: wgpu::RenderPipeline,
     p_obj: wgpu::RenderPipeline,
     p_obj_shadow: wgpu::RenderPipeline,
@@ -866,7 +889,84 @@ pub(crate) fn buf_res(binding: u32, b: &wgpu::Buffer, size: u64) -> wgpu::BindGr
     wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: b, offset: 0, size: wgpu::BufferSize::new(size) }) }
 }
 
-pub(crate) fn make_tex(device: &wgpu::Device, label: &str, w: u32, h: u32, d: u32, mips: u32, format: wgpu::TextureFormat, usage: wgpu::TextureUsages) -> wgpu::Texture {
+/// The sun's shadow map: one layer per cascade and one for the aircraft, as
+/// an array (for lookups) and one view per layer (to draw into).
+fn make_shadow(d: &wgpu::Device, res: u32) -> (wgpu::TextureView, Vec<wgpu::TextureView>) {
+    let tex = d.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow"),
+        size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: CASCADES as u32 + 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let all = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+    let layers = (0..CASCADES as u32 + 1)
+        .map(|i| tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: i, array_layer_count: Some(1), ..Default::default() }))
+        .collect();
+    (all, layers)
+}
+
+/// Everything in the main globals bind group (`bg0`) but the shadow map, so
+/// it can be made again when the shadow map is.
+struct Bg0Src {
+    layout: wgpu::BindGroupLayout,
+    ub: wgpu::Buffer,
+    trans: wgpu::TextureView,
+    ms: wgpu::TextureView,
+    sky: wgpu::TextureView,
+    noise: wgpu::TextureView,
+    wave: wgpu::TextureView,
+    s_clamp: wgpu::Sampler,
+    s_repeat: wgpu::Sampler,
+    s_shadow: wgpu::Sampler,
+    s_aniso: wgpu::Sampler,
+    vol: wgpu::TextureView,
+    det_alb: wgpu::TextureView,
+    det_nrm: wgpu::TextureView,
+    s_detail: wgpu::Sampler,
+    mask: wgpu::TextureView,
+    cs: wgpu::TextureView,
+    ocean: wgpu::TextureView,
+    shore: wgpu::TextureView,
+}
+
+impl Bg0Src {
+    fn make(&self, d: &wgpu::Device, shadow: &wgpu::TextureView) -> wgpu::BindGroup {
+        fn samp(b: u32, s: &wgpu::Sampler) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry { binding: b, resource: wgpu::BindingResource::Sampler(s) }
+        }
+        d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("globals"),
+            layout: &self.layout,
+            entries: &[
+                buf_res(0, &self.ub, 0),
+                tex_res(1, &self.trans),
+                tex_res(2, &self.ms),
+                tex_res(3, &self.sky),
+                tex_res(4, &self.noise),
+                tex_res(5, &self.wave),
+                samp(6, &self.s_clamp),
+                samp(7, &self.s_repeat),
+                tex_res(8, shadow),
+                samp(9, &self.s_shadow),
+                samp(10, &self.s_aniso),
+                tex_res(11, &self.vol),
+                tex_res(12, &self.det_alb),
+                tex_res(13, &self.det_nrm),
+                samp(14, &self.s_detail),
+                tex_res(15, &self.mask),
+                tex_res(16, &self.cs),
+                tex_res(17, &self.ocean),
+                tex_res(18, &self.shore),
+            ],
+        })
+    }
+}
+
+pub(crate) fn make_tex(device: &wgpu::Device,label: &str, w: u32, h: u32, d: u32, mips: u32, format: wgpu::TextureFormat, usage: wgpu::TextureUsages) -> wgpu::Texture {
     make_tex_ms(device, label, w, h, d, mips, format, usage, 1)
 }
 #[allow(clippy::too_many_arguments)]
@@ -1231,21 +1331,8 @@ impl Renderer {
             .collect();
         // No cloud shadow (all zeros) for the passes that draw it or run before it.
         let no_cs = make_tex(d, "no cloud shadow", 1, 1, 1, 1, CS_FMT, rt).create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        let shadow_tex = d.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow"),
-            size: wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: CASCADES as u32 + 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH,
-            usage: rt,
-            view_formats: &[],
-        });
         let arr = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        let shadow_all = arr(&shadow_tex);
-        let shadow: Vec<_> = (0..CASCADES as u32 + 1)
-            .map(|i| shadow_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: i, array_layer_count: Some(1), ..Default::default() }))
-            .collect();
+        let (shadow_all, shadow) = make_shadow(d, SHADOW_RES);
         let dummy_depth = arr(&make_tex(d, "dummy depth", 1, 1, 1, 1, DEPTH, rt));
         let vol3 = |label: &str, n: [u32; 3]| {
             d.create_texture(&wgpu::TextureDescriptor {
@@ -1342,6 +1429,12 @@ impl Renderer {
             })
         };
         let bg0 = make_bg0(&lut_sky, &lut_trans, &lut_ms, &shadow_all, &vol_light, &photo_mask, &cs_mix);
+        // What `bg0` is made of, to make it again for a new shadow map.
+        let bg0_src = Bg0Src {
+            layout: l0.clone(), ub: globals_ub.clone(), trans: lut_trans.clone(), ms: lut_ms.clone(), sky: lut_sky.clone(), noise: noise.clone(), wave: wave.clone(),
+            s_clamp: s_clamp.clone(), s_repeat: s_repeat.clone(), s_shadow: s_shadow.clone(), s_aniso: s_aniso.clone(), vol: vol_light.clone(), det_alb: det_alb.clone(), det_nrm: det_nrm.clone(),
+            s_detail: s_detail.clone(), mask: photo_mask.clone(), cs: cs_mix.clone(), ocean: ocean.view.clone(), shore: shore.view.clone(),
+        };
         // Variant for passes that render into the LUTs / shadow map / smoke volume / photo mask / cloud shadow themselves.
         let bg0_pre = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
         let bg0_shadow = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &photo_mask, &no_cs);
@@ -1567,7 +1660,7 @@ impl Renderer {
                 } else if shadow {
                     None
                 } else {
-                    Some(wgpu::FragmentState { module: m, entry_point: Some(match mode { 3 => "fs_card", 5 => "fs_solid", 7 => "fs_cut", 11 => "fs_skin", _ => "fs" }), compilation_options: Default::default(), targets: &targets })
+                    Some(wgpu::FragmentState { module: m, entry_point: Some(match mode { 3 => "fs_card", 5 => "fs_solid", 7 => "fs_cut", 11 => "fs_skin", 14 => "fs_whole", _ => "fs" }), compilation_options: Default::default(), targets: &targets })
                 },
                 multiview_mask: None,
                 cache: None,
@@ -1599,6 +1692,7 @@ impl Renderer {
         let p_terrain_tess = geom("terrain tess", Some(&l_tile), &m_terrain, &[], 8);
         let p_terrain_cells = geom("terrain cells", Some(&l_tile), &m_terrain, &[], 9);
         let p_build = geom("build", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 0);
+        let p_build_whole = geom("build whole", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 14);
         const A_PHOTO: [wgpu::VertexAttribute; 3] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: VF::Float32x2, offset: 12, shader_location: 1 },
@@ -1787,7 +1881,7 @@ impl Renderer {
         let fluid = crate::fluid::FluidGpu::new(d, &l0, common, &vol_acc);
 
         let egui = egui_wgpu::Renderer::new(d, wgpu::TextureFormat::Rgba8Unorm, egui_wgpu::RendererOptions::default());
-        let targets = Self::make_targets(d, &config, &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
+        let targets = Self::make_targets(d, &config, (config.width, config.height), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
         let fluid_t = fluid.draw_targets(d, &targets.depth, config.width, config.height);
         // The transmittance and multi-scatter tables depend only on the planet
         // and the haze: bake them now, and again whenever the haze changes.
@@ -1804,19 +1898,21 @@ impl Renderer {
         Ok(Self {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
-            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
+            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
-            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
+            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device,
         })
     }
 
     #[allow(clippy::too_many_arguments)]
     fn make_targets(
-        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
+        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
         l_post: &wgpu::BindGroupLayout, l_pdraw: &wgpu::BindGroupLayout, l_glass: &wgpu::BindGroupLayout, psim_ub: &wgpu::Buffer, pbuf: &wgpu::Buffer, black: &wgpu::TextureView,
     ) -> Targets {
-        let (w, h) = (config.width, config.height);
+        // Everything is drawn at the render resolution (w, h); the tonemap
+        // scales it to the window's, where the UI goes on top.
+        let (ow, oh) = (config.width, config.height);
         let rt = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let ms = |label: &str, f| view(&make_tex_ms(d, label, w, h, 1, 1, f, rt, MSAA));
         let (color_ms, aux_ms, amb_ms, depth_ms) = (ms("color ms", HDR), ms("aux ms", HDR), ms("amb ms", AMB), ms("depth ms", DEPTH));
@@ -1835,9 +1931,9 @@ impl Renderer {
         let cloud_hist = [view(&make_tex(d, "cloud hist 0", cw, ch, 1, 1, HDR, rt)), view(&make_tex(d, "cloud hist 1", cw, ch, 1, 1, HDR, rt))];
         let bloom_tex = make_tex(d, "bloom", (w / 2).max(64), (h / 2).max(64), 1, BLOOM_MIPS, HDR, rt);
         let bloom: Vec<_> = (0..BLOOM_MIPS).map(|i| bloom_tex.create_view(&wgpu::TextureViewDescriptor { base_mip_level: i, mip_level_count: Some(1), ..Default::default() })).collect();
-        let ldr_tex = make_tex(d, "ldr", w, h, 1, 1, wgpu::TextureFormat::Rgba8Unorm, rt | wgpu::TextureUsages::COPY_SRC);
+        let ldr_tex = make_tex(d, "ldr", ow, oh, 1, 1, wgpu::TextureFormat::Rgba8Unorm, rt | wgpu::TextureUsages::COPY_SRC);
         let ldr = view(&ldr_tex);
-        let logo_tex = make_tex(d, "logo", w, h, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let logo_tex = make_tex(d, "logo", ow, oh, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         let logo = view(&logo_tex);
         let taa = [view(&make_tex(d, "taa 0", w, h, 1, 1, HDR, rt)), view(&make_tex(d, "taa 1", w, h, 1, 1, HDR, rt))];
         let bg = |l: &wgpu::BindGroupLayout, e: &[wgpu::BindGroupEntry]| d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: l, entries: e });
@@ -1879,12 +1975,60 @@ impl Renderer {
         self.config.width = w;
         self.config.height = h;
         self.surface.configure(&self.device, &self.config);
+        self.remake_targets();
+    }
+
+    /// The size everything is drawn at before the tonemap: the window's
+    /// scaled by the render resolution setting.
+    pub fn render_size(&self) -> (u32, u32) {
+        let max = self.device.limits().max_texture_dimension_2d;
+        let s = |v: u32| ((v as f32 * self.scale).round() as u32).clamp(1, max);
+        (s(self.config.width), s(self.config.height))
+    }
+
+    fn remake_targets(&mut self) {
         self.cloud_hist_ok = false;
         self.cshadow.ok = false;
         self.taa_hist_ok = false;
         self.logo_key = None;
-        self.targets = Self::make_targets(&self.device, &self.config, &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
+        let (w, h) = self.render_size();
+        self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
         self.fluid_t = self.fluid.draw_targets(&self.device, &self.targets.depth, w, h);
+    }
+
+    /// Render resolution as a share of the window's (graphics settings).
+    pub fn set_scale(&mut self, s: f32) {
+        let s = s.clamp(crate::graphics::SCALE_MIN, crate::graphics::SCALE_MAX);
+        if s != self.scale {
+            let old = self.render_size();
+            self.scale = s;
+            if self.render_size() != old {
+                self.remake_targets();
+            }
+        }
+    }
+
+    pub fn shadow_res(&self) -> u32 {
+        self.shadow_res
+    }
+
+    /// A new sun shadow map of this side (texels).
+    pub fn set_shadow_res(&mut self, res: u32) {
+        let res = res.clamp(256, self.device.limits().max_texture_dimension_2d);
+        if res != self.shadow_res {
+            let (all, layers) = make_shadow(&self.device, res);
+            self.bg0 = self.bg0_src.make(&self.device, &all);
+            self.shadow = layers;
+            self.shadow_res = res;
+        }
+    }
+
+    pub fn set_vsync(&mut self, on: bool) {
+        let mode = if on { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+        }
     }
 
     pub fn upload_tile(&self, t: &crate::sources::TileData) -> TileGpu {
@@ -2071,6 +2215,7 @@ impl Renderer {
         f.g.vol_u[3] = if smoke { 1.0 } else { 0.0 };
         self.ground_mats.poll(&self.device, q);
         f.g.det = self.ground_mats.params;
+        f.g.quality = [self.cloud_step, self.scale, 1.0 / self.config.width.max(1) as f32, 1.0 / self.config.height.max(1) as f32];
         let cs_full = self.cshadow.prepare(&mut f.g);
         q.write_buffer(&self.cshadow.mix_ub, 0, &self.cshadow.mix_bytes());
         q.write_buffer(&self.globals_ub, 0, bytemuck::bytes_of(&f.g));
@@ -2216,79 +2361,105 @@ impl Renderer {
         let solids = |rp: &mut wgpu::RenderPass, c: Option<usize>| {
             let shadow = c.is_some();
             let bit = c.map(|c| 1u8 << c).unwrap_or(0);
-            rp.set_pipeline(if shadow { &self.p_build_shadow } else { &self.p_build });
-            for (i, dd) in f.details.iter().take(n_builds).enumerate() {
-                let g = dd.gpu;
-                let (mid, fine) = (dd.u[12] > 0.0, dd.u[13] > 0.0);
-                // Index runs (start, end, instance); the instance index tells the
-                // shader the level of detail in its low 3 bits: 0 always drawn,
-                // 1 middle, 2 finest, 3 full geometry dissolving out with distance,
-                // 4 far stand-ins dissolving in; above them, 4x the distance scale
-                // of the run's height class (buildings::HCLASS).
-                let mut runs = [(0u32, 0u32, 0u32); 20];
-                let mut nr = 0;
-                let mut push = |r: (u32, u32, u32)| {
-                    if r.1 > r.0 {
-                        runs[nr] = r;
-                        nr += 1;
-                    }
-                };
-                // Level `r` (0 base, 1 middle, 2 finest, 3 far stand-ins): its start,
-                // and the end of height class `c` in it.
-                let start = [0, g.n_main, g.n_det, g.n_far];
-                let end = |r: usize, k: usize| if k == 0 { start[r] } else { g.cls[r][k - 1] };
-                // The first `k` height classes of level `r`, one draw each.
-                let classes = |push: &mut dyn FnMut((u32, u32, u32)), r: usize, k: usize, lvl: u32| {
-                    for c in 0..k {
-                        push((end(r, c), end(r, c + 1), lvl | ((crate::buildings::HCLASS[c].1 * 4.0) as u32) << 3));
-                    }
-                };
-                let (k_full, k_mid, k_fine) = (dd.reach[0] as usize, if mid { dd.reach[1] as usize } else { 0 }, if fine { dd.reach[2] as usize } else { 0 });
-                match c {
-                    Some(_) if dd.casc & bit == 0 => {}
-                    Some(2) => push((g.n_far, g.n_far_tall, 0)),
-                    // The second cascade swaps to the stand-ins at their usual distance.
-                    Some(1) if k_full < crate::buildings::HCLASS.len() => {
-                        push((g.n_bld, g.n_main, 0));
-                        push((g.n_far, g.n_idx, 0));
-                    }
-                    Some(1) => push((0, g.n_main, 0)),
-                    Some(_) => {
-                        push((0, g.n_main, 0));
-                        push((g.n_main, end(1, k_mid), 1));
-                        push((g.n_det, if dd.u[13] > 0.5 { end(2, k_fine) } else { g.n_det }, 2));
-                    }
-                    None if !dd.view => {}
-                    None => match dd.far {
-                        0 => {
-                            push((0, g.n_main, 0));
-                            classes(&mut push, 1, k_mid, 1);
-                            classes(&mut push, 2, k_fine, 2);
+            // The 3D tiles zone (its radius on the ground, centre and up), where
+            // the mesh may stand in for buildings and the shader cuts them away.
+            let zone = (f.g.photo[0] > 0.0 && f.g.photo[2] > 0.0).then(|| {
+                let c = glam::Vec3::from_slice(&f.g.photo_c[..3]);
+                (f.g.photo[0], c, (c - glam::Vec3::from_slice(&f.g.planet[..3])).normalize_or_zero())
+            });
+            // In view, the runs nothing can cut away or dissolve go first with
+            // the pipeline that has no discard (early depth testing hides the
+            // facades behind them before they are shaded); the rest follow.
+            for pass in if shadow { 1..2 } else { 0..2 } {
+                rp.set_pipeline(match (shadow, pass) {
+                    (true, _) => &self.p_build_shadow,
+                    (false, 0) => &self.p_build_whole,
+                    _ => &self.p_build,
+                });
+                for (i, dd) in f.details.iter().take(n_builds).enumerate() {
+                    let g = dd.gpu;
+                    let (mid, fine) = (dd.u[12] > 0.0, dd.u[13] > 0.0);
+                    // Index runs (start, end, instance, whole); the instance index tells
+                    // the shader the level of detail in its low 3 bits: 0 always drawn,
+                    // 1 middle, 2 finest, 3 full geometry dissolving out with distance,
+                    // 4 far stand-ins dissolving in; above them, 4x the distance scale
+                    // of the run's height class (buildings::HCLASS). Whole runs have
+                    // nothing cut away this frame (DetailDraw::settled).
+                    let mut runs = [(0u32, 0u32, 0u32, false); 24];
+                    let mut nr = 0;
+                    let mut push = |r: (u32, u32, u32, bool)| {
+                        if r.1 > r.0 {
+                            runs[nr] = r;
+                            nr += 1;
                         }
-                        1 => {
-                            classes(&mut push, 0, k_full, 3);
-                            push((g.n_bld, g.n_main, 0));
-                            classes(&mut push, 1, k_mid, 1);
-                            classes(&mut push, 2, k_fine, 2);
-                            classes(&mut push, 3, k_full, 4);
-                            // Classes past their full geometry's reach: stand-ins only.
-                            push((end(3, k_full), g.n_idx, 0));
+                    };
+                    // Level `r` (0 base, 1 middle, 2 finest, 3 far stand-ins): its start,
+                    // and the end of height class `c` in it.
+                    let start = [0, g.n_main, g.n_det, g.n_far];
+                    let end = |r: usize, k: usize| if k == 0 { start[r] } else { g.cls[r][k - 1] };
+                    let in_zone = zone.is_some_and(|(r, zc, up)| {
+                        let q = glam::Vec3::new(dd.u[0], dd.u[1], dd.u[2]) - zc;
+                        (q - up * q.dot(up)).length() < r + dd.radius + 50.0
+                    });
+                    // Nothing of the tile is fading in, nor inside the 3D tiles zone.
+                    let base = dd.u[14] >= 1.0 && !in_zone;
+                    // Height classes `from..to` of level `r`, one draw each; the first
+                    // `whole` of them are whole.
+                    let classes = |push: &mut dyn FnMut((u32, u32, u32, bool)), r: usize, from: usize, to: usize, lvl: u32, whole: u8| {
+                        for c in from..to {
+                            push((end(r, c), end(r, c + 1), lvl | ((crate::buildings::HCLASS[c].1 * 4.0) as u32) << 3, base && c < whole as usize));
                         }
-                        _ => {
-                            push((g.n_bld, g.n_main, 0));
-                            push((g.n_far, g.n_idx, 0));
+                    };
+                    let (k_full, k_mid, k_fine) = (dd.reach[0] as usize, if mid { dd.reach[1] as usize } else { 0 }, if fine { dd.reach[2] as usize } else { 0 });
+                    let [s_full, s_mid, s_fine] = dd.settled;
+                    match c {
+                        Some(_) if dd.casc & bit == 0 => {}
+                        Some(2) => push((g.n_far, g.n_far_tall, 0, false)),
+                        // The second cascade swaps to the stand-ins at their usual distance.
+                        Some(1) if k_full < crate::buildings::HCLASS.len() => {
+                            push((g.n_bld, g.n_main, 0, false));
+                            push((g.n_far, g.n_idx, 0, false));
                         }
-                    },
-                }
-                let runs = &runs[..nr];
-                if runs.is_empty() {
-                    continue;
-                }
-                rp.set_bind_group(1, &g.bind, &[i as u32 * 256]);
-                rp.set_vertex_buffer(0, g.vbuf.slice(..));
-                rp.set_index_buffer(g.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                for r in runs {
-                    rp.draw_indexed(r.0..r.1, 0, r.2..r.2 + 1);
+                        Some(1) => push((0, g.n_main, 0, false)),
+                        Some(_) => {
+                            push((0, g.n_main, 0, false));
+                            push((g.n_main, end(1, k_mid), 1, false));
+                            push((g.n_det, if dd.u[13] > 0.5 { end(2, k_fine) } else { g.n_det }, 2, false));
+                        }
+                        None if !dd.view => {}
+                        None => match dd.far {
+                            0 => {
+                                push((0, g.n_main, 0, base));
+                                classes(&mut push, 1, 0, k_mid, 1, s_mid);
+                                classes(&mut push, 2, 0, k_fine, 2, s_fine);
+                            }
+                            1 => {
+                                classes(&mut push, 0, 0, k_full, 3, s_full);
+                                push((g.n_bld, g.n_main, 0, base));
+                                classes(&mut push, 1, 0, k_mid, 1, s_mid);
+                                classes(&mut push, 2, 0, k_fine, 2, s_fine);
+                                // Stand-ins of the classes wholly short of their dissolve
+                                // would only be discarded pixel by pixel: left out.
+                                classes(&mut push, 3, (s_full as usize).min(k_full), k_full, 4, 0);
+                                // Classes past their full geometry's reach: stand-ins only.
+                                push((end(3, k_full), g.n_idx, 0, base));
+                            }
+                            _ => {
+                                push((g.n_bld, g.n_main, 0, base));
+                                push((g.n_far, g.n_idx, 0, base));
+                            }
+                        },
+                    }
+                    let mut runs = runs[..nr].iter().filter(|r| shadow || r.3 == (pass == 0)).peekable();
+                    if runs.peek().is_none() {
+                        continue;
+                    }
+                    rp.set_bind_group(1, &g.bind, &[i as u32 * 256]);
+                    rp.set_vertex_buffer(0, g.vbuf.slice(..));
+                    rp.set_index_buffer(g.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    for r in runs {
+                        rp.draw_indexed(r.0..r.1, 0, r.2..r.2 + 1);
+                    }
                 }
             }
             if let Some(lib) = &self.tree_lib {
@@ -2564,7 +2735,7 @@ impl Renderer {
             // The aircraft's own fine shadow map.
             let mut rp = enc.begin_render_pass(&pass_desc(&[], Some(depth_att(&self.shadow[PLANE_LAYER], 1.0))));
             if f.g.pshadow[3] > 0.0 {
-                rp.set_viewport(0.0, 0.0, PLANE_SHADOW_RES as f32, PLANE_SHADOW_RES as f32, 0.0, 1.0);
+                rp.set_viewport(0.0, 0.0, self.shadow_res as f32, self.shadow_res as f32, 0.0, 1.0);
                 rp.set_bind_group(0, &self.bg0_pre, &[]);
                 rp.set_bind_group(2, &self.bg_casc, &[PLANE_LAYER as u32 * 256]);
                 for (i, o) in f.objs.iter().take(n_objs).enumerate() {
@@ -2663,8 +2834,14 @@ impl Renderer {
             rp.set_bind_group(1, bg1, &[]);
             rp.draw(0..3, 0..1);
         };
-        full(&mut enc, &t.ao_raw, true, &self.p_gtao, &t.bg_gtao);
-        full(&mut enc, &t.ao, true, &self.p_ao_blur, &t.bg_ao_blur);
+        if self.ao {
+            full(&mut enc, &t.ao_raw, true, &self.p_gtao, &t.bg_gtao);
+            full(&mut enc, &t.ao, true, &self.p_ao_blur, &t.bg_ao_blur);
+        } else {
+            // No occlusion anywhere.
+            let white = wgpu::RenderPassColorAttachment { view: &t.ao, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store } };
+            drop(enc.begin_render_pass(&pass_desc(&[Some(white)], None)));
+        }
         full(&mut enc, &t.hdr, true, &self.p_composite, &t.bg_composite);
         // Lights over the lit scene, under the clouds.
         if n_fields > 0 || n_dyn > 0 {
@@ -2732,7 +2909,7 @@ impl Renderer {
         if f.objs.iter().take(n_objs).any(|o| o.glass) {
             // The windows bend what is seen through them, so they read the
             // scene from a copy. The depth stays read-only: it is sampled too.
-            let (w, h) = (self.config.width.max(1), self.config.height.max(1));
+            let (w, h) = (t.hdr_tex.width(), t.hdr_tex.height());
             enc.copy_texture_to_texture(t.hdr_tex.as_image_copy(), t.scene_tex.as_image_copy(), wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
             let ds = wgpu::RenderPassDepthStencilAttachment { view: &t.depth, depth_ops: None, stencil_ops: None };
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], Some(ds)));

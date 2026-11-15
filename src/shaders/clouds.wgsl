@@ -214,10 +214,13 @@ fn depth_match(a: f32, b: f32) -> f32 {
   if (march) {
     // Steps grow with distance (a pixel covers more ground further out), and
     // stretch while the ray is in clear air.
+    // (the graphics settings scale the steps: longer for speed, shorter for detail)
+    let qs = select(clamp(G.quality.x, 0.5, 2.0), 1.0, G.quality.x <= 0.0);
+    let n_max = i32(200.0 / qs);
     var t = ta;
     var clear = 0.0;
-    for (var i = 0; i < 200; i++) {
-      let dt = clamp(t * 0.016, 40.0, 2500.0) * (1.0 + clear);
+    for (var i = 0; i < n_max; i++) {
+      let dt = clamp(t * 0.016, 40.0, 2500.0) * (1.0 + clear) * qs;
       let ts = t + dt * jit;
       t += dt;
       if (alto_on && ts > atm_) {

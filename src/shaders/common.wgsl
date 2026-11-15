@@ -65,6 +65,12 @@ struct Globals {
   foam: array<vec4f, 16>,
   // The start screen: x = 1 while it shows (deep-space sky, no clouds).
   start: vec4f,
+  // Graphics settings: cloud step length (1 = High), render resolution scale,
+  // 1 / window width and height (what the tonemap writes).
+  quality: vec4f,
+  // Graphics settings: building level-of-detail distance factor, tree
+  // impostor distance factor, how far out trees are drawn (m). 0 = High.
+  detail: vec4f,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -127,6 +133,12 @@ struct FsIn { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
   return FsIn(vec4f(p * 2.0 - 1.0, 0.0, 1.0), vec2f(p.x, 1.0 - p.y));
 }
 
+// The graphics settings' factor on the distances buildings change level of
+// detail at, and on the distance trees turn into impostors at (1 = High).
+fn city_k() -> f32 { return select(G.detail.x, 1.0, G.detail.x <= 0.0); }
+fn tree_imp_k() -> f32 { return select(G.detail.y, 1.0, G.detail.y <= 0.0); }
+// How far out trees are drawn (m).
+fn tree_far() -> f32 { return select(G.detail.z, 1e9, G.detail.z <= 0.0); }
 fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
 fn hash1(p: f32) -> f32 { return fract(sin(p * 127.1) * 43758.5453); }
 fn hash2(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453); }
@@ -610,9 +622,10 @@ fn plane_shadow(P: vec3f, N: vec3f) -> f32 {
   let q = G.pshadow_vp * vec4f(P + N * tex * 1.5 + G.sun_dir.xyz * tex, 1.0);
   let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
   if (any(uv <= vec2f(0.002)) || any(uv >= vec2f(0.998)) || q.z <= 0.0 || q.z >= 1.0) { return 1.0; }
+  let texel = 1.0 / f32(textureDimensions(t_shadow).x);
   var sh = 0.0;
   for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
-    sh += textureSampleCompareLevel(t_shadow, s_shadow, uv * G.pshadow.z + vec2f(f32(i), f32(j)) / 4096.0, 3, q.z - G.pshadow.y);
+    sh += textureSampleCompareLevel(t_shadow, s_shadow, uv * G.pshadow.z + vec2f(f32(i), f32(j)) * texel, 3, q.z - G.pshadow.y);
   } }
   return sh / 9.0;
 }
@@ -623,6 +636,7 @@ fn shadow_at(P: vec3f, N: vec3f) -> f32 {
 fn shadow_world(P: vec3f, N: vec3f) -> f32 {
   var acc = 0.0;
   var rem = 1.0;
+  let texel = 1.0 / f32(textureDimensions(t_shadow).x);
   for (var c = 0; c < 3; c++) {
     let tex = G.csm[c];
     let q = G.shadow_vp[c] * vec4f(P + N * tex * 1.8 + G.sun_dir.xyz * tex * 0.8, 1.0);
@@ -631,7 +645,7 @@ fn shadow_world(P: vec3f, N: vec3f) -> f32 {
     if (e <= 0.0 || q.z <= 0.0 || q.z >= 1.0) { continue; }
     var sh = 0.0;
     for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
-      sh += textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(f32(i), f32(j)) / 4096.0, c, q.z - 0.00003);
+      sh += textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(f32(i), f32(j)) * texel, c, q.z - 0.00003);
     } }
     let w = smoothstep(0.0, 0.07, e);
     acc += rem * w * sh / 9.0;
