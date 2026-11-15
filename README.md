@@ -1,9 +1,21 @@
-Open world flight simulator in pure rust created by Claude Fable 5.2 and Opus 5.5
 
-# Demo
+<div align="center">
+
+# FableFlight
+
+### An Open-World Flight Simulator Built in Pure Rust
+
+Explore the skies with real-world weather, live air traffic, and an immersive open-world flying experience.
+
+*Created with Claude Fable 5.2 & Opus 5.5*
+
+<br>
+
+[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/9akYzMRBc6)
+[![Rust](https://img.shields.io/badge/Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+<br>
 [Demo](https://github.com/user-attachments/assets/4f8833da-13c0-4d20-a50b-c0acf2d88df1)
-
-
+</div>
 
 # Compiling
 * Install rust
