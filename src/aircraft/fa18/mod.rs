@@ -324,6 +324,7 @@ pub static SPEC: Spec = Spec {
     name: "F/A-18C Hornet",
     keys: &["fa18", "f18", "fa-18", "f/a-18", "hornet"],
     blurb: "Twin-engine carrier fighter, 15.5 t. Fly-by-wire holds it to 7.5 g; Space for afterburner, / speedbrake. 135 kt approach.",
+    still: include_bytes!("../../../assets/aircraft/fa18.png"),
     build,
     groups: [("fuselage", 6_500.0), ("tail", 900.0), ("left wing", 1_200.0), ("right wing", 1_200.0), ("nose section", 900.0), ("radome", 60.0), ("gear", 500.0)],
     span: W_X1,
