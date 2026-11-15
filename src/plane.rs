@@ -1273,7 +1273,11 @@ impl Plane {
                     // No blades left: nothing to turn.
                     self.prop_rate += (0.0 - self.prop_rate) * (dt * 2.0).min(1.0);
                 } else if w > 1.0 || drive > 40.0 {
-                    self.prop_rate = (w + (drive - Self::friction(pe, w)) / pe.prop_i * dt).max(0.0);
+                    // Not firing, each cylinder in turn compresses its charge for
+                    // nothing: a drag that matters slowly turning (it stops a shut-down
+                    // engine in a couple of seconds) but not windmilling in a glide.
+                    let comp = if self.running { 0.0 } else { 40.0 * (1.0 - w / 90.0).clamp(0.0, 1.0) };
+                    self.prop_rate = (w + (drive - Self::friction(pe, w) - comp) / pe.prop_i * dt).max(0.0);
                 } else {
                     // Stopped: the compression holds it until the air pushes harder.
                     self.prop_rate = 0.0;
@@ -2242,11 +2246,11 @@ mod tests {
         println!("idle {:.0} rpm, {:.1} l/h", rpm(&p), p.fuel_flow * 3600.0 / 0.72);
         assert!(p.running && rpm(&p) > 500.0 && rpm(&p) < 1100.0, "{}", rpm(&p));
         assert!(p.fuel < full);
-        // Mixture to cut-off: it dies at once and the propeller runs down to a stop.
+        // Mixture to cut-off: it dies at once and the propeller stops within seconds.
         p.stop_engine();
         run(&mut p, 1.0, &idle);
         assert!(!p.running && p.fuel_flow == 0.0);
-        run(&mut p, 20.0, &idle);
+        run(&mut p, 4.0, &idle);
         assert!(rpm(&p) < 5.0, "{}", rpm(&p));
 
         // In the air, the tanks run dry: the engine quits and the propeller windmills.
