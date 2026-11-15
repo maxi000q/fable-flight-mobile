@@ -68,6 +68,11 @@ impl AxisAct {
         matches!(self, AxisAct::Pitch | AxisAct::Roll | AxisAct::Yaw)
     }
 
+    /// The dead zone a new binding starts with.
+    pub fn default_dead(self) -> f32 {
+        if self.centred() { 0.05 } else { 0.02 }
+    }
+
     fn parse(s: &str) -> Option<AxisAct> {
         AxisAct::ALL.into_iter().find(|a| a.id() == s)
     }
@@ -146,6 +151,9 @@ pub struct AxisBind {
     pub code: u32,
     /// +1 or -1: the way that means "more"
     pub sign: f32,
+    /// dead zone: round the centre of a stick or pedals, at the idle end
+    /// of a throttle or brake (fraction of the travel)
+    pub dead: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -180,6 +188,8 @@ pub struct Bindings {
     pub capture: Option<Capture>,
     /// the axes when the capture began, to see which one moves
     baseline: HashMap<(Uuid, u32), f32>,
+    /// devices a preset has been offered to on its own (once each)
+    auto_done: std::collections::HashSet<Uuid>,
 }
 
 impl Bindings {
@@ -244,7 +254,7 @@ impl Bindings {
             let d = v - base;
             if d.abs() > 0.6 {
                 self.axes.retain(|_, b| !(b.dev == dev && b.code == code));
-                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign: d.signum() });
+                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign: d.signum(), dead: a.default_dead() });
                 self.capture = None;
             }
         }
@@ -282,21 +292,23 @@ impl Bindings {
     pub fn axis(&self, a: AxisAct) -> Option<f64> {
         let b = self.axes.get(&a)?;
         let v = (*self.axis_now.get(&(b.dev, b.code))? * b.sign) as f64;
+        // The dead zone, the rest of the travel stretched so there is no step out of it.
+        let d = (b.dead as f64).clamp(0.0, 0.5);
         Some(if a.centred() {
-            let d = 0.04;
             if v.abs() < d { 0.0 } else { v.signum() * (v.abs() - d) / (1.0 - d) }
         } else {
-            ((v + 1.0) * 0.5).clamp(0.0, 1.0)
+            let f = ((v + 1.0) * 0.5).clamp(0.0, 1.0);
+            if f < d { 0.0 } else { (f - d) / (1.0 - d) }
         })
     }
 
     /// What a binding reads as, for the bindings page.
     pub fn describe_axis(&self, a: AxisAct) -> Option<String> {
-        self.axes.get(&a).map(|b| crate::i18n::t!("{} · axis {}", "{} · axe {}", short(&b.name), b.code))
+        self.axes.get(&a).map(|b| crate::i18n::t!("{} · axis {}", "{} · axe {}", short(&b.name), axis_name(b.code)))
     }
 
     pub fn describe_button(&self, id: &str) -> Option<String> {
-        self.buttons.get(id).map(|b| crate::i18n::t!("{} · button {}", "{} · bouton {}", short(&b.name), b.code))
+        self.buttons.get(id).map(|b| crate::i18n::t!("{} · button {}", "{} · bouton {}", short(&b.name), button_name(b.code)))
     }
 
     // ------------------------------------------------------------ the file
@@ -322,22 +334,23 @@ impl Bindings {
             }
         }
         let dev = |v: &serde_json::Value| -> Option<(Uuid, String, u32)> {
-            let hex = v["device"].as_str()?;
-            let mut u = [0u8; 16];
-            for (i, b) in u.iter_mut().enumerate() {
-                *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
-            }
-            Some((u, v["name"].as_str().unwrap_or("").to_string(), v["code"].as_u64()? as u32))
+            Some((uuid_from_hex(v["device"].as_str()?)?, v["name"].as_str().unwrap_or("").to_string(), v["code"].as_u64()? as u32))
         };
         for v in j["axes"].as_array().into_iter().flatten() {
             if let (Some(a), Some((dev, name, code))) = (v["action"].as_str().and_then(AxisAct::parse), dev(v)) {
                 let sign = if v["sign"].as_f64().unwrap_or(1.0) < 0.0 { -1.0 } else { 1.0 };
-                self.axes.insert(a, AxisBind { dev, name, code, sign });
+                let dead = v["dead"].as_f64().map(|d| d.clamp(0.0, 0.5) as f32).unwrap_or(a.default_dead());
+                self.axes.insert(a, AxisBind { dev, name, code, sign, dead });
             }
         }
         for v in j["buttons"].as_array().into_iter().flatten() {
             if let (Some(a), Some((dev, name, code))) = (v["action"].as_str().and_then(action), dev(v)) {
                 self.buttons.insert(a.id, ButtonBind { dev, name, code });
+            }
+        }
+        for v in j["presets_applied"].as_array().into_iter().flatten() {
+            if let Some(u) = v.as_str().and_then(uuid_from_hex) {
+                self.auto_done.insert(u);
             }
         }
         self.tidy();
@@ -349,11 +362,13 @@ impl Bindings {
         for (id, k) in &self.keys {
             keys.insert(id.to_string(), k.map(|k| serde_json::Value::String(format!("{k:?}"))).unwrap_or(serde_json::Value::Null));
         }
-        let mut axes: Vec<_> = self.axes.iter().map(|(a, b)| serde_json::json!({ "action": a.id(), "device": hex(&b.dev), "name": b.name, "code": b.code, "sign": b.sign })).collect();
+        let mut axes: Vec<_> = self.axes.iter().map(|(a, b)| serde_json::json!({ "action": a.id(), "device": hex(&b.dev), "name": b.name, "code": b.code, "sign": b.sign, "dead": b.dead })).collect();
         let mut buttons: Vec<_> = self.buttons.iter().map(|(id, b)| serde_json::json!({ "action": id, "device": hex(&b.dev), "name": b.name, "code": b.code })).collect();
         axes.sort_by_key(|v| v["action"].to_string());
         buttons.sort_by_key(|v| v["action"].to_string());
-        serde_json::json!({ "keys": keys, "axes": axes, "buttons": buttons })
+        let mut done: Vec<String> = self.auto_done.iter().map(hex).collect();
+        done.sort();
+        serde_json::json!({ "keys": keys, "axes": axes, "buttons": buttons, "presets_applied": done })
     }
 
     pub fn save(&self) {
@@ -374,9 +389,147 @@ impl Bindings {
     }
 }
 
-/// "Logitech Extreme 3D" out of "Logitech Logitech Extreme 3D Pro (USB)…".
+// ------------------------------------------------------------ presets
+
+/// The device codes as gilrs gives them: the evdev event type in the high
+/// half (3 for an axis, 1 for a key), its code in the low half.
+const ABS: u32 = 3 << 16;
+const BTN: u32 = 1 << 16;
+const ABS_X: u32 = ABS;
+const ABS_Y: u32 = ABS + 1;
+const ABS_Z: u32 = ABS + 2;
+const ABS_RZ: u32 = ABS + 5;
+const ABS_THROTTLE: u32 = ABS + 6;
+const BTN_TRIGGER: u32 = BTN + 0x120;
+const BTN_THUMB: u32 = BTN + 0x121;
+const BTN_THUMB2: u32 = BTN + 0x122;
+const BTN_TOP: u32 = BTN + 0x123;
+const BTN_TOP2: u32 = BTN + 0x124;
+
+/// A ready-made set of bindings for a kind of device.
+pub struct Preset {
+    en: &'static str,
+    fr: &'static str,
+    /// lower-case pieces of a device name it is put on by itself (none: only by hand)
+    names: &'static [&'static str],
+    /// (axis, code, sign, dead zone)
+    axes: &'static [(AxisAct, u32, f32, f32)],
+    /// (action id, button code)
+    buttons: &'static [(&'static str, u32)],
+}
+
+impl Preset {
+    pub fn label(&self) -> &'static str {
+        if crate::i18n::is_fr() { self.fr } else { self.en }
+    }
+}
+
+pub const PRESETS: &[Preset] = &[
+    // Measured on the stick itself: Y pitch, X roll (reversed), the twist (Z)
+    // rudder, the throttle wheel on the base on Rz.
+    Preset {
+        en: "Turtle Beach VelocityOne Flightstick",
+        fr: "Turtle Beach VelocityOne Flightstick",
+        names: &["velocityone flightstick"],
+        axes: &[(AxisAct::Pitch, ABS_Y, 1.0, 0.05), (AxisAct::Roll, ABS_X, -1.0, 0.05), (AxisAct::Yaw, ABS_Z, 1.0, 0.08), (AxisAct::Throttle, ABS_RZ, 1.0, 0.02)],
+        buttons: &[("brakes", BTN_TRIGGER), ("camera", BTN_THUMB), ("flaps_down", BTN_THUMB2), ("flaps_up", BTN_TOP), ("gear", BTN_TOP2)],
+    },
+    // The usual HID layout (Logitech Extreme 3D, Thrustmaster T.16000M and
+    // the like): X roll, Y pitch, the twist on Rz, a throttle that reads
+    // lowest pushed forward.
+    Preset {
+        en: "Standard joystick (X/Y, twist, throttle)",
+        fr: "Joystick standard (X/Y, torsion, manette des gaz)",
+        names: &[],
+        axes: &[(AxisAct::Pitch, ABS_Y, 1.0, 0.05), (AxisAct::Roll, ABS_X, 1.0, 0.05), (AxisAct::Yaw, ABS_RZ, 1.0, 0.08), (AxisAct::Throttle, ABS_THROTTLE, -1.0, 0.02)],
+        buttons: &[("brakes", BTN_TRIGGER), ("camera", BTN_THUMB), ("flaps_down", BTN_THUMB2), ("flaps_up", BTN_TOP), ("gear", BTN_TOP2)],
+    },
+    // Rudder pedals (Logitech/Saitek, Thrustmaster TFRP…): rudder on Rz,
+    // the toe brakes on X and Y.
+    Preset {
+        en: "Rudder pedals (rudder, toe brakes)",
+        fr: "Palonnier (direction, freins aux pieds)",
+        names: &["rudder", "pedal"],
+        axes: &[(AxisAct::Yaw, ABS_RZ, 1.0, 0.03), (AxisAct::BrakeLeft, ABS_X, 1.0, 0.05), (AxisAct::BrakeRight, ABS_Y, 1.0, 0.05)],
+        buttons: &[],
+    },
+];
+
+/// The preset that goes on a device by its name, if any.
+pub fn preset_for(name: &str) -> Option<&'static Preset> {
+    let n = name.to_lowercase();
+    PRESETS.iter().find(|p| p.names.iter().any(|m| n.contains(m)))
+}
+
+impl Bindings {
+    /// Puts a preset on a device. `over`: replace what is bound already
+    /// (by hand); else only fill in what is free (on its own).
+    pub fn apply_preset(&mut self, p: &Preset, dev: Uuid, name: &str, over: bool) {
+        for &(a, code, sign, dead) in p.axes {
+            if over || !self.axes.contains_key(&a) {
+                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign, dead });
+            }
+        }
+        for &(id, code) in p.buttons {
+            if let Some(a) = action(id) {
+                if over || !self.buttons.contains_key(a.id) {
+                    self.buttons.retain(|_, b| !(b.dev == dev && b.code == code));
+                    self.buttons.insert(a.id, ButtonBind { dev, name: name.to_string(), code });
+                }
+            }
+        }
+        self.auto_done.insert(dev);
+    }
+
+    /// A device seen: the first time, if it has nothing bound and a preset
+    /// knows it by name, that preset goes on. Returns the preset's name.
+    pub fn auto_preset(&mut self, dev: Uuid, name: &str) -> Option<&'static str> {
+        if !self.auto_done.insert(dev) || self.uses(&dev) {
+            return None;
+        }
+        let p = preset_for(name)?;
+        self.apply_preset(p, dev, name, false);
+        Some(p.label())
+    }
+
+    /// Takes everything off a device.
+    pub fn clear_device(&mut self, dev: &Uuid) {
+        self.axes.retain(|_, b| b.dev != *dev);
+        self.buttons.retain(|_, b| b.dev != *dev);
+    }
+}
+
+fn uuid_from_hex(hex: &str) -> Option<Uuid> {
+    let mut u = [0u8; 16];
+    for (i, b) in u.iter_mut().enumerate() {
+        *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(u)
+}
+
+/// An axis by its evdev name ("Y", "Rz", "Throttle"), else its number.
+fn axis_name(code: u32) -> String {
+    const N: [&str; 11] = ["X", "Y", "Z", "Rx", "Ry", "Rz", "Throttle", "Rudder", "Wheel", "Gas", "Brake"];
+    match (code >> 16, code & 0xffff) {
+        (3, c) if (c as usize) < N.len() => N[c as usize].to_string(),
+        (_, c) => c.to_string(),
+    }
+}
+
+/// A button by its number on a joystick (1 = trigger), or its gamepad name.
+fn button_name(code: u32) -> String {
+    const PAD: [&str; 15] = ["A", "B", "C", "X", "Y", "Z", "LB", "RB", "LT", "RT", "Select", "Start", "Mode", "L3", "R3"];
+    match code & 0xffff {
+        c @ 0x120..=0x12f => (c - 0x120 + 1).to_string(),
+        c @ 0x130..=0x13e => PAD[(c - 0x130) as usize].to_string(),
+        c @ 0x2c0..=0x2ff => (c - 0x2c0 + 17).to_string(),
+        c => format!("0x{c:x}"),
+    }
+}
+
+/// A device's name, cut short for the bindings page.
 fn short(name: &str) -> String {
-    let n: String = name.chars().take(28).collect();
+    let n: String = name.chars().take(40).collect();
     if n.is_empty() { "?".into() } else { n }
 }
 
@@ -498,12 +651,53 @@ mod tests {
         b.button_event(dev, "Throttle quadrant", 290, true);
         assert_eq!(b.take_edges(), vec![("gear", false), ("gear", true)]);
         b.set_key("gear", KeyCode::KeyJ);
-        b.axes.insert(AxisAct::Yaw, AxisBind { dev, name: "Pedals".into(), code: 5, sign: -1.0 });
+        b.axes.insert(AxisAct::Yaw, AxisBind { dev, name: "Pedals".into(), code: 5, sign: -1.0, dead: 0.1 });
         let mut c = Bindings::default();
         c.read(&b.json());
         assert_eq!(c.buttons, b.buttons);
         assert_eq!(c.axes, b.axes);
         assert_eq!(c.map_key(KeyCode::KeyJ), Some(KeyCode::KeyL));
         assert!(c.uses(&dev));
+        assert_eq!((axis_name(ABS_Y), axis_name(ABS_RZ), button_name(BTN_TRIGGER), button_name(BTN + 0x2c5)), ("Y".into(), "Rz".into(), "1".into(), "22".into()));
+    }
+
+    #[test]
+    fn dead_zones() {
+        let mut b = Bindings::default();
+        let dev = [1u8; 16];
+        b.axes.insert(AxisAct::Roll, AxisBind { dev, name: "S".into(), code: 0, sign: 1.0, dead: 0.2 });
+        b.axes.insert(AxisAct::Throttle, AxisBind { dev, name: "S".into(), code: 6, sign: 1.0, dead: 0.1 });
+        b.axis_event(dev, "S", 0, 0.15);
+        b.axis_event(dev, "S", 6, -0.85);
+        assert_eq!((b.axis(AxisAct::Roll), b.axis(AxisAct::Throttle)), (Some(0.0), Some(0.0)));
+        b.axis_event(dev, "S", 0, 0.6);
+        b.axis_event(dev, "S", 6, 1.0);
+        assert!((b.axis(AxisAct::Roll).unwrap() - 0.5).abs() < 1e-6);
+        assert_eq!(b.axis(AxisAct::Throttle), Some(1.0));
+    }
+
+    #[test]
+    fn presets() {
+        let mut b = Bindings::default();
+        let stick = [2u8; 16];
+        // A VelocityOne seen for the first time gets its preset, once.
+        assert!(b.auto_preset(stick, "Turtle Beach VelocityOne Flightstick").is_some());
+        assert_eq!(b.axes[&AxisAct::Yaw].code, ABS_Z);
+        assert_eq!(b.buttons["gear"].code, BTN_TOP2);
+        b.clear_device(&stick);
+        assert!(b.auto_preset(stick, "Turtle Beach VelocityOne Flightstick").is_none());
+        assert!(b.axes.is_empty());
+        // Pedals fill in only what is free; an unknown device is left alone.
+        let pedals = [3u8; 16];
+        b.apply_preset(&PRESETS[1], stick, "Stick", true);
+        assert!(b.auto_preset(pedals, "Thrustmaster T-Rudder").is_some());
+        assert_eq!(b.axes[&AxisAct::Yaw].dev, stick);
+        assert_eq!(b.axes[&AxisAct::BrakeLeft].dev, pedals);
+        assert!(b.auto_preset([4u8; 16], "Some Gamepad").is_none());
+        // And it is all remembered.
+        let mut c = Bindings::default();
+        c.read(&b.json());
+        assert!(c.auto_preset(stick, "Turtle Beach VelocityOne Flightstick").is_none());
+        assert_eq!(c.axes, b.axes);
     }
 }

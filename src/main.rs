@@ -1188,6 +1188,14 @@ impl Game {
                 _ => {}
             }
         }
+        // A device a preset knows by name, seen for the first time: put it on.
+        let seen: Vec<(bind::Uuid, String)> = g.gamepads().map(|(_, p)| (p.uuid(), p.name().to_string())).collect();
+        for (uuid, name) in seen {
+            if let Some(p) = self.binds.auto_preset(uuid, &name) {
+                self.status = t!("{}: preset \"{}\" applied (see Bindings)", "{} : préréglage « {} » appliqué (voir Assignations)", name, p);
+                self.status_until = self.real + 8.0;
+            }
+        }
         // A pad plugged in that gilrs has no layout for: open it again with one.
         let unfixed: Vec<[u8; 16]> = g.gamepads().filter(|(_, p)| needs_xbox_layout(p) && !self.pad_fixed.contains(&p.uuid())).map(|(_, p)| p.uuid()).collect();
         if relayout && !unfixed.is_empty() {
@@ -1382,26 +1390,52 @@ impl Game {
         }
         let dim = |s: String| RichText::new(s).size(12.0).color(DIM);
         menu::heading(ui, t!("CONNECTED DEVICES", "PÉRIPHÉRIQUES CONNECTÉS"));
-        let devices: Vec<(String, bool)> = self.gilrs.as_ref().map(|g| g.gamepads().map(|(_, p)| (p.name().to_string(), self.binds.uses(&p.uuid()))).collect()).unwrap_or_default();
+        let devices: Vec<(bind::Uuid, String, bool)> = self.gilrs.as_ref().map(|g| g.gamepads().map(|(_, p)| (p.uuid(), p.name().to_string(), self.binds.uses(&p.uuid()))).collect()).unwrap_or_default();
         if devices.is_empty() {
             ui.label(dim(t!("No joystick, pedals or gamepad found.", "Aucun joystick, palonnier ni manette détecté.").into()));
         }
-        for (name, bound) in devices {
+        for (k, (uuid, name, bound)) in devices.into_iter().enumerate() {
             let role = if bound { t!("bound", "assigné") } else { t!("gamepad layout", "disposition manette") };
             ui.label(RichText::new(format!("{name}  ·  {role}")).size(12.5).color(TEXT));
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                egui::ComboBox::from_id_salt(("preset", k)).selected_text(t!("Apply a preset…", "Appliquer un préréglage…")).width(260.0).show_ui(ui, |ui| {
+                    for p in bind::PRESETS {
+                        if ui.selectable_label(false, p.label()).clicked() {
+                            self.binds.apply_preset(p, uuid, &name, true);
+                        }
+                    }
+                });
+                if bound && ui.small_button(t!("Remove its bindings", "Retirer ses assignations")).clicked() {
+                    self.binds.clear_device(&uuid);
+                }
+            });
         }
         ui.label(dim(t!("A device with anything bound to it no longer works as a gamepad.", "Un périphérique dès qu'on lui assigne quelque chose ne sert plus de manette de jeu.").into()));
         let busy = self.binds.capture.is_some();
 
         menu::heading(ui, t!("AXES", "AXES"));
-        egui::Grid::new("bind_axes").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
+        ui.label(dim(t!("Binding · value · dead zone (travel that does nothing)", "Assignation · valeur · zone morte (course sans effet)").into()));
+        egui::Grid::new("bind_axes").num_columns(5).spacing([10.0, 4.0]).show(ui, |ui| {
             for a in AxisAct::ALL {
                 ui.label(RichText::new(a.label()).size(13.0).color(TEXT));
                 ui.label(dim(self.binds.describe_axis(a).unwrap_or_else(|| "—".into())));
-                match self.binds.axis(a) {
+                // (0 until the axis has moved since the game started)
+                match self.binds.axis(a).or_else(|| self.binds.axes.contains_key(&a).then_some(0.0)) {
                     Some(v) => {
                         let f = if a.centred() { (v as f32 + 1.0) * 0.5 } else { v as f32 };
                         ui.add(egui::ProgressBar::new(f).desired_width(70.0).desired_height(8.0));
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
+                // The dead zone: round the centre, or at the idle end of a throttle or brake.
+                match self.binds.axes.get_mut(&a) {
+                    Some(b) => {
+                        ui.spacing_mut().slider_width = 70.0;
+                        ui.add(egui::Slider::new(&mut b.dead, 0.0..=0.3).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                            .on_hover_text(t!("Dead zone: how much travel does nothing", "Zone morte : la course qui ne fait rien"));
                     }
                     None => {
                         ui.label("");
