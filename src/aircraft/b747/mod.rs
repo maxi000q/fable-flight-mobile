@@ -1554,6 +1554,13 @@ pub static SPEC: Spec = Spec {
     hole: Hole { fus: [3.25, 4.1, 1.0, 2.5], wing: [-1.3, 0.093, 0.9, 0.25], stab: [3.0, 0.35, 11.1], fin: [4.2, 10.16, 0.6, 0.2], pods: [[11.68, -2.5, 1.3], [21.0, -1.58, 1.3]] },
     // A mid-weight: about 290 t (maximum takeoff weight is 396.9 t, landing 285.8 t).
     mass: 290_000.0,
+    // 216,840 l of Jet A; four CF6s: about 600 kg/h each idling, 10 t/h each at take-off thrust
+    fuel_kg: 174_000.0,
+    fuel_flow: [0.65, 11.0, 12.0],
+    payload: [40_000.0, 110_000.0, 0.5],
+    mac: 8.32,
+    cg: [0.24, 0.11, 0.33],
+    fuel_arm: 1.0,
     // Pitch, yaw, roll (Heffley & Jewell, the 747 at 288 t).
     inertia: DVec3::new(44.9e6, 67.4e6, 24.7e6),
     wing_area: 541.2,

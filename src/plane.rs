@@ -30,6 +30,8 @@ pub struct Controls {
     pub boost: bool,
     /// thrust reversers (on the ground, jets)
     pub reverse: bool,
+    /// the starter held (a piston engine cranks while it is)
+    pub starter: bool,
     /// a throttle lever's position (0..1), which then sets the power
     /// outright instead of `throttle` moving it
     pub throttle_set: Option<f64>,
@@ -71,6 +73,23 @@ pub struct Plane {
     pub power: f64,
     /// how far open the throttle effectively is (the engine takes a moment to answer it)
     charge: f64,
+    /// fuel on board (kg), and what the engines are burning (kg/s)
+    pub fuel: f64,
+    pub fuel_flow: f64,
+    /// the magnetos on (a jet: the fuel control at RUN), and the mixture
+    /// lever (0 idle cut-off .. 1 full rich; jets have none)
+    pub ignition: bool,
+    pub mixture: f64,
+    /// the engine is burning fuel and turning itself
+    pub running: bool,
+    /// a jet's starter engaged (it stays in until the engine is up to idle),
+    /// and an automatic start under way (seconds it still has)
+    pub starter_on: bool,
+    auto_start: f64,
+    /// the electrical system and the failures (systems.rs)
+    pub sys: crate::systems::Systems,
+    /// payload aboard (kg): crew, passengers, baggage
+    pub payload: f64,
     /// a jet's fan speed, fraction of 100% N1
     pub n1: f64,
     /// how far the afterburners are lit, 0..1 (what is seen and heard of them; the thrust is immediate)
@@ -189,6 +208,15 @@ impl Plane {
             head_v: DVec3::ZERO,
             power: 0.7,
             charge: 0.0,
+            fuel: spec.fuel_kg * 0.5,
+            fuel_flow: 0.0,
+            ignition: true,
+            mixture: 1.0,
+            running: true,
+            starter_on: false,
+            auto_start: 0.0,
+            sys: Default::default(),
+            payload: spec.payload[0],
             n1: 0.0,
             burner: 0.0,
             drop: 0.0,
@@ -299,6 +327,67 @@ impl Plane {
         self.stick.y * s.steer_max * fade * self.gear
     }
     /// Angle of attack the wing stalls at (flaps make it stall a little earlier, slats later).
+    /// What it weighs now (kg): `spec.mass` with half tanks, more or less the fuel.
+    pub fn mass(&self) -> f64 {
+        self.spec.mass + self.fuel - 0.5 * self.spec.fuel_kg + self.payload - self.spec.payload[0]
+    }
+
+    /// Centre of gravity, as a fraction of the mean aerodynamic chord: where
+    /// the fuel and the payload put it, against the reference at `spec.mass`.
+    pub fn cg(&self) -> f64 {
+        let s = self.spec;
+        let moment = (self.fuel - 0.5 * s.fuel_kg) * s.fuel_arm + (self.payload - s.payload[0]) * s.payload[2];
+        s.cg[0] + moment / self.mass() / s.mac
+    }
+
+    /// How far the CG is outside its limits (fraction of MAC; 0 inside, - forward, + aft).
+    pub fn cg_excess(&self) -> f64 {
+        let (c, s) = (self.cg(), self.spec);
+        if c < s.cg[1] { c - s.cg[1] } else if c > s.cg[2] { c - s.cg[2] } else { 0.0 }
+    }
+
+    /// Fuel left, as a fraction of full tanks.
+    pub fn fuel_frac(&self) -> f64 {
+        if self.spec.fuel_kg > 0.0 { self.fuel / self.spec.fuel_kg } else { 0.0 }
+    }
+
+    /// How long the fuel lasts at the present burn (s), while it burns any.
+    pub fn endurance(&self) -> Option<f64> {
+        (self.fuel_flow > 1e-6).then(|| self.fuel / self.fuel_flow)
+    }
+
+    /// Cold and dark: magnetos off and mixture at cut-off (a jet: fuel
+    /// controls to CUTOFF), the engine stopped, the throttle closed.
+    pub fn cold_and_dark(&mut self) {
+        (self.ignition, self.mixture, self.running, self.starter_on, self.auto_start) = (false, 0.0, false, false, 0.0);
+        (self.throttle, self.charge, self.power, self.prop_rate, self.n1, self.fuel_flow) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        self.sys.elec.master = false;
+    }
+
+    /// The start a pilot would make: mixture rich, magnetos (fuel controls)
+    /// on, throttle at idle, and the starter until the engine runs.
+    pub fn start_engine(&mut self) {
+        (self.mixture, self.ignition) = (1.0, true);
+        self.sys.elec.master = true;
+        self.throttle = self.throttle.min(0.1);
+        if self.spec.is_jet() {
+            self.starter_on = true;
+            self.auto_start = 120.0;
+        } else {
+            self.auto_start = 8.0;
+        }
+    }
+
+    /// Shut down: mixture to cut-off (a jet: fuel controls to CUTOFF).
+    pub fn stop_engine(&mut self) {
+        if self.spec.is_jet() {
+            self.ignition = false;
+        } else {
+            self.mixture = 0.0;
+        }
+        (self.auto_start, self.starter_on) = (0.0, false);
+    }
+
     pub fn stall_alpha(&self) -> f64 {
         let s = self.spec;
         s.stall_alpha - s.stall_flap * self.flaps + s.stall_slat * self.slats
@@ -847,18 +936,18 @@ impl Plane {
     fn alpha_level(&self, v: f64, rho: f64, flap_cl: f64) -> f64 {
         let s = self.spec;
         let q = 0.5 * rho * v * v;
-        ((s.mass * 9.81 / (q * s.wing_area).max(1.0) - s.cl0 - flap_cl) / s.cl_a).clamp(-0.05, s.alpha_trim)
+        ((self.mass() * 9.81 / (q * s.wing_area).max(1.0) - s.cl0 - flap_cl) / s.cl_a).clamp(-0.05, s.alpha_trim)
     }
     /// Drag (N) in steady flight at true airspeed `v`, height `h`.
     fn drag_level(&self, v: f64, h: f64, flaps: f64, gear: f64) -> f64 {
         let s = self.spec;
         let qs = 0.5 * density(h) * v * v * s.wing_area;
-        let cl = s.mass * 9.81 / qs.max(1.0);
+        let cl = self.mass() * 9.81 / qs.max(1.0);
         qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)))
     }
     /// Throttle to hold `v` while coming down at `descent` m/s.
     fn throttle_for(&self, v: f64, h: f64, flaps: f64, gear: f64, descent: f64) -> f64 {
-        let need = self.drag_level(v, h, flaps, gear) - self.spec.mass * 9.81 * (descent / v.max(1.0));
+        let need = self.drag_level(v, h, flaps, gear) - self.mass() * 9.81 * (descent / v.max(1.0));
         let (mut lo, mut hi) = (0.0, 1.0);
         for _ in 0..30 {
             let t = 0.5 * (lo + hi);
@@ -992,12 +1081,15 @@ impl Plane {
     pub fn step(&mut self, dt: f64, c: &Controls, world: &World) -> Option<Impact> {
         let spec = self.spec;
         let hd = &spec.handling;
+        let mass = self.mass();
         self.t += dt;
         if self.hold {
             self.vel = self.wind * 0.0;
             self.omega = DVec3::ZERO;
             if !spec.is_jet() {
-                self.prop_rate += (65.0 - self.prop_rate) * (dt * 2.0).min(1.0);
+                // (idling while the ground loads, unless it was left cold)
+                let idle = if self.running { 65.0 } else { 0.0 };
+                self.prop_rate += (idle - self.prop_rate) * (dt * 2.0).min(1.0);
             }
             self.prop += dt * self.prop_rate;
             return None;
@@ -1114,19 +1206,29 @@ impl Plane {
             // porpoising gently back to that speed. Without an elevator the trim
             // stays where it was.
             let level = self.up().dot(upw).max(0.0);
-            let alpha_1g = ((spec.mass * 9.81 * level / (q * area).max(1.0) - spec.cl0 - flap_cl + spec.spoiler_cl * self.spoilers) / spec.cl_a).clamp(-0.05, spec.alpha_trim);
+            let alpha_1g = ((mass * 9.81 * level / (q * area).max(1.0) - spec.cl0 - flap_cl + spec.spoiler_cl * self.spoilers) / spec.cl_a).clamp(-0.05, spec.alpha_trim);
             if el > 0.05 && self.stick.x.abs() > 0.06 {
                 self.trim += (alpha_1g - self.trim) * (dt * 0.5).min(1.0);
             }
-            let mut alpha_cmd = self.trim + self.stick.x * hd.alpha_ctl * el;
+            // Balance: aft, the static margin shrinks, so the nose is lighter and
+            // quicker to answer (beyond the aft limit, barely stable); forward, it
+            // is stiff and heavy, and the elevator runs out sooner (a hard flare).
+            let shift = self.cg() - spec.cg[0];
+            let margin = 0.15 - shift;
+            let cg_stiff = (0.4 + 0.6 * margin / 0.15).clamp(0.15, 1.8);
+            let cg_auth = (1.0 + 1.5 * shift).clamp(0.5, 1.4);
+            // (The stick sets the elevator; how much angle of attack that buys is
+            // its moment over the stability: less stable, more for the same pull.)
+            let cg_sens = (1.0 / cg_stiff).min(2.5);
+            let mut alpha_cmd = self.trim + self.stick.x * hd.alpha_ctl * el * cg_auth * cg_sens;
             if spec.fbw_g > 0.0 {
                 // Fly-by-wire: the stick asks for load, never more than the limit.
-                let alpha_for = |g: f64| (g * spec.mass * 9.81 / (q * area).max(1.0) - spec.cl0 - flap_cl) / spec.cl_a;
+                let alpha_for = |g: f64| (g * mass * 9.81 / (q * area).max(1.0) - spec.cl0 - flap_cl) / spec.cl_a;
                 alpha_cmd = alpha_cmd.clamp(alpha_for(-0.4 * spec.fbw_g), alpha_for(spec.fbw_g));
             }
             // Pitch stiffness comes from the tailplane; without one the nose wanders off.
-            let stiff = hd.pitch_k * st - hd.pitch_k_lost * (1.0 - st);
-            wdot.x = a * (stiff * (alpha_cmd - alpha) + self.stick.x * hd.pitch_ctl * el) - hd.pitch_d * ad * (0.3 + 0.7 * st) * om.x;
+            let stiff = (hd.pitch_k * st - hd.pitch_k_lost * (1.0 - st)) * cg_stiff;
+            wdot.x = a * (stiff * (alpha_cmd - alpha) + self.stick.x * hd.pitch_ctl * el * cg_auth) - hd.pitch_d * ad * (0.3 + 0.7 * st) * om.x;
             // Roll damping fades in a stall, and past it turns round: the wing going
             // down meets the air at a still higher angle and loses still more lift.
             // An airliner's outboard ailerons lock out once the flaps are up.
@@ -1188,18 +1290,34 @@ impl Plane {
                 let w = self.prop_rate.max(0.0);
                 let v_ax = (-vb.z).max(0.0);
                 let (mut thrust, q_prop) = Self::prop_load(pe, w, v_ax, rho, prop_k);
-                let q_eng = Self::engine_torque(pe, self.charge, rho, c.boost, eng);
+                // It fires with the magnetos on, fuel, a mixture that will burn and the
+                // crankshaft turning (by the starter, or windmilling in the air); the
+                // starter motor's torque falls away as it spins up (it cranks at ~200 rpm).
+                // (The starter needs power from the bus; the magnetos do not.)
+                let cranking = (c.starter || self.auto_start > 0.0) && self.sys.powered();
+                self.running = self.ignition && self.fuel > 0.0 && self.mixture > 0.08 && w > 8.0 && eng > 0.0 && !self.sys.fail.engine;
+                let mix = smooth(0.08, 0.45, self.mixture);
+                let q_eng = if self.running { Self::engine_torque(pe, self.charge, rho, c.boost, eng) * mix } else { 0.0 } + if cranking { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
+                if self.auto_start > 0.0 {
+                    self.auto_start = if self.running && w > 50.0 { 0.0 } else { self.auto_start - dt };
+                }
                 let drive = q_eng - q_prop;
                 if prop_k <= 0.0 {
                     // No blades left: nothing to turn.
                     self.prop_rate += (0.0 - self.prop_rate) * (dt * 2.0).min(1.0);
                 } else if w > 1.0 || drive > 40.0 {
-                    self.prop_rate = (w + (drive - Self::friction(pe, w)) / pe.prop_i * dt).max(0.0);
+                    // Not firing, each cylinder in turn compresses its charge for
+                    // nothing: a drag that matters slowly turning (it stops a shut-down
+                    // engine in a couple of seconds) but not windmilling in a glide.
+                    let comp = if self.running { 0.0 } else { 40.0 * (1.0 - w / 90.0).clamp(0.0, 1.0) };
+                    self.prop_rate = (w + (drive - Self::friction(pe, w) - comp) / pe.prop_i * dt).max(0.0);
                 } else {
                     // Stopped: the compression holds it until the air pushes harder.
                     self.prop_rate = 0.0;
                 }
                 self.power = ((q_eng - Self::friction(pe, w)) * w / pe.power).max(0.0);
+                let ff = spec.fuel_flow;
+                self.fuel_flow = if self.running { (ff[0] + (ff[1] - ff[0]) * self.power.min(1.0) + if c.boost { ff[2] - ff[1] } else { 0.0 }) * (0.7 + 0.3 * self.mixture) } else { 0.0 };
                 if dm.prop <= 0.25 {
                     thrust = 0.0;
                 }
@@ -1235,10 +1353,26 @@ impl Plane {
                 let reversing = rev_want && self.reverser > 0.95;
                 // The fans spool slowly from idle and quicker near the top; a
                 // dead engine windmills in the airflow.
+                // Starting: the starter turns the core up; past light-off, with the fuel
+                // controls at RUN, it lights and runs itself up to idle.
+                let can_run = self.ignition && self.fuel > 0.0 && eng > 0.0 && !self.sys.fail.engine;
+                if !can_run {
+                    self.running = false;
+                } else if !self.running && self.n1 > 0.4 * fe.idle {
+                    self.running = true;
+                }
+                if self.auto_start > 0.0 {
+                    self.auto_start -= dt;
+                    self.starter_on = true;
+                }
+                if self.running && self.n1 > 0.95 * fe.idle {
+                    (self.starter_on, self.auto_start) = (false, 0.0);
+                }
                 let mut target = if reversing { 0.84 } else { Self::n1_target(fe, self.throttle) };
                 target = target.min(fe.idle + (1.0 - fe.idle) * eng);
-                if self.dmg.engine <= 0.0 {
-                    target = (0.02 + v / 900.0).min(fe.idle * 0.8);
+                if !self.running {
+                    // Not burning: windmilling in the airflow, or turned by the starter.
+                    target = if self.starter_on && self.sys.powered() { 0.5 * fe.idle } else { (0.02 + v / 900.0).min(fe.idle * 0.8) };
                 }
                 let up = target > self.n1;
                 let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
@@ -1250,15 +1384,33 @@ impl Plane {
                 let lit = c.boost && fe.boost > 1.2 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
                 self.burner += ((if lit { 1.0 } else { 0.0 }) - self.burner) * (dt * if lit { 5.0 } else { 8.0 }).min(1.0);
                 self.power = thrust / (fe.n as f64 * fe.thrust);
+                // The burn follows the thrust made (it lapses with height as the
+                // thrust does): idle to full rated thrust, then the afterburners.
+                let ff = spec.fuel_flow;
+                let dry = (self.power / if c.boost { fe.boost } else { 1.0 }).clamp(0.0, 1.2);
+                self.fuel_flow = if self.running { ff[0] + (ff[1] - ff[0]) * dry + (ff[2] - ff[1]) * self.burner } else { 0.0 };
                 thrust *= 1.0 - self.reverser * (1.0 + fe.reverse);
                 force_b += DVec3::NEG_Z * thrust;
                 self.dmg.smoke = if self.dmg.engine < 1.0 { (1.0 - self.dmg.engine) * (0.3 + 0.7 * self.n1 as f32) } else { 0.0 };
             }
         }
         self.prop += dt * self.prop_rate;
+        self.fuel = (self.fuel - self.fuel_flow * dt).max(0.0);
+        if self.sys.fail.fuel_leak {
+            // A leak bleeds about 40% of a full-power burn, engine or not.
+            self.fuel = (self.fuel - spec.fuel_flow[1] * 0.4 * dt).max(0.0);
+        }
+        // The electrics: the alternator (the jets' generators) charging once the
+        // engine turns fast enough (a piston's above ~900 rpm), the starter drawing.
+        let charging = match &spec.engine {
+            Engine::Piston(_) => self.running && self.prop_rate > 95.0,
+            Engine::Fan(fe) => self.running && self.n1 > 0.8 * fe.idle,
+        };
+        let cranking = !self.running && (c.starter || self.auto_start > 0.0 || self.starter_on);
+        self.sys.update(dt, charging, cranking, true);
 
         // Ground contact.
-        let mut force_w = self.rot * force_b - upw * (spec.mass * 9.81);
+        let mut force_w = self.rot * force_b - upw * (mass * 9.81);
         let mut torque_b = DVec3::ZERO;
         self.on_ground = false;
         // Nothing is solid for the first moments after a spawn: the terrain
@@ -1578,7 +1730,7 @@ impl Plane {
         }
 
         self.on_hull = skidding;
-        let acc = force_w / spec.mass;
+        let acc = force_w / mass;
         self.swing_folds(dt, acc, upw, vb, rho);
         self.g_load = (acc + upw * 9.81).dot(self.up()) / 9.81;
         // The pilot's head on its neck: a stiff, well-damped spring shoved about
@@ -1679,7 +1831,8 @@ impl Plane {
                 let fa = np * (0.5 * rho * vr * vr * area * cn);
                 t_a = arm.cross(fa).dot(ax);
                 // The aircraft feels it through the hinge.
-                self.vel += self.rot * fa * (dt / spec.mass);
+                let m = self.mass();
+                self.vel += self.rot * fa * (dt / m);
                 self.omega += cm.cross(fa) / spec.inertia * dt;
             }
             // The crumpled skin still springs back a little, and damps the swing.
@@ -1773,7 +1926,7 @@ impl Plane {
             }
             // Energy the trunk soaks up before it snaps, against the share of
             // the aircraft's that goes into it before the part that hit gives.
-            let ke = 0.5 * spec.mass * v * v;
+            let ke = 0.5 * self.mass() * v * v;
             let snap_e = 3.0e5 * (t.trunk_r / 0.25).powi(3) * (t.height / 15.0).clamp(0.6, 1.4);
             let share = match (worst, at) {
                 (2, 1 | 2) => 0.6,
@@ -1789,7 +1942,7 @@ impl Plane {
                     self.struck.swap_remove(i);
                 }
                 // Breaking it costs what it took to break.
-                let v2 = (v * v - 2.0 * snap_e / spec.mass).max(0.36 * v * v);
+                let v2 = (v * v - 2.0 * snap_e / self.mass()).max(0.36 * v * v);
                 self.vel *= (v2 / (v * v).max(1e-6)).sqrt();
                 self.tree_hits.push(t);
             } else {
@@ -2108,6 +2261,189 @@ mod tests {
         let wd = Plane::prop_equilibrium(pe, 1.0, s.vne, RHO0) * 60.0 / std::f64::consts::TAU;
         println!("full throttle at Vne: {wd:.0} rpm");
         assert!(wd > 2850.0, "{wd}");
+    }
+
+    #[test]
+    fn engine_starts_runs_and_stops() {
+        let w = flat_world();
+        let dt = 1.0 / 180.0;
+        let run = |p: &mut Plane, secs: f64, c: &Controls| {
+            for _ in 0..(secs / dt) as usize {
+                assert!(p.step(dt, c, &w).is_none());
+            }
+        };
+        // On the ground, cold and dark: nothing turns, nothing burns.
+        let mut p = Plane::spawn_ground(C172, 37.8, -122.46, 0.0, 0.5, 0.0);
+        p.hold = false;
+        p.t = 2.0;
+        let full = p.fuel;
+        p.cold_and_dark();
+        let idle = Controls { brake: true, ..Default::default() };
+        run(&mut p, 2.0, &idle);
+        assert!(!p.running && p.prop_rate < 1.0 && p.fuel == full);
+        // The starter on a dead bus (master off): nothing. With the master on
+        // but the magnetos off: it cranks (~200 rpm) but does not fire.
+        let crank = Controls { starter: true, ..idle };
+        run(&mut p, 1.0, &crank);
+        assert!(rpm(&p) < 5.0);
+        p.sys.elec.master = true;
+        run(&mut p, 2.0, &crank);
+        assert!(!p.running && rpm(&p) > 120.0 && rpm(&p) < 300.0, "{}", rpm(&p));
+        // The proper start: it fires and settles at idle on its own.
+        p.start_engine();
+        run(&mut p, 10.0, &idle);
+        println!("idle {:.0} rpm, {:.1} l/h", rpm(&p), p.fuel_flow * 3600.0 / 0.72);
+        assert!(p.running && rpm(&p) > 500.0 && rpm(&p) < 1100.0, "{}", rpm(&p));
+        assert!(p.fuel < full);
+        // Mixture to cut-off: it dies at once and the propeller stops within seconds.
+        p.stop_engine();
+        run(&mut p, 1.0, &idle);
+        assert!(!p.running && p.fuel_flow == 0.0);
+        run(&mut p, 4.0, &idle);
+        assert!(rpm(&p) < 5.0, "{}", rpm(&p));
+
+        // In the air, the tanks run dry: the engine quits and the propeller windmills.
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+        p.throttle = 0.75;
+        p.fuel = 0.002;
+        run(&mut p, 3.0, &Controls::default());
+        assert!(!p.running && p.fuel == 0.0 && p.fuel_flow == 0.0);
+        // Fuel back (a tank switched over): it catches again from the windmilling.
+        p.fuel = 50.0;
+        run(&mut p, 2.0, &Controls::default());
+        assert!(p.running, "{}", rpm(&p));
+    }
+
+    #[test]
+    fn balance_follows_the_load_and_changes_the_handling() {
+        // As loaded by default the CG sits at the reference, inside the limits.
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+        assert!((p.cg() - C172.cg[0]).abs() < 1e-9 && p.cg_excess() == 0.0);
+        // Four up and full baggage: heavier, and the CG goes past the aft limit.
+        p.payload = C172.payload[1];
+        assert!(p.mass() > C172.mass + 200.0);
+        assert!(p.cg() > C172.cg[2] && p.cg_excess() > 0.0, "{}", p.cg());
+        // Burning fuel (it sits aft of the CG) moves it forward.
+        let c0 = p.cg();
+        p.fuel = 10.0;
+        assert!(p.cg() < c0);
+
+        // The same pull on the stick: the aft-loaded aircraft pitches up quicker.
+        let w = empty_world();
+        let pitch_rate = |payload: f64, fuel: f64| {
+            let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+            (p.payload, p.fuel) = (payload, fuel);
+            p.throttle = 0.7;
+            let dt = 1.0 / 180.0;
+            let mut best: f64 = 0.0;
+            for _ in 0..(1.0 / dt) as usize {
+                p.step(dt, &Controls { pitch: 0.4, ..Default::default() }, &w);
+                best = best.max(p.omega.x.abs());
+            }
+            best
+        };
+        let (fwd, aft) = (pitch_rate(80.0, C172.fuel_kg * 0.1), pitch_rate(C172.payload[1], C172.fuel_kg));
+        println!("pitch rate after a pull: forward CG {:.1}°/s, aft CG {:.1}°/s", fwd.to_degrees(), aft.to_degrees());
+        assert!(aft > fwd * 1.15, "{fwd} {aft}");
+    }
+
+    #[test]
+    fn electrics_and_failures() {
+        let w = flat_world();
+        let dt = 1.0 / 180.0;
+        let run = |p: &mut Plane, secs: f64| {
+            for _ in 0..(secs / dt) as usize {
+                assert!(p.step(dt, &Controls { brake: true, ..Default::default() }, &w).is_none());
+            }
+        };
+        let ground = || {
+            let mut p = Plane::spawn_ground(C172, 37.8, -122.46, 0.0, 0.5, 0.0);
+            (p.hold, p.t) = (false, 2.0);
+            p.cold_and_dark();
+            p
+        };
+        // Cold and dark with a flat battery: the starter is dead, nothing turns.
+        let mut p = ground();
+        p.sys.fail.battery = true;
+        p.start_engine();
+        run(&mut p, 6.0);
+        assert!(!p.running && rpm(&p) < 5.0 && !p.sys.powered());
+        // Battery back: it starts, and once running fast enough the alternator charges.
+        p.sys.fail.battery = false;
+        p.sys.elec.charge = 0.8;
+        p.start_engine();
+        run(&mut p, 6.0);
+        assert!(p.running);
+        p.throttle = 0.3;
+        run(&mut p, 3.0);
+        assert!(p.sys.elec.amps > 0.0 && p.sys.elec.volts > 27.0, "{} A {} V at {:.0} rpm", p.sys.elec.amps, p.sys.elec.volts, rpm(&p));
+        // An engine failure: it quits whatever the switches say.
+        p.sys.fail.engine = true;
+        run(&mut p, 1.0);
+        assert!(!p.running && p.fuel_flow == 0.0);
+        // A leak drains the tanks with the engine off.
+        let before = p.fuel;
+        p.sys.fail.fuel_leak = true;
+        run(&mut p, 10.0);
+        assert!(p.fuel < before - 0.03, "{} -> {}", before, p.fuel);
+
+        // In the air: a blocked pitot turns the airspeed indicator into an
+        // altimeter; a failed vacuum pump lets the suction fall away.
+        let w = empty_world();
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+        let mut g = crate::gauges::Gauges::new(&p, 1);
+        g.update(0.1, &p, 0.0);
+        let asi0 = g.readings(&p).0[0][0];
+        p.sys.fail.pitot = true;
+        p.sys.fail.vacuum = true;
+        g.update(0.1, &p, 0.0);
+        p.pos = p.pos.normalize() * (p.pos.length() + 300.0);
+        for _ in 0..200 {
+            g.update(0.05, &p, 0.0);
+        }
+        let r = g.readings(&p).0;
+        let _ = &w;
+        assert!((r[0][0] - asi0 - 9.84).abs() < 1.5, "asi {} from {}", r[0][0], asi0);
+        assert!(r[4][0] < 1.0, "suction {}", r[4][0]);
+    }
+
+    #[test]
+    fn jets_start_up_to_idle_and_burn_like_the_real_ones() {
+        let w = flat_world();
+        let dt = 1.0 / 60.0;
+        // (Started in the air, slowly, where only the engines matter.)
+        let mut p = Plane::spawn(B747, 0.6, -2.1, 3000.0, 0.0, 80.0);
+        p.cold_and_dark();
+        let idle = Controls::default();
+        p.start_engine();
+        let mut t = 0.0;
+        while !(p.running && p.n1 > 0.24) && t < 90.0 {
+            assert!(p.step(dt, &idle, &w).is_none());
+            t += dt;
+        }
+        println!("747 start: {t:.0} s to idle, burning {:.1} t/h", p.fuel_flow * 3.6);
+        assert!(t > 5.0 && t < 90.0 && !p.starter_on, "{t}");
+        // At about cruise thrust the four burn some 10-12 t an hour.
+        let mut p = Plane::spawn(B747, 0.6, -2.1, 10_500.0, 0.0, 250.0);
+        p.throttle = 0.85;
+        for _ in 0..(20.0 / dt) as usize {
+            p.step(dt, &Controls { throttle_set: Some(0.85), ..Default::default() }, &w);
+        }
+        let th = p.fuel_flow * 3.6;
+        println!("747 at 85% throttle, FL345: {th:.1} t/h, {:.1} h left", p.endurance().unwrap() / 3600.0);
+        assert!(th > 7.0 && th < 16.0, "{th}");
+        // The Cessna at 75% power: some 30-38 l/h (8-10 US gal/h).
+        let mut c = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 55.0);
+        c.fuel = C172.fuel_kg;
+        for _ in 0..(10.0 / dt) as usize {
+            c.step(dt, &Controls { throttle_set: Some(0.75), ..Default::default() }, &w);
+        }
+        let lh = c.fuel_flow * 3600.0 / 0.72;
+        println!("C172 at 75%: {lh:.0} l/h, {:.1} h", c.endurance().unwrap() / 3600.0);
+        assert!(lh > 22.0 && lh < 45.0, "{lh}");
+        // And the fuel weighs: full tanks are heavier than empty.
+        c.fuel = 0.0;
+        assert!((C172.mass + 0.5 * C172.fuel_kg - c.mass()).abs() < 1e-9 + C172.fuel_kg);
     }
 
     #[test]

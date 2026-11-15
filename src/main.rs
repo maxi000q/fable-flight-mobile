@@ -20,6 +20,7 @@ mod live;
 mod livewx;
 mod nav;
 mod settings;
+mod systems;
 mod gauges;
 mod gmaps;
 mod graphics;
@@ -252,6 +253,9 @@ struct Args {
     aircraft: Option<String>,
     /// start with the HUD hidden (H), for screenshots
     no_hud: bool,
+    /// fuel to start with (fraction of full tanks), and the engine off on the ground
+    fuel: Option<f64>,
+    cold: bool,
 }
 
 fn parse_args() -> Args {
@@ -305,6 +309,8 @@ fn parse_args() -> Args {
         approach: false,
         aircraft: None,
         no_hud: false,
+        fuel: None,
+        cold: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -447,6 +453,11 @@ fn parse_args() -> Args {
                 a.no_hud = true;
                 used = 1;
             }
+            "--fuel" => a.fuel = num(&v, i).map(|f| f.clamp(0.0, 1.0)),
+            "--cold" => {
+                a.cold = true;
+                used = 1;
+            }
             "--photo-detail" => {
                 a.photo_detail = Some(v.get(i + 1).and_then(|s| gmaps::Detail::parse(s)).unwrap_or_else(|| {
                     eprintln!("--photo-detail takes low, medium, high or ultra");
@@ -489,7 +500,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--graphics low|medium|high|ultra] [--render-scale 0.5..2] [--headless] [--fps-log] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--graphics low|medium|high|ultra] [--render-scale 0.5..2] [--headless] [--fps-log] [--mute] [--lang en|fr] [--fuel 0..1] [--cold] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -711,6 +722,10 @@ struct Game {
     /// joysticks, pedals and moved keys, and what was last saved of them
     binds: bind::Bindings,
     binds_stamp: String,
+    /// random failures: on, the mean interval (minutes), when the next one comes
+    fail_random: bool,
+    fail_mean: f64,
+    fail_next: Option<f64>,
     /// NAV 1, the ADF, the OBS and the altimeter setting
     radios: nav::Radios,
     /// waiting on the ground for the terrain to load: where, and until when at most
@@ -780,6 +795,8 @@ impl Game {
         solids.extend(airmodels::build());
         r.set_inst_meshes(&solids);
         let mut menu = menu::Menu::new(lat, lon, args.hour);
+        menu.fuel = args.fuel.unwrap_or(menu.fuel);
+        menu.cold = args.cold;
         menu.aircraft = aircraft::ALL.iter().position(|s| std::ptr::eq(*s, spec)).unwrap_or(0);
         if let Some((la, lo, al)) = args.menu_view {
             menu.look_at(la, lo, al);
@@ -842,6 +859,9 @@ impl Game {
             livewx: livewx::LiveWx::new(),
             binds_stamp: String::new(),
             binds: bind::Bindings::load(),
+            fail_random: false,
+            fail_mean: 30.0,
+            fail_next: None,
             radios: nav::Radios::default(),
             prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
@@ -940,6 +960,8 @@ impl Game {
         let strobe = { let s = t.rem_euclid(1.3); if s < 0.045 || (s > 0.16 && s < 0.2) { 1.0 } else { 0.0 } };
         let beacon = (1.0 - ((t * 1.1).rem_euclid(1.0) - 0.15).abs() * 7.0).max(0.0);
         let (mut g, card) = self.gauges.readings(p);
+        // (The navigation lights, beacon and strobes run off the bus.)
+        let (lit, pw) = if p.sys.powered() { (1000.0, 1.0) } else { (0.0, 0.0) };
         g[0][1] += self.radios.alt_error_ft(self.wx.qnh) as f32;
         if self.spec.is_jet() {
             // The glass cockpit's engine and air data (b747/deck747.wgsl).
@@ -948,13 +970,15 @@ impl Game {
             let oat = 15.0 - 6.5 * h.clamp(0.0, 11000.0) / 1000.0;
             let tat = oat + (oat + 273.15) * 0.2 * mach * mach;
             let x = ((p.n1 - 0.2) / 0.82).clamp(0.0, 1.2);
-            let running = (p.n1 / 0.15).clamp(0.0, 1.0);
+            let running = if p.running { (p.n1 / 0.15).clamp(0.0, 1.0) } else { 0.0 };
             // (The Hornet's two F404s: hotter and thirstier for their size, 4.9 t of fuel inside.)
             let hornet = self.spec.id == 2;
             let egt = if hornet { oat + (400.0 - oat + 380.0 * x.powf(1.4)) * running } else { oat + (440.0 - oat + 200.0 * x.powf(1.4)) * running };
-            let ff = if hornet { (280.0 + 4300.0 * x * x) * running } else { (550.0 + 8200.0 * x * x) * running };
-            let (full, n_eng) = if hornet { (4_900.0, 2.0) } else { (110_000.0, 4.0) };
-            let fuel = (full - self.time * ff * n_eng / 3600.0).max(0.0);
+            // Fuel flow per engine (kg/h) and the fuel on board (kg), from the engines' burn.
+            let n_eng = if hornet { 2.0 } else { 4.0 };
+            let ff = p.fuel_flow * 3600.0 / n_eng;
+            let fuel = p.fuel;
+            let _ = x;
             let u = p.pos.normalize();
             let gs = (p.vel - u * p.vel.dot(u)).length() * 1.94384;
             return [
@@ -963,7 +987,7 @@ impl Game {
                 [p.n1 as f32, egt as f32, ff as f32, fuel as f32],
                 [mach as f32, gs as f32, (agl * 3.28084) as f32, tat as f32],
                 [p.throttle as f32, local as f32, p.gear as f32, p.flap_deg() as f32],
-                [1000.0 + card.rem_euclid(360.0), strobe, beacon as f32, if p.gear_down { 1.0 } else { 0.0 }],
+                [lit + card.rem_euclid(360.0), strobe * pw, beacon as f32 * pw, if p.gear_down { 1.0 } else { 0.0 }],
             ];
         }
         // Row 5's first slot carries the nav lights (on above 1000) and the compass card.
@@ -973,7 +997,7 @@ impl Game {
             g[2],
             g[3],
             [g[4][0], local as f32, p.gear as f32, p.flap_deg() as f32],
-            [1000.0 + card.rem_euclid(360.0), strobe, beacon as f32, if p.gear_down { 1.0 } else { 0.0 }],
+            [lit + card.rem_euclid(360.0), strobe * pw, beacon as f32 * pw, if p.gear_down { 1.0 } else { 0.0 }],
         ]
     }
 
@@ -1006,6 +1030,8 @@ impl Game {
         self.hold_spot = None;
         self.parking_brake = false;
         self.plane = Plane::spawn(self.spec, lat, lon, alt, heading, speed);
+        self.plane.fuel = self.spec.fuel_kg * self.menu.fuel;
+        self.plane.payload = self.start_payload();
         // The spawn speed is through the air, not over the ground.
         self.plane.wind = self.wx.steady(self.plane.pos, 300.0);
         self.plane.vel += self.plane.wind;
@@ -1030,6 +1056,11 @@ impl Game {
     fn respawn_ground(&mut self, lat: f64, lon: f64, h: f64, heading: f64, pitch: f64) {
         self.respawn_at(lat, lon, h + 10.0, heading, 0.0);
         self.plane = Plane::spawn_ground(self.spec, lat, lon, h, heading, pitch);
+        self.plane.fuel = self.spec.fuel_kg * self.menu.fuel;
+        self.plane.payload = self.start_payload();
+        if self.menu.cold {
+            self.plane.cold_and_dark();
+        }
         if let Some(spec) = &self.damage_spec {
             self.plane.dmg.apply_spec(spec);
         }
@@ -1122,7 +1153,12 @@ impl Game {
             boost: k(KeyCode::Space),
             reverse: k(KeyCode::KeyZ),
             throttle_set: None,
+            starter: k(KeyCode::KeyO),
         };
+        let mix = ax(k(KeyCode::PageUp), k(KeyCode::PageDown));
+        if mix != 0.0 && !self.spec.is_jet() {
+            self.plane.mixture = (self.plane.mixture + mix * 0.5 * dt).clamp(0.0, 1.0);
+        }
         let obs = ax(k(KeyCode::BracketRight), k(KeyCode::BracketLeft));
         if obs != 0.0 {
             self.radios.obs = (self.radios.obs + obs * 20.0 * dt).rem_euclid(360.0);
@@ -1265,6 +1301,7 @@ impl Game {
             boost: false,
             reverse: false,
             throttle_set: None,
+            starter: false,
         };
         let (look_x, look_y) = (dz(pad.value(Axis::RightStickX)), dz(pad.value(Axis::RightStickY)));
         let trim = if modifier && nav != Nav::Panel { ax_pad(pad.is_pressed(Button::DPadDown), pad.is_pressed(Button::DPadUp)) } else { 0.0 };
@@ -1376,6 +1413,63 @@ impl Game {
                 self.keys.remove(&a.key);
             }
         }
+    }
+
+    /// The payload chosen on the start screen (kg), or the aircraft's usual.
+    fn start_payload(&self) -> f64 {
+        let [usual, most, _] = self.spec.payload;
+        self.menu.payload.map(|f| f * most).unwrap_or(usual)
+    }
+
+    /// The pause menu's failures: each one by hand, or one now and then at random.
+    fn failures_page(&mut self, ui: &mut egui::Ui) {
+        use egui::RichText;
+        use menu::{DIM, TEXT};
+        menu::heading(ui, t!("FAILURES", "PANNES"));
+        ui.label(RichText::new(t!("They act as the real ones do: on the engine, the electrics, the gyros, the airspeed and altimeter, the fuel.", "Elles agissent comme les vraies : sur le moteur, l'électricité, les gyroscopes, l'anémomètre et l'altimètre, le carburant.")).size(12.0).color(DIM));
+        for i in 0..systems::Failures::N {
+            let mut on = self.plane.sys.fail.get(i);
+            if ui.checkbox(&mut on, RichText::new(systems::Failures::label(i)).color(TEXT)).changed() {
+                self.plane.sys.fail.set(i, on);
+            }
+        }
+        if ui.button(t!("Repair everything", "Tout réparer")).clicked() {
+            self.plane.sys.fail = systems::Failures::default();
+        }
+        ui.add_space(6.0);
+        menu::heading(ui, t!("AT RANDOM", "AU HASARD"));
+        if ui.checkbox(&mut self.fail_random, t!("A failure now and then, without warning", "Une panne de temps en temps, sans prévenir")).changed() {
+            self.fail_next = None;
+        }
+        ui.add_enabled_ui(self.fail_random, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(t!("About every", "En moyenne toutes les"));
+                ui.add(egui::Slider::new(&mut self.fail_mean, 5.0..=120.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.0} min")));
+            });
+        });
+    }
+
+    /// Random failures: one at a time, at intervals drawn around the mean.
+    fn random_failures(&mut self) {
+        if !self.fail_random || self.mode != Mode::Fly || self.crashed || self.pause_open {
+            if !self.fail_random {
+                self.fail_next = None;
+            }
+            return;
+        }
+        let mean = self.fail_mean * 60.0;
+        let next = *self.fail_next.get_or_insert_with(|| self.real + -(1.0 - self.rng.f() as f64).max(1e-6).ln() * mean);
+        if self.real < next {
+            return;
+        }
+        self.fail_next = None;
+        let free: Vec<usize> = (0..systems::Failures::N).filter(|&i| !self.plane.sys.fail.get(i)).collect();
+        if free.is_empty() {
+            return;
+        }
+        let i = free[((self.rng.f() * free.len() as f32) as usize).min(free.len() - 1)];
+        self.plane.sys.fail.set(i, true);
+        self.flash.push((t!("FAILURE: {}", "PANNE : {}", systems::Failures::label(i).to_uppercase()), self.real));
     }
 
     /// The flight panel's radios: NAV 1 (VOR or ILS) and the ADF tuned from
@@ -1514,8 +1608,16 @@ impl Game {
     fn nav_overlay(&self, ctx: &egui::Context, hdg: f64) {
         use egui::{Align2, Color32, FontId, Stroke};
         let pos = self.plane.pos;
-        let nav = self.radios.nav.as_ref().map(|s| (s, nav::nav_reading(s, self.radios.obs, pos)));
-        let adf = self.radios.adf.as_ref().map(|s| (s, nav::adf_bearing(s, pos, hdg)));
+        // (Without power the receivers are dead: OFF flags.)
+        let pw = self.plane.sys.powered();
+        let nav = self.radios.nav.as_ref().map(|s| {
+            let mut r = nav::nav_reading(s, self.radios.obs, pos);
+            if !pw {
+                (r.live, r.gs, r.dme) = (false, None, None);
+            }
+            (s, r)
+        });
+        let adf = self.radios.adf.as_ref().map(|s| (s, nav::adf_bearing(s, pos, hdg).filter(|_| pw)));
         if nav.is_none() && adf.is_none() {
             return;
         }
@@ -1899,6 +2001,36 @@ impl Game {
             KeyCode::KeyP => self.paused = !self.paused,
             KeyCode::KeyH => self.show_hud = !self.show_hud,
             KeyCode::KeyJ => self.radios.show = !self.radios.show,
+            KeyCode::Insert => {
+                let m = &mut self.plane.sys.elec.master;
+                *m = !*m;
+                self.status = if *m { t!("Battery master on", "Batterie (master) sur ON") } else { t!("Battery master off", "Batterie (master) sur OFF") }.into();
+                self.status_until = self.real + 3.0;
+            }
+            KeyCode::KeyI => {
+                self.plane.ignition = !self.plane.ignition;
+                let on = self.plane.ignition;
+                self.status = if self.spec.is_jet() {
+                    if on { t!("Fuel control switches: RUN", "Robinets carburant moteurs : RUN") } else { t!("Fuel control switches: CUTOFF", "Robinets carburant moteurs : CUTOFF") }
+                } else if on {
+                    t!("Magnetos on", "Magnétos sur BOTH")
+                } else {
+                    t!("Magnetos off", "Magnétos coupés")
+                }
+                .into();
+                self.status_until = self.real + 3.0;
+            }
+            KeyCode::KeyO if self.spec.is_jet() => {
+                self.plane.starter_on = true;
+                self.status = t!("Starters engaged", "Démarreurs engagés").into();
+                self.status_until = self.real + 3.0;
+            }
+            KeyCode::F4 => {
+                let on = self.plane.running || self.plane.starter_on;
+                if on { self.plane.stop_engine() } else { self.plane.start_engine() }
+                self.status = if on { t!("Engine shut down", "Moteur coupé") } else { t!("Starting the engine…", "Démarrage du moteur…") }.into();
+                self.status_until = self.real + 3.0;
+            }
             KeyCode::KeyX => {
                 self.radios.baro = None;
                 self.status = t!("Altimeter set to the QNH, {:.0} hPa", "Altimètre calé au QNH, {:.0} hPa", self.wx.qnh);
@@ -2363,6 +2495,7 @@ impl Game {
 
     fn frame(&mut self) {
         self.keep_settings(false);
+        self.random_failures();
         let now = Instant::now();
         let mut dt_real = (now - self.last).as_secs_f64().min(0.05);
         if self.fps_log.0 {
@@ -3677,6 +3810,34 @@ impl Game {
                             } else {
                                 ui.label(RichText::new(t!("Starting in the air:", "Départ en vol :")).size(12.0).color(DIM));
                             }
+                            ui.horizontal(|ui| {
+                                ui.label(t!("Fuel", "Carburant"));
+                                let kg = self.spec.fuel_kg;
+                                ui.add(egui::Slider::new(&mut self.menu.fuel, 0.05..=1.0).custom_formatter(move |v, _| format!("{:.0}%  ·  {:.0} kg", v * 100.0, v * kg)));
+                            });
+                            let [usual, most, _] = self.spec.payload;
+                            if most > usual {
+                                ui.horizontal(|ui| {
+                                    ui.label(t!("Payload", "Charge"));
+                                    let mut f = self.menu.payload.unwrap_or(usual / most);
+                                    if ui.add(egui::Slider::new(&mut f, 0.15..=1.0).custom_formatter(move |v, _| format!("{:.0} kg", v * most))).changed() {
+                                        self.menu.payload = Some(f);
+                                    }
+                                });
+                            }
+                            {
+                                // Mass and balance as it will be loaded.
+                                let mut probe = Plane::spawn(self.spec, 0.0, 0.0, 1000.0, 0.0, 50.0);
+                                probe.fuel = self.spec.fuel_kg * self.menu.fuel;
+                                probe.payload = self.start_payload();
+                                let s = self.spec;
+                                let out = probe.cg_excess() != 0.0;
+                                let text = t!("{:.0} kg  ·  CG {:.0}% MAC (limits {:.0}-{:.0}%){}", "{:.0} kg  ·  centrage {:.0} % MAC (limites {:.0}-{:.0} %){}", probe.mass(), probe.cg() * 100.0, s.cg[1] * 100.0, s.cg[2] * 100.0, if out { t!("  OUT OF LIMITS", "  HORS LIMITES") } else { "" });
+                                ui.label(RichText::new(text).size(11.5).color(if out { Color32::from_rgb(255, 120, 70) } else { DIM }));
+                            }
+                            if ground {
+                                ui.checkbox(&mut self.menu.cold, t!("Engine off (cold start: F4 starts it)", "Moteur arrêté (démarrage à froid : F4 pour démarrer)"));
+                            }
                             ui.add_enabled_ui(!ground, |ui| {
                                 egui::Grid::new("start_air").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
                                     ui.label(t!("Height", "Hauteur"));
@@ -4039,6 +4200,7 @@ impl Game {
                         }
                         menu::controls_list(ui)
                     }
+                    Page::Failures => self.failures_page(ui),
                     Page::Bindings => {
                         egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
                             self.bindings_page(ui);
@@ -4192,6 +4354,7 @@ impl Game {
                             self.wx.controls(ui, &mut self.utc, &mut self.doy, lon, false);
                         }
                         _ => {
+                            let mut engine_btn: Option<bool> = None;
                             let p = &self.plane;
                             let (_, _, u) = geo::enu(p.pos);
                             let vs = p.vel.dot(u);
@@ -4226,7 +4389,43 @@ impl Game {
                                     row(ui, t!("Speedbrake", "Aérofreins"), if p.spoilers > 0.6 { t!("ground spoilers", "spoilers sol").into() } else if p.speedbrake > 0.0 { t!("flight detent", "cran vol").into() } else { t!("down", "rentrés").to_string() }, TEXT);
                                 }
                                 row(ui, t!("Gear", "Train"), if p.gear >= 1.0 { t!("down", "sorti") } else if p.gear <= 0.0 { t!("up", "rentré") } else { t!("moving", "en mouvement") }.into(), TEXT);
+                                let low = Color32::from_rgb(255, 180, 50);
+                                row(ui, t!("Fuel", "Carburant"), format!("{:.0} kg  ·  {:.0}%", p.fuel, p.fuel_frac() * 100.0), if p.fuel_frac() < 0.1 { low } else { TEXT });
+                                let flow = match p.endurance() {
+                                    Some(e) => format!("{:.0} kg/h  ·  {}h{:02}", p.fuel_flow * 3600.0, (e / 3600.0) as u32, (e / 60.0) as u32 % 60),
+                                    None => "—".into(),
+                                };
+                                row(ui, t!("Fuel flow", "Débit"), flow, TEXT);
+                                let state = if p.running {
+                                    t!("running", "en marche").to_string()
+                                } else if p.starter_on || (p.prop_rate > 5.0 && !p.spec.is_jet() && p.ignition) {
+                                    t!("starting", "démarrage").to_string()
+                                } else {
+                                    t!("off", "arrêté").to_string()
+                                };
+                                let detail = if p.spec.is_jet() {
+                                    if p.ignition { "RUN" } else { "CUTOFF" }.to_string()
+                                } else {
+                                    t!("magnetos {} · mixture {:.0}%", "magnétos {} · mélange {:.0}%", if p.ignition { "ON" } else { "OFF" }, p.mixture * 100.0)
+                                };
+                                row(ui, t!("Engine", "Moteur"), format!("{state}  ·  {detail}"), if p.running { TEXT } else { low });
+                                row(ui, t!("Mass, balance", "Masse, centrage"), format!("{:.0} kg  ·  {:.0}% MAC", p.mass(), p.cg() * 100.0), if p.cg_excess() != 0.0 { Color32::from_rgb(255, 90, 60) } else { TEXT });
+                                let el = &p.sys.elec;
+                                let elec = if !el.master {
+                                    t!("master OFF (Ins)", "master sur OFF (Inser)").to_string()
+                                } else {
+                                    t!("{:.1} V  ·  battery {:.0}%  ·  {:+.0} A", "{:.1} V  ·  batterie {:.0}%  ·  {:+.0} A", el.volts, el.charge * 100.0, el.amps)
+                                };
+                                row(ui, t!("Electrics", "Électricité"), elec, if p.sys.powered() { TEXT } else { low });
+                                if p.sys.fail.any() {
+                                    let list: Vec<&str> = (0..systems::Failures::N).filter(|&i| p.sys.fail.get(i)).map(systems::Failures::label).collect();
+                                    row(ui, t!("Failures", "Pannes"), list.join(", "), Color32::from_rgb(255, 90, 60));
+                                }
                             });
+                            let on = p.running || p.starter_on;
+                            if ui.button(if on { t!("Shut the engine down  F4", "Couper le moteur  F4") } else { t!("Start the engine  F4", "Démarrer le moteur  F4") }).clicked() {
+                                engine_btn = Some(!on);
+                            }
                             let report = p.dmg.report();
                             if self.crashed {
                                 ui.label(RichText::new(if padui::active() { t!("Crashed. Close the panel (B), then A to respawn.", "Crash. Fermez le panneau (B), puis A pour réapparaître.") } else { t!("Crashed. R (or A on a gamepad) to respawn.", "Crash. R (ou A à la manette) pour réapparaître.") }).color(Color32::from_rgb(255, 90, 60)));
@@ -4270,6 +4469,11 @@ impl Game {
                                 });
                             }
                             ui.add_space(4.0);
+                            match engine_btn {
+                                Some(true) => self.plane.start_engine(),
+                                Some(false) => self.plane.stop_engine(),
+                                None => {}
+                            }
                             ui.label(RichText::new(if padui::active() { t!("Menu pauses: settings, the globe, quit.", "Menu met en pause : réglages, globe, quitter.") } else { t!("Esc pauses: settings, the globe, quit.", "Échap met en pause : réglages, globe, quitter.") }).size(11.5).color(ACCENT.gamma_multiply(0.8)));
                         }
                     }
@@ -4402,6 +4606,7 @@ impl Game {
                         }
                         let gear = if p.gear >= 1.0 { "DOWN".to_string() } else if p.gear <= 0.0 { "UP".to_string() } else { "transit".to_string() };
                         let sb = if p.spoilers > 0.05 { "   SPDBRK" } else { "" };
+                        shadow(ui, format!("FUEL {:>3.0}%   {:.0} kg{}", p.fuel_frac() * 100.0, p.fuel, if p.running { "" } else { "   ENG OFF" }), 14.0, if p.fuel_frac() < 0.1 || !p.running { Color32::from_rgb(255, 190, 60) } else { dim });
                         shadow(ui, format!("FLAPS {:>2.0}°   GEAR {}{sb}", p.flap_notch_deg(), gear), 14.0, if p.gear > 0.0 && p.gear < 1.0 { Color32::from_rgb(255, 190, 60) } else { dim });
                         if p.gear < 1.0 && agl < 150.0 && p.throttle < 0.35 && !self.crashed {
                             if pad {
@@ -4516,6 +4721,24 @@ impl Game {
                 }
                 if p.g_load.abs() > 5.0 {
                     warn.push(("OVER G", if p.dmg.fatigue > 1.2 { red } else { amber }));
+                }
+                if p.fuel <= 0.0 {
+                    warn.push(("NO FUEL", red));
+                } else if p.fuel_frac() < 0.1 {
+                    warn.push(("LOW FUEL", amber));
+                }
+                if !p.running && !p.on_ground {
+                    warn.push(("ENGINE OFF", red));
+                }
+                let el = &p.sys.elec;
+                if el.master && (el.volts < 24.0 || (p.sys.fail.alternator && p.running)) {
+                    warn.push(("LOW VOLTS", amber));
+                }
+                if p.sys.fail.vacuum && !p.spec.is_jet() {
+                    warn.push(("VACUUM", amber));
+                }
+                if p.cg_excess() != 0.0 {
+                    warn.push(("CG LIMIT", amber));
                 }
             }
             let report = if self.crashed { Vec::new() } else { p.dmg.report() };
