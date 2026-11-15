@@ -29,7 +29,6 @@ fn shaders_validate() {
         ("lut", include_str!("../src/shaders/lut.wgsl")),
         ("terrain", include_str!("../src/shaders/terrain.wgsl")),
         ("photo", include_str!("../src/shaders/photo.wgsl")),
-        ("plane", include_str!("../src/shaders/plane.wgsl")),
         ("post", include_str!("../src/shaders/post.wgsl")),
         ("particles_sim", include_str!("../src/shaders/particles_sim.wgsl")),
         ("particles_draw", include_str!("../src/shaders/particles_draw.wgsl")),
@@ -51,5 +50,6 @@ fn shaders_validate() {
     for (name, src) in [("composite", include_str!("../src/shaders/composite.wgsl")), ("clouds", include_str!("../src/shaders/clouds.wgsl"))] {
         ok &= check(name, &format!("{common}\n{sky}\n{src}"));
     }
+    // plane.wgsl takes the 747 deck's string table: checked in b747::deck's tests.
     assert!(ok, "shader errors above");
 }

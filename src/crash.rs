@@ -119,8 +119,9 @@ pub const GLASS: f32 = 9.0; // shards of window glass
 
 impl Crash {
     /// `meshes`: renderer meshes of the aircraft's breakable groups, then the two
-    /// shard shapes; `tears`: the break each group already had.
-    pub fn new(imp: &Impact, plane: &Plane, meshes: &[usize], tears: &[[Tear; 2]], seed: u64, wind: DVec3) -> Self {
+    /// shard shapes; `pivots`: each group's centre and size (body frame);
+    /// `tears`: the break each group already had.
+    pub fn new(imp: &Impact, plane: &Plane, meshes: &[usize], pivots: &[(Vec3, f32)], tears: &[[Tear; 2]], seed: u64, wind: DVec3) -> Self {
         let mut rng = Rng(seed | 1);
         let (lat, lon, _) = geo::pos_to_lla(imp.pos);
         let site = geo::lla_to_pos(lat, lon, imp.ground_h);
@@ -134,11 +135,13 @@ impl Crash {
         let carry = slide * 0.55 + up * (vn.abs() * 0.25 + 4.0);
         // The parts: each group as it was, except that the wings go to pieces
         // too, snapping across at a station or two (angled, ragged breaks).
-        let mut parts: Vec<(usize, Vec3, f32, [Tear; 2], f32)> = GROUP_PIVOTS.iter().enumerate().map(|(i, &(p, r))| (meshes[i], p, r, tears.get(i).copied().unwrap_or([Tear::NONE; 2]), damage::JAG)).collect();
+        let mut parts: Vec<(usize, Vec3, f32, [Tear; 2], f32)> = pivots.iter().enumerate().map(|(i, &(p, r))| (meshes[i], p, r, tears.get(i).copied().unwrap_or([Tear::NONE; 2]), damage::JAG)).collect();
         for s in 0..2 {
             let gi = airframe::G_LWING + s;
+            let spec = plane.spec;
+            let k = spec.span / 5.5;
             let end = plane.dmg.wing[s];
-            let cuts = if end < 2.2 || rng.f() < 0.2 { 0 } else if end > 3.6 && rng.f() < 0.25 + 0.3 * (power - 0.7) { 2 } else { 1 };
+            let cuts = if end < 2.2 * k || rng.f() < 0.2 { 0 } else if end > 3.6 * k && rng.f() < 0.25 + 0.3 * (power - 0.7) { 2 } else { 1 };
             if cuts == 0 {
                 continue;
             }
@@ -146,13 +149,14 @@ impl Crash {
             let mut st = end;
             let mut breaks = Vec::new();
             let mut prev = plane.dmg.stump(s);
-            for k in 0..cuts {
-                let room = st - 0.9 - 0.8 * (cuts - 1 - k) as f32;
-                if room < 0.8 {
+            for c in 0..cuts {
+                let n = (cuts - 1 - c) as f32;
+                let room = st - (0.9 + 0.8 * n) * k;
+                if room < 0.8 * k {
                     break;
                 }
-                st = rng.range(0.8 + 0.8 * (cuts - 1 - k) as f32, room);
-                let t = damage::wing_break(s, st, rng.range(-0.7, 0.7), rng.range(-0.25, 0.25), rng.range(0.06, 0.32), &prev);
+                st = rng.range((0.8 + 0.8 * n) * k, room);
+                let t = damage::wing_break(spec, s, st, rng.range(-0.7, 0.7) * k, rng.range(-0.25, 0.25), rng.range(0.06, 0.32) * k.sqrt(), &prev);
                 breaks.push((st, t));
                 prev = t;
             }
@@ -161,18 +165,18 @@ impl Crash {
             let mut outer = (end, stump);
             for &(st, t) in &breaks {
                 // The piece between this break and the one beyond it.
-                let mid = damage::wing_pt(s, (st + outer.0) * 0.5, 0.4, 0.0);
-                parts.push((mesh, mid, ((outer.0 - st) * 0.5).max(0.4), [t.flip(), outer.1], t.jag));
+                let mid = damage::wing_pt(spec, s, (st + outer.0) * 0.5, 0.4, 0.0);
+                parts.push((mesh, mid, ((outer.0 - st) * 0.5).max(0.4 * k), [t.flip(), outer.1], t.jag));
                 outer = (st, t);
             }
-            parts[gi] = (mesh, damage::wing_pt(s, outer.0 * 0.5, 0.4, 0.0), (outer.0 * 0.5).max(0.5), [outer.1, Tear::NONE], outer.1.jag.max(0.05));
+            parts[gi] = (mesh, damage::wing_pt(spec, s, outer.0 * 0.5, 0.4, 0.0), (outer.0 * 0.5).max(0.5 * k), [outer.1, Tear::NONE], outer.1.jag.max(0.05));
         }
         for (i, &(mesh, pivot, radius, tear, jag)) in parts.iter().enumerate() {
             let wpos = plane.pos + plane.rot * pivot.as_dvec3();
             let out = (wpos - imp.pos).normalize_or_zero() + up * 0.6;
             let v = carry * rng.range(0.5, 1.1) as f64 + out * rng.range(6.0, 22.0) as f64 * power as f64 + rng.dir().as_dvec3() * (speed * 0.12) as f64;
             // Pieces of wing burn on less long than the fuselage with its tanks' worth.
-            let split = i >= GROUP_PIVOTS.len();
+            let split = i >= pivots.len();
             debris.push(Debris {
                 mesh,
                 origin: pivot,
@@ -197,7 +201,7 @@ impl Crash {
             let d = (rng.dir() + up.as_vec3() * 1.1).normalize();
             let sp = rng.range(18.0, 70.0) * power;
             debris.push(Debris {
-                mesh: meshes[airframe::GROUPS.len() + k % 2],
+                mesh: meshes[airframe::N_GROUPS + k % 2],
                 origin: Vec3::ZERO,
                 pos: site + up * 1.0 + rng.dir().as_dvec3() * 2.0,
                 vel: carry * rng.range(0.2, 0.9) as f64 + (d * sp).as_dvec3(),
@@ -619,16 +623,6 @@ impl Crash {
     }
 }
 
-/// Where each breakable group of the aircraft is centred, and how big it is.
-const GROUP_PIVOTS: [(Vec3, f32); 7] = [
-    (Vec3::new(0.0, 0.0, -0.4), 1.5),
-    (Vec3::new(0.0, 0.3, 3.0), 1.9),
-    (Vec3::new(-2.8, 0.75, -0.1), 2.8),
-    (Vec3::new(2.8, 0.75, -0.1), 2.8),
-    (Vec3::new(0.0, -0.1, -2.6), 0.7),
-    (Vec3::new(0.0, -0.03, -3.3), 1.0),
-    (Vec3::new(0.0, -1.0, -0.4), 1.6),
-];
 
 /// Two generic bits of wreckage: a torn skin panel and a lump of metal.
 pub fn shards() -> [Mesh; 2] {

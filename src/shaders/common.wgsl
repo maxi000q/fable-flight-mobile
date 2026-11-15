@@ -43,10 +43,14 @@ struct Globals {
   // north axis + first vertex. Their outlines, two vertices (east, north) a row.
   cut: array<vec4f, 48>,
   cut_v: array<vec4f, 128>,
-  // Cloud shadow map (render.rs CloudShadow, see cloud_sun): the one to look up, then
-  // the one being drawn. Each: centre direction + inner half size; east axis + outer
-  // half size; north axis + first layer; base and top of its bands, valid.
-  cs: array<vec4f, 8>,
+  // Cloud shadow maps (render.rs CloudShadow, see cloud_sun): the one lookups read
+  // (t_cshadow), then the one being drawn. Each, six vec4s: anchor centre direction
+  // + inner half size; east axis + outer half size; north axis + first layer; base
+  // and top of its bands, centre (m, east and north of the anchor on its tangent
+  // plane); the sun it was drawn for + valid; the cloud drift (G.weather.xyz) when
+  // it was begun. The looked-up one is a cross-fade of two maps, with their sun and
+  // drift blended the same way.
+  cs: array<vec4f, 12>,
   alto: vec4f,       // mid-level cloud: amount 0..1, height (m)
   // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
   // toward (east, north); wind (m/s), significant wave height (m), whitecap
@@ -77,7 +81,7 @@ struct Globals {
 @group(0) @binding(14) var s_detail: sampler;
 // Where the photorealistic 3D tiles are drawn, seen from above (tiles3d.rs).
 @group(0) @binding(15) var t_photo: texture_2d<f32>;
-// Cloud shadow map, two cascades double-buffered (see cloud_sun).
+// Cloud shadow map, the two cascades (see cloud_sun).
 @group(0) @binding(16) var t_cshadow: texture_2d_array<f32>;
 // The ocean's three wave cascades (ocean.wgsl): layer c = (Dx, Dy, height,
 // Dxy), layer c + 3 = (dh/dx, dh/dy, Dxx, Dyy); layer 6 the whitecaps on
@@ -215,7 +219,7 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
     let sm = MIE_S * d.y;
     // Air in the shadow of a cloud gets no sunlight (light shafts through the gaps);
     // under a closed deck the light that remains is the deck's dull grey.
-    let cl = cloud_sun(p);
+    let cl = cloud_sun(p, false);
     var msl = ms_lut(h, mu);
     msl = mix(msl, vec3f(luma(msl)), cl.closed * 0.75) * (1.0 - 0.45 * cl.closed);
     var S = sun_trans(h, mu) * cl.vis * (sr * pr + vec3f(sm * pm)) + msl * (sr + vec3f(sm));
@@ -464,15 +468,39 @@ fn cloud_density(pp: vec3f, h: f32, cheap: bool) -> f32 {
 // in w how closed the deck is there (1 = overcast).
 // vis: the share of direct sunlight left (with the forward-scattered glow that
 // thinner cloud lets through); closed: the deck overhead, for points under it.
+// hq: smooth (cubic B-spline) filtering, for surfaces; the haze marches, which
+// call it many times a pixel, take one bilinear fetch.
 struct CloudSun { vis: f32, closed: f32 };
-fn cloud_sun(pc: vec3f) -> CloudSun {
+const CS_RES = 1024.0;
+fn cs_fetch(uv: vec2f, layer: i32, hq: bool) -> vec4f {
+  if (!hq) { return textureSampleLevel(t_cshadow, s_clamp, uv, layer, 0.0); }
+  // Cubic B-spline from four bilinear taps: no texel corners in the shadow's outline.
+  let p = uv * CS_RES - 0.5;
+  let i = floor(p);
+  let f = p - i;
+  let f2 = f * f;
+  let f3 = f2 * f;
+  let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  let w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+  let w3 = f3 / 6.0;
+  let g0 = w0 + w1;
+  let g1 = w2 + w3;
+  let c0 = (i - 0.5 + w1 / g0) / CS_RES;
+  let c1 = (i + 1.5 + w3 / g1) / CS_RES;
+  return g0.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, c0, layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c1.x, c0.y), layer, 0.0))
+       + g1.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c0.x, c1.y), layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, c1, layer, 0.0));
+}
+fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   var o = CloudSun(1.0, 0.0);
   let base = G.cs[3].x;
   let top = G.cs[3].y;
   let r = length(pc);
   let h = r - G.planet.w;
-  if (G.cs[3].z < 0.5 || h >= top) { return o; }
-  let sun = G.sun_dir.xyz;
+  if (G.cs[4].w < 0.5 || h >= top) { return o; }
+  // The sun the maps were drawn for (it differs from this frame's by a fraction
+  // of a degree while the clock runs fast).
+  let sun = G.cs[4].xyz;
   let mu = dot(pc / r, sun);
   let R = G.planet.w + base;
   // Exactly along the sun (a low sun's rays cross the base tens of km away): forward
@@ -482,16 +510,21 @@ fn cloud_sun(pc: vec3f) -> CloudSun {
     let s = ray_sphere(pc, -sun, R);
     ts = select((base - h) / max(mu, 0.04), -s.x, s.x > 0.0);
   }
-  let qn = normalize(pc + sun * ts);
-  let loc = vec2f(dot(qn, G.cs[1].xyz), dot(qn, G.cs[2].xyz)) / max(dot(qn, G.cs[0].xyz), 0.5) * R;
-  let L = i32(G.cs[2].w);
+  // The clouds have drifted on with the wind since the maps were drawn.
+  let qn = normalize(pc + sun * ts + (G.weather.xyz - G.cs[5].xyz));
+  let loc = vec2f(dot(qn, G.cs[1].xyz), dot(qn, G.cs[2].xyz)) / max(dot(qn, G.cs[0].xyz), 0.5) * R - G.cs[3].zw;
   let ui = loc / G.cs[0].w * 0.5 + 0.5;
   let uo = loc / G.cs[1].w * 0.5 + 0.5;
   let ei = max(abs(ui.x - 0.5), abs(ui.y - 0.5)) * 2.0;
   let eo = max(abs(uo.x - 0.5), abs(uo.y - 0.5)) * 2.0;
   if (eo >= 1.0) { return o; }
-  var v = textureSampleLevel(t_cshadow, s_clamp, uo, L + 1, 0.0);
-  if (ei < 1.0) { v = mix(textureSampleLevel(t_cshadow, s_clamp, ui, L, 0.0), v, smoothstep(0.8, 0.98, ei)); }
+  var v: vec4f;
+  if (ei < 0.8) {
+    v = cs_fetch(ui, 0, hq);
+  } else {
+    v = cs_fetch(uo, 1, hq);
+    if (ei < 1.0) { v = mix(cs_fetch(ui, 0, hq), v, smoothstep(0.8, 0.98, ei)); }
+  }
   // Optical depth still above this point.
   let f = sqrt(clamp((h - base) / (top - base), 0.0, 1.0)) * 3.0;
   let below = select(select(mix(v.y, v.z, f - 2.0), mix(v.x, v.y, f - 1.0), f < 2.0), v.x * f, f < 1.0);
@@ -906,7 +939,7 @@ fn light_at_nv(P: vec3f) -> Light {
   let upn = pp / r;
   let h = r - G.planet.w;
   let mu = dot(upn, G.sun_dir.xyz);
-  let sun = sun_trans(h, mu) * G.sun_dir.w * cloud_sun(pp).vis;
+  let sun = sun_trans(h, mu) * G.sun_dir.w * cloud_sun(pp, true).vis;
   // Skylight falls off steeply once the sun is down: about half a decade per
   // 3 degrees of twilight (the exp term), so a street at blue hour is far
   // darker than the glowing sky above it rather than as bright as overcast day.

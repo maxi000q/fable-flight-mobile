@@ -123,6 +123,8 @@ pub struct Menu {
     pub start_agl: f64,
     /// airport markers drawn on the globe last frame: (index, x, y in physical pixels)
     pub markers: Vec<(u32, f32, f32)>,
+    /// which aircraft to fly (index into `aircraft::ALL`)
+    pub aircraft: usize,
 }
 
 /// How to start at an airport chosen on the globe.
@@ -138,7 +140,7 @@ pub enum Start {
 
 impl Menu {
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, show_controls: false, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new() }
+        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, show_controls: false, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0 }
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {
@@ -289,6 +291,8 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("B", "wheel brakes"),
         ("F / V", "flaps down / up a notch"),
         ("L", "landing gear down / up"),
+        ("/", "speedbrake (airliners)"),
+        ("Z", "thrust reversers, on the ground (hold)"),
         ("K", "set the heading indicator to the compass"),
     ]),
     ("VIEW", &[

@@ -123,8 +123,8 @@ pub struct Globals {
     pub cut: [[f32; 4]; 3 * crate::tiles3d::MAX_CUTS],
     pub cut_v: [[f32; 4]; crate::tiles3d::MAX_CUT_V / 2],
     /// cloud shadow map (`CloudShadow`, set by the renderer): the one to look up
-    /// (centre, east, north axes; base/top of its bands), then the one being drawn
-    pub cs: [[f32; 4]; 8],
+    /// (`CloudShadow`, common.wgsl `cloud_sun`): the one lookups read, the one being drawn
+    pub cs: [[f32; 4]; 2 * CS_MAP],
     /// mid-level cloud: amount 0..1, height (m)
     pub alto: [f32; 4],
     /// the ocean (ocean.rs `Ocean::globals`): offset of its coordinates and
@@ -140,36 +140,59 @@ pub struct Globals {
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
 /// `cloud_sun`). Each texel is a ray along the sun from a point on the cloud
 /// base; it holds the cloud's optical depth in three height bands and how
-/// closed the deck is there. Two cascades around the camera, double-buffered in
-/// a four-layer array: the back pair is redrawn a slice of rows per frame around
-/// a centre that holds still for the cycle, then becomes the front.
+/// closed the deck is there. Two cascades around the camera, in three slots of
+/// a six-layer array: the back map is redrawn a slice of rows per frame, while
+/// what lookups read (a separate two-layer texture, csmix.wgsl) cross-fades
+/// from the previous map to the front one over the same cycle, so the shadows
+/// glide instead of stepping when a map is swapped in. Each map keeps the sun
+/// it was drawn for (aimed ahead at where the sun will be while it shows) and
+/// the wind drift of the clouds then, which lookups make up for. Map centres
+/// snap to whole outer texels of a fixed tangent frame, so one map's texels sit
+/// exactly where the last one's did: no crawling, and the cross-fade is a plain
+/// texel-by-texel blend.
 const CS_RES: u32 = 1024;
 const CS_SLICES: u32 = 16;
 const CS_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// half sizes of the two cascades, metres
 const CS_INNER: f64 = 40000.0;
 const CS_OUTER: f64 = 200000.0;
+/// vec4s of Globals.cs per map (common.wgsl `cs_map`)
+pub const CS_MAP: usize = 6;
 /// how far the mid-level layer reaches above its height (clouds.wgsl ALTO_TOP)
 const ALTO_TOP: f32 = 700.0;
+type CsMap = [[f32; 4]; CS_MAP];
 struct CloudShadow {
     p_in: wgpu::RenderPipeline,
     p_out: wgpu::RenderPipeline,
     layers: Vec<wgpu::TextureView>,
-    front: [[f32; 4]; 4],
-    back: [[f32; 4]; 4],
-    /// first layer of the front pair (0 or 2)
-    front_layer: u32,
+    /// the cross-fade into what lookups read
+    p_mix: [wgpu::RenderPipeline; 2],
+    bg_mix: wgpu::BindGroup,
+    mix_ub: wgpu::Buffer,
+    mix_layers: Vec<wgpu::TextureView>,
+    prev: CsMap,
+    front: CsMap,
+    back: CsMap,
+    /// slots (pairs of layers) of the previous, front and back maps
+    slot: [u32; 3],
     slice: u32,
     ok: bool,
+    /// the tangent frame map centres snap in: centre, east, north
+    anchor: [glam::DVec3; 3],
+    /// last frame's sun, and how far it moves per frame (smoothed)
+    sun: glam::DVec3,
+    sun_v: glam::DVec3,
+    /// this frame's cross-fade: layers, usable, shifts; weight
+    mix: ([i32; 8], f32),
 }
 
 impl CloudShadow {
     /// Where the map should be now: around the point of the cloud base the sun
-    /// shines down through onto the ground below the camera.
-    fn aim(g: &Globals) -> [[f32; 4]; 4] {
+    /// shines down through onto the ground below the camera. The sun it is drawn
+    /// for is `sun` (unit).
+    fn aim(&mut self, g: &Globals, sun: glam::DVec3, reanchor: bool) -> CsMap {
         let v = |a: &[f32; 4]| glam::DVec3::new(a[0] as f64, a[1] as f64, a[2] as f64);
         let up = (-v(&g.planet)).normalize();
-        let sun = v(&g.sun_dir);
         // The bands reach up to the mid-level layer when there is one.
         let (base, mut top) = (g.cloud[1], g.cloud[3].max(g.cloud[1] + 100.0));
         if g.alto[0] > 0.0 {
@@ -177,43 +200,95 @@ impl CloudShadow {
         }
         let mu = up.dot(sun);
         // Where the sun's ray from the ground below crosses the cloud base (far off for a low sun).
-        let (gp, rb) = (up * g.planet[3] as f64, g.planet[3] as f64 + base as f64);
+        let rb = g.planet[3] as f64 + base as f64;
+        let gp = up * g.planet[3] as f64;
         let b = gp.dot(sun);
         let t = -b + (b * b - gp.length_squared() + rb * rb).max(0.0).sqrt();
         let c = if mu > -0.05 { (gp + sun * t.min(150000.0)).normalize() } else { up };
-        let east = v(&g.east);
-        let e = (east - c * east.dot(c)).normalize();
-        let n = c.cross(e);
+        // Snap the centre to whole outer texels (5 inner ones) in the anchor's
+        // gnomonic plane; a new anchor once the centre has wandered far from it.
+        let [ca, ea, na] = self.anchor;
+        let gno = |c: glam::DVec3| glam::DVec2::new(c.dot(ea), c.dot(na)) / c.dot(ca).max(0.5) * rb;
+        if reanchor || ca.dot(c) < 0.9 || gno(c).length() > 100000.0 {
+            let east = v(&g.east);
+            let e = (east - c * east.dot(c)).normalize();
+            self.anchor = [c, e, c.cross(e)];
+        }
+        let [ca, ea, na] = self.anchor;
+        let step = 2.0 * CS_OUTER / CS_RES as f64;
+        let o = (gno(c) / step).round() * step;
         let f = |a: glam::DVec3, w: f64| [a.x as f32, a.y as f32, a.z as f32, w as f32];
-        [f(c, CS_INNER), f(e, CS_OUTER), f(n, 0.0), [base, top, 1.0, 0.0]]
+        [f(ca, CS_INNER), f(ea, CS_OUTER), f(na, 0.0), [base, top, o.x as f32, o.y as f32], f(sun, 1.0), [g.weather[0], g.weather[1], g.weather[2], 0.0]]
     }
 
-    /// Fill in this frame's maps; true when the back pair is to be drawn whole.
+    /// Fill in this frame's maps; true when the back map is to be drawn whole.
     fn prepare(&mut self, g: &mut Globals) -> bool {
-        let want = Self::aim(g);
-        let dot = |a: &[f32; 4], b: &[f32; 4]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        // A jump (new flight, teleport, a new cloud base) redraws it all at once.
-        let jumped = dot(&self.front[0], &want[0]) < (0.3 * CS_INNER / 6.4e6).cos() as f32
+        let v = |a: &[f32; 4]| glam::DVec3::new(a[0] as f64, a[1] as f64, a[2] as f64);
+        // The sun's motion per frame (fast when time runs faster); a jump of the
+        // clock (or the first frame) is not motion.
+        let sun = v(&g.sun_dir).normalize();
+        let ds = sun - self.sun;
+        let sun_jump = !self.ok || ds.length() > 0.015;
+        self.sun_v = if sun_jump { glam::DVec3::ZERO } else { self.sun_v * 0.9 + ds * 0.1 };
+        self.sun = sun;
+        // Aim each map at the sun of the frame it shows at most: two cycles on,
+        // when the lookups have cross-faded fully onto it.
+        let ahead = (sun + self.sun_v * (2 * CS_SLICES) as f64).normalize();
+        // A jump (new flight, teleport, a new cloud base, a clock set by hand) redraws it all at once.
+        let want = self.aim(g, ahead, !self.ok);
+        let cen = |m: &CsMap| (v(&m[0]) + (v(&m[1]) * m[3][2] as f64 + v(&m[2]) * m[3][3] as f64) / 6.4e6).normalize();
+        let jumped = cen(&self.front).dot(cen(&want)) < (0.3 * CS_INNER / 6.4e6).cos()
             || (self.front[3][0] - want[3][0]).abs() > 50.0
-            || (self.front[3][1] - want[3][1]).abs() > 200.0;
+            || (self.front[3][1] - want[3][1]).abs() > 200.0
+            || sun_jump;
         let full = !self.ok || jumped;
         if full || self.slice == 0 {
             self.back = want;
         }
-        let back_layer = self.front_layer ^ 2;
-        self.back[2][3] = back_layer as f32;
-        let front = if full { self.back } else { self.front };
-        g.cs[..4].copy_from_slice(&front);
-        g.cs[4..].copy_from_slice(&self.back);
+        if full {
+            // Nothing to fade from: every map is the one drawn now.
+            let s = (self.slot[1] + 1) % 3;
+            self.slot = [s, s, (s + 1) % 3];
+            self.slice = 0;
+        }
+        let layer = |s: u32| (s * 2) as f32;
+        self.back[2][3] = layer(if full { self.slot[0] } else { self.slot[2] });
+        let (prev, front) = if full { (self.back, self.back) } else { (self.prev, self.front) };
+        // How far the lookups have faded from the previous map to the front one;
+        // not at all across a change of tangent frame (texels no longer line up).
+        let same = prev[..2] == front[..2] && prev[2][..3] == front[2][..3];
+        let a = if full || !same { 1.0 } else { (self.slice + 1) as f32 / CS_SLICES as f32 };
+        let lerp = |i: usize| -> [f32; 4] { std::array::from_fn(|j| prev[i][j] + (front[i][j] - prev[i][j]) * a) };
+        // Lookups use the front map's grid, with the sun and drift in between.
+        let mut look = front;
+        let s = v(&lerp(4)).normalize();
+        look[4] = [s.x as f32, s.y as f32, s.z as f32, 1.0];
+        look[5] = lerp(5);
+        g.cs[..CS_MAP].copy_from_slice(&look);
+        g.cs[CS_MAP..].copy_from_slice(&self.back);
+        // Front-to-previous texel shift of each cascade (whole texels: centres snap to outer ones).
+        let sh = |ext: f64, k: usize| ((front[3][2 + k] - prev[3][2 + k]) as f64 * CS_RES as f64 / (2.0 * ext)).round() as i32;
+        let lay = |s: u32| (s * 2) as i32;
+        let (lp, lf) = if full { (lay(self.slot[0]), lay(self.slot[0])) } else { (lay(self.slot[0]), lay(self.slot[1])) };
+        let p: [i32; 8] = [lp, lf, (a < 1.0) as i32, 0, sh(CS_INNER, 0), sh(CS_INNER, 1), sh(CS_OUTER, 0), sh(CS_OUTER, 1)];
+        self.mix = (p, a);
         full
     }
 
-    /// Draw (a slice of) the back pair, then swap once it is complete.
+    /// The cross-fade's parameters (csmix.wgsl `Mix`) for this frame.
+    fn mix_bytes(&self) -> [u8; 48] {
+        let mut b = [0u8; 48];
+        b[..32].copy_from_slice(bytemuck::cast_slice(&self.mix.0));
+        b[32..36].copy_from_slice(&self.mix.1.to_ne_bytes());
+        b
+    }
+
+    /// Draw (a slice of) the back map, then make it the front once it is complete.
     fn draw(&mut self, enc: &mut wgpu::CommandEncoder, bg0: &wgpu::BindGroup, full: bool) {
-        let back_layer = self.front_layer ^ 2;
+        let back_layer = self.back[2][3] as usize;
         let rows = CS_RES / CS_SLICES;
         for (k, p) in [&self.p_in, &self.p_out].into_iter().enumerate() {
-            let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&self.layers[back_layer as usize + k], false))], None));
+            let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&self.layers[back_layer + k], false))], None));
             rp.set_pipeline(p);
             rp.set_bind_group(0, bg0, &[]);
             if !full {
@@ -221,16 +296,28 @@ impl CloudShadow {
             }
             rp.draw(0..3, 0..1);
         }
-        if full {
-            self.slice = CS_SLICES;
-        } else {
-            self.slice += 1;
+        // What lookups read this frame, from the maps as they were before this
+        // frame's slice (the back map's slot is neither of them).
+        for (k, p) in self.p_mix.iter().enumerate() {
+            let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&self.mix_layers[k], false))], None));
+            rp.set_pipeline(p);
+            rp.set_bind_group(0, &self.bg_mix, &[]);
+            rp.draw(0..3, 0..1);
         }
-        if self.slice >= CS_SLICES {
+        if full {
+            self.prev = self.back;
             self.front = self.back;
-            self.front_layer = back_layer;
-            self.slice = 0;
             self.ok = true;
+            return;
+        }
+        self.slice += 1;
+        if self.slice >= CS_SLICES {
+            // previous <- front <- back; the slot neither of them holds is drawn next.
+            self.prev = self.front;
+            self.front = self.back;
+            let (p, f) = (self.slot[1], self.slot[2]);
+            self.slot = [p, f, (0..3).find(|&s| s != p && s != f).unwrap()];
+            self.slice = 0;
         }
     }
 }
@@ -1008,7 +1095,7 @@ impl Renderer {
         let m_photo = module("photo", include_str!("shaders/photo.wgsl"));
         let facade = include_str!("shaders/facade.wgsl");
         let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
-        let m_obj = module("plane", include_str!("shaders/plane.wgsl"));
+        let m_obj = module("plane", &format!("{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl")));
         let sky = include_str!("shaders/sky.wgsl");
         let m_comp = module("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
         let m_cloud = module("clouds", &format!("{sky}\n{}", include_str!("shaders/clouds.wgsl")));
@@ -1050,7 +1137,7 @@ impl Renderer {
         let black = view(&make_tex(d, "black", 1, 1, 1, 1, HDR, rt));
         let cs_tex = d.create_texture(&wgpu::TextureDescriptor {
             label: Some("cloud shadow"),
-            size: wgpu::Extent3d { width: CS_RES, height: CS_RES, depth_or_array_layers: 4 },
+            size: wgpu::Extent3d { width: CS_RES, height: CS_RES, depth_or_array_layers: 6 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1059,8 +1146,23 @@ impl Renderer {
             view_formats: &[],
         });
         let cs_all = cs_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        let cs_layers: Vec<_> = (0..4)
+        let cs_layers: Vec<_> = (0..6)
             .map(|i| cs_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: i, array_layer_count: Some(1), ..Default::default() }))
+            .collect();
+        // What lookups read: the two cascades cross-faded between the last two maps.
+        let cs_mix_tex = d.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud shadow mix"),
+            size: wgpu::Extent3d { width: CS_RES, height: CS_RES, depth_or_array_layers: 2 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CS_FMT,
+            usage: rt,
+            view_formats: &[],
+        });
+        let cs_mix = cs_mix_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        let cs_mix_layers: Vec<_> = (0..2)
+            .map(|i| cs_mix_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: i, array_layer_count: Some(1), ..Default::default() }))
             .collect();
         // No cloud shadow (all zeros) for the passes that draw it or run before it.
         let no_cs = make_tex(d, "no cloud shadow", 1, 1, 1, 1, CS_FMT, rt).create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
@@ -1174,7 +1276,7 @@ impl Renderer {
                 ],
             })
         };
-        let bg0 = make_bg0(&lut_sky, &lut_trans, &lut_ms, &shadow_all, &vol_light, &photo_mask, &cs_all);
+        let bg0 = make_bg0(&lut_sky, &lut_trans, &lut_ms, &shadow_all, &vol_light, &photo_mask, &cs_mix);
         // Variant for passes that render into the LUTs / shadow map / smoke volume / photo mask / cloud shadow themselves.
         let bg0_pre = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
         let bg0_shadow = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &photo_mask, &no_cs);
@@ -1260,15 +1362,33 @@ impl Renderer {
         let p_trans = full("trans", &pl0, &m_lut, "fs_trans", HDR, None);
         let p_ms = full("ms", &pl0, &m_lut, "fs_ms", HDR, None);
         let p_sky = full("sky", &pl0, &m_lut, "fs_sky", HDR, None);
+        let l_csmix = layout("cloud shadow mix", &[tex_entry(0, wgpu::TextureViewDimension::D2Array, false), ub_entry(1, false, 48)]);
+        let mix_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("cloud shadow mix"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let bg_mix = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cloud shadow mix"),
+            layout: &l_csmix,
+            entries: &[tex_res(0, &cs_all), wgpu::BindGroupEntry { binding: 1, resource: mix_ub.as_entire_binding() }],
+        });
+        let m_csmix = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("csmix"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/csmix.wgsl").into()) });
+        let pl_csmix = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l_csmix)], immediate_size: 0 });
         let cshadow = CloudShadow {
             p_in: full("cloud shadow", &pl0, &m_cloud, "fs_cshadow_in", CS_FMT, None),
             p_out: full("cloud shadow", &pl0, &m_cloud, "fs_cshadow_out", CS_FMT, None),
             layers: cs_layers,
-            front: [[0.0; 4]; 4],
-            back: [[0.0; 4]; 4],
-            front_layer: 0,
+            p_mix: [full("cloud shadow mix", &pl_csmix, &m_csmix, "fs_in", CS_FMT, None), full("cloud shadow mix", &pl_csmix, &m_csmix, "fs_out", CS_FMT, None)],
+            bg_mix,
+            mix_ub,
+            mix_layers: cs_mix_layers,
+            prev: [[0.0; 4]; CS_MAP],
+            front: [[0.0; 4]; CS_MAP],
+            back: [[0.0; 4]; CS_MAP],
+            slot: [0, 0, 1],
             slice: 0,
             ok: false,
+            anchor: [glam::DVec3::Z, glam::DVec3::X, glam::DVec3::Y],
+            sun: glam::DVec3::Z,
+            sun_v: glam::DVec3::ZERO,
+            mix: ([0; 8], 1.0),
         };
         let p_composite = full("composite", &pl(&l_composite), &m_comp, "fs", HDR, None);
         let p_gtao = full("gtao", &pl(&l_ao), &m_ao, "fs_gtao", AMB, None);
@@ -1863,6 +1983,7 @@ impl Renderer {
         self.ground_mats.poll(&self.device, q);
         f.g.det = self.ground_mats.params;
         let cs_full = self.cshadow.prepare(&mut f.g);
+        q.write_buffer(&self.cshadow.mix_ub, 0, &self.cshadow.mix_bytes());
         q.write_buffer(&self.globals_ub, 0, bytemuck::bytes_of(&f.g));
         q.write_buffer(&self.psim_ub, 0, bytemuck::bytes_of(&f.psim));
         let n_tiles = f.tiles.len().min(MAX_TILES as usize);

@@ -5,7 +5,7 @@
 //! that way. In a bank the head tilts part of the way back toward the
 //! horizon (the reflex every pilot has). The view zooms, and the eye opens up
 //! when it looks at the dim cabin and stops down again out of the window.
-use crate::airframe::EYE;
+use crate::aircraft::Spec;
 use glam::{DQuat, DVec3, Vec3};
 use std::f64::consts::PI;
 
@@ -69,7 +69,7 @@ impl Head {
     /// vertical field of view setting (deg), `shake` the head's sway on its
     /// neck from the physics (body frame), `rot` the aircraft's attitude and
     /// `up` the local vertical (world). Returns the eye for this frame.
-    pub fn update(&mut self, dt: f64, want: (f64, f64), fov: f32, shake: DVec3, rot: DQuat, up: DVec3, aspect: f32, day: f32) -> View {
+    pub fn update(&mut self, spec: &'static Spec, dt: f64, want: (f64, f64), fov: f32, shake: DVec3, rot: DQuat, up: DVec3, aspect: f32, day: f32) -> View {
         // Keep the head the short way round from where it is.
         let wy = self.yaw + (want.0 - self.yaw + PI).rem_euclid(2.0 * PI) - PI;
         self.yaw = follow(self.yaw, wy, 22.0, dt);
@@ -96,7 +96,7 @@ impl Head {
 
         let q = look(self.yaw, self.pitch);
         // The eyes swing round the neck joint behind them.
-        let eye = EYE.as_dvec3() + shake + self.lean - NECK + q * NECK;
+        let eye = spec.eye.as_dvec3() + shake + self.lean - NECK + q * NECK;
 
         // Tilt part of the way back toward the horizon (only near level).
         let d = rot * (q * DVec3::NEG_Z);
@@ -113,7 +113,7 @@ impl Head {
 
         // How much of the view is the cabin: the eye opens up for it (more by
         // day; at night the cabin and the world are both dark).
-        let inside = interior(rot_b, fov_now.to_radians(), aspect);
+        let inside = interior(spec, rot_b, fov_now.to_radians(), aspect);
         self.inside = inside;
         let want = (inside * 1.3 - 0.12) * (0.45 + 0.55 * day);
         // Opening up for the dark takes longer than stopping down for the light.
@@ -125,8 +125,8 @@ impl Head {
 
 /// The share of the view (centre weighted) that the cabin fills, from a
 /// table of which way the eye sees out.
-fn interior(rot: DQuat, fov: f32, aspect: f32) -> f32 {
-    let t = table();
+fn interior(spec: &'static Spec, rot: DQuat, fov: f32, aspect: f32) -> f32 {
+    let t = table(spec);
     let (ty, tx) = ((fov * 0.5).tan(), (fov * 0.5).tan() * aspect);
     let (mut sum, mut wsum) = (0.0f32, 0.0f32);
     for j in 0..7 {
@@ -160,9 +160,9 @@ fn lookup(t: &[f32], d: DVec3) -> f32 {
     a + (b - a) * fv
 }
 /// For each look direction from the seat, how much of it lands inside the cabin.
-fn table() -> &'static [f32] {
-    static T: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    T.get_or_init(|| {
+fn table(spec: &'static Spec) -> &'static [f32] {
+    static T: [std::sync::OnceLock<Vec<f32>>; 4] = [const { std::sync::OnceLock::new() }; 4];
+    T[spec.id as usize].get_or_init(|| {
         let mut t = vec![0.0f32; LW * LH];
         std::thread::scope(|s| {
             for (j, row) in t.chunks_mut(LW).enumerate() {
@@ -172,7 +172,7 @@ fn table() -> &'static [f32] {
                         for (a, b) in [(0.25f32, 0.25f32), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
                             let yaw = ((i as f32 + a) / LW as f32 - 0.5) * std::f32::consts::TAU;
                             let pitch = ((j as f32 + b) / LH as f32 - 0.5) * std::f32::consts::PI;
-                            n += crate::cabin::sees_inside(EYE, dir_of(yaw, pitch)) as u32;
+                            n += (spec.sees_inside)(spec.eye, dir_of(yaw, pitch)) as u32;
                         }
                         *c = n as f32 / 4.0;
                     }
@@ -188,7 +188,7 @@ mod tests {
     use super::*;
     #[test]
     fn panel_is_inside_and_windshield_is_out() {
-        let t = table();
+        let t = table(&crate::aircraft::c172::SPEC);
         // Straight ahead and a little up: out through the windshield.
         assert!(lookup(t, dir_of(0.0, -0.1).as_dvec3()) < 0.3);
         // Down at the panel: inside.
