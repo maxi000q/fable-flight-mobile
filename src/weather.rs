@@ -35,6 +35,11 @@ pub struct Weather {
     pub thermal_off: DVec3,
     /// the storm cells handed to the shaders last frame (see `storm_cells`)
     pub cells: Vec<[[f32; 4]; 2]>,
+    /// real weather (see livewx.rs) sets the sliders: where its report came
+    /// from ("EBBR", "Open-Meteo") and the report itself
+    pub live: bool,
+    pub live_station: String,
+    pub live_raw: String,
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -119,7 +124,7 @@ fn cube_face(q: DVec3) -> (u32, DVec3, DVec3, DVec3) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new() }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new() }
     }
 
     /// Top of the cloud layer including any storm towers, metres.
@@ -359,23 +364,44 @@ impl Weather {
     /// The sliders and presets, for the F3 window (one column) and the
     /// in-flight menu (two).
     pub fn controls(&mut self, ui: &mut egui::Ui, utc: &mut f64, doy: &mut f64, lon: f64, two_columns: bool) {
+        self.live_switch(ui);
+        let free = !self.live;
         if two_columns {
             ui.columns(2, |c| {
                 c[0].spacing_mut().slider_width = 115.0;
                 c[1].spacing_mut().slider_width = 115.0;
                 self.day_controls(&mut c[0], utc, doy, lon);
                 c[0].add_space(8.0);
-                self.wind_controls(&mut c[0]);
-                self.sky_controls(&mut c[1]);
-                c[1].add_space(8.0);
-                self.presets(&mut c[1]);
+                c[0].add_enabled_ui(free, |ui| self.wind_controls(ui));
+                c[1].add_enabled_ui(free, |ui| {
+                    self.sky_controls(ui);
+                    ui.add_space(8.0);
+                    self.presets(ui);
+                });
             });
         } else {
             self.day_controls(ui, utc, doy, lon);
-            self.sky_controls(ui);
-            self.wind_controls(ui);
-            ui.add_space(6.0);
-            self.presets(ui);
+            ui.add_enabled_ui(free, |ui| {
+                self.sky_controls(ui);
+                self.wind_controls(ui);
+                ui.add_space(6.0);
+                self.presets(ui);
+            });
+        }
+    }
+
+    /// The real-weather switch, and where the report comes from.
+    fn live_switch(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.live, t!("Real weather (METAR, else Open-Meteo)", "Météo réelle (METAR, sinon Open-Meteo)"));
+        if self.live {
+            let text = if self.live_station.is_empty() {
+                if self.live_raw.is_empty() { t!("Waiting for a report…", "En attente d'un bulletin…").to_string() } else { self.live_raw.clone() }
+            } else if self.live_raw.is_empty() {
+                t!("From {} (weather model)", "Selon {} (modèle météo)", self.live_station)
+            } else {
+                self.live_raw.clone()
+            };
+            ui.label(RichText::new(text).monospace().size(11.0).weak());
         }
     }
 
@@ -383,10 +409,13 @@ impl Weather {
     /// (the clock is set from them on take-off), then the sky and the wind.
     /// The start screen's weather: presets, sky and wind.
     pub fn start_weather(&mut self, ui: &mut egui::Ui) {
-        self.presets(ui);
-        ui.add_space(4.0);
-        self.sky_controls(ui);
-        self.wind_controls(ui);
+        self.live_switch(ui);
+        ui.add_enabled_ui(!self.live, |ui| {
+            self.presets(ui);
+            ui.add_space(4.0);
+            self.sky_controls(ui);
+            self.wind_controls(ui);
+        });
     }
 
     /// The start screen's time: local time of day and the date.
@@ -404,6 +433,9 @@ impl Weather {
     /// A few words for the weather: the preset it matches, else the cloud
     /// cover and wind.
     pub fn summary(&self) -> String {
+        if self.live {
+            return if self.live_station.is_empty() { t!("Real", "Réelle").to_string() } else { t!("Real · {}", "Réelle · {}", self.live_station) };
+        }
         let near = |a: f64, b: f64| (a - b).abs() < 1e-3 * (1.0 + b.abs());
         for &(name, c, b, d, s, a, h, w, g) in PRESETS {
             if near(self.clouds as f64, c as f64) && near(self.cloud_base as f64, b as f64) && near(self.cloud_depth as f64, d as f64) && near(self.storms as f64, s as f64) && near(self.alto as f64, a as f64) && near(self.haze as f64, h as f64) && near(self.wind as f64, w as f64) && near(self.gusts as f64, g as f64) {

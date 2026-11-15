@@ -22,6 +22,9 @@ The interface is in English or French. It follows the system language, can be ch
 # Live air traffic
 Real aircraft around you, as reported by ADS-B receivers (data from [adsb.lol](https://adsb.lol), ODbL), fly in the sky with tags (callsign, type, altitude, speed, distance); the flight panel (Tab) lists the nearest. It can be switched off in the pause menu's Settings.
 
+# Real weather
+The weather follows the real conditions where you fly: the nearest METAR within 60 km ([aviationweather.gov](https://aviationweather.gov)) sets the wind, gusts, visibility, cloud layers and thunderstorms; with no airport near, [Open-Meteo](https://open-meteo.com)'s model stands in. It is looked up again every 10 minutes or 30 km, and the sky eases into each report. Switch it off in the weather settings (start screen, flight panel or F3) to set the weather by hand.
+
 Settings (language, sound, camera, HUD, anti-aliasing) are kept in `settings.json` in the config folder (`~/.config/fablegame` on Linux).
 
 # Contributions
@@ -42,6 +45,9 @@ L'interface est disponible en anglais et en français. Elle suit la langue du sy
 
 ## Trafic aérien réel
 Les vrais avions autour de vous, tels que les captent les récepteurs ADS-B (données [adsb.lol](https://adsb.lol), ODbL), volent dans le ciel avec une étiquette (indicatif, type, altitude, vitesse, distance) ; le panneau de vol (Tab) liste les plus proches. Se désactive dans les Réglages du menu pause.
+
+## Météo réelle
+La météo suit les conditions réelles là où vous volez : le METAR le plus proche dans un rayon de 60 km ([aviationweather.gov](https://aviationweather.gov)) fixe le vent, les rafales, la visibilité, les couches nuageuses et les orages ; loin de tout aéroport, le modèle d'[Open-Meteo](https://open-meteo.com) prend le relais. Elle est mise à jour toutes les 10 minutes ou tous les 30 km, avec une transition en douceur. Désactivez-la dans les réglages météo (écran de départ, panneau de vol ou F3) pour régler la météo à la main.
 
 Les réglages (langue, son, caméra, HUD, anticrénelage) sont enregistrés dans `settings.json`, dans le dossier de configuration (`~/.config/fablegame` sous Linux).
 

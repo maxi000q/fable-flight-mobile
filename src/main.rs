@@ -15,6 +15,7 @@ mod fluid;
 mod geo;
 mod i18n;
 mod live;
+mod livewx;
 mod settings;
 mod gauges;
 mod gmaps;
@@ -670,6 +671,8 @@ struct Game {
     /// (view-projection, position) to put labels on it
     live: live::Live,
     live_view: Option<(Mat4, DVec3)>,
+    /// real weather (sets `wx` while `wx.live` is on)
+    livewx: livewx::LiveWx,
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
 }
@@ -746,6 +749,9 @@ impl Game {
             wx.haze = h.clamp(0.2, 40.0);
         }
         wx.open = args.weather_panel;
+        // Real weather, unless the command line sets the weather itself.
+        let scripted = std::env::args().any(|a| matches!(a.as_str(), "--clouds" | "--storms" | "--alto" | "--wind" | "--haze"));
+        wx.live = prefs.live_weather && !scripted;
         // The spawn speed is through the air: start out moving with the wind,
         // or a headwind starts it off fast (and climbing it away).
         plane.wind = wx.steady(plane.pos, 300.0);
@@ -778,6 +784,7 @@ impl Game {
             prefs_t: 0.0,
             live: live::Live::new(prefs.live_traffic),
             live_view: None,
+            livewx: livewx::LiveWx::new(),
             prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
                 let i = airports::Db::get().find(c);
@@ -1793,7 +1800,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -2655,6 +2662,13 @@ impl Game {
             self.world.photo_beacons(cam, &mut air_lights);
         }
         self.live.step(&self.src, (!in_menu).then_some(self.plane.pos));
+        let wx_at = if in_menu {
+            self.menu.pick
+        } else {
+            let (la, lo, _) = geo::pos_to_lla(self.plane.pos);
+            Some((la.to_degrees(), lo.to_degrees()))
+        };
+        self.livewx.step(&self.src, &mut self.wx, wx_at, if in_menu { 0.0 } else { dt_real });
         if !in_menu {
             self.live.instances(cam, &mut insts, &mut air_lights);
         }
