@@ -185,8 +185,8 @@ fn baggage_door(L: vec3f) -> f32 {
 // ---------------------------------------------------------------- lettering
 
 // Stroke font: digits, N E S W and a point (glyphs 0-14; 15 is a space).
-// (const, not var<private>: on Metal a private array is a per-pixel copy made
-// at the start of every invocation, which cost the aircraft ~7 ms a frame on an M4.)
+// (const, not var<private>: Metal copies a private array into every
+// invocation, which made the aircraft spill registers on every pixel.)
 const GSEG = array<vec4f, 237>(
   vec4f(0.25, 0.0, 0.75, 0.0),
   vec4f(0.75, 0.0, 1.0, 0.4),
@@ -2141,7 +2141,7 @@ fn skin747(f0: Fin, pt: u32, L: vec3f, Nl: vec3f, uv: vec2f, wear: f32, px: f32)
 // Cabin windows on the skin (there is no cabin behind them): 10 x 15 in,
 // every 20 in along the main deck, and along the upper deck; the small
 // window in each door. Signed distance (m) to the nearest pane.
-var<private> DOORS747: array<f32, 5> = array<f32, 5>(9.50, 18.80, 30.61, 40.74, 55.14);
+const DOORS747 = array<f32, 5>(9.50, 18.80, 30.61, 40.74, 55.14);
 fn cabin_win_sd747(L: vec3f) -> f32 {
   let d = L.z + 31.6;
   var sd = 1.0;
