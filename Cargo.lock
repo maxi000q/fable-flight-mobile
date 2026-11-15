@@ -833,6 +833,7 @@ dependencies = [
 name = "fablegame"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "bytemuck",
  "crossbeam-channel",

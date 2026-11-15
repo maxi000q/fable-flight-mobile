@@ -63,6 +63,8 @@ struct Globals {
   // Churned white water where a crash went in, two each: centre (camera-relative)
   // + radius (m, 0 = none); strength 0..1, age (s), seed.
   foam: array<vec4f, 16>,
+  // The start screen: x = 1 while it shows (deep-space sky, no clouds).
+  start: vec4f,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -500,7 +502,7 @@ fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   let top = G.cs[3].y;
   let r = length(pc);
   let h = r - G.planet.w;
-  if (G.cs[4].w < 0.5 || h >= top) { return o; }
+  if (G.cs[4].w < 0.5 || G.start.x > 0.0 || h >= top) { return o; }
   // The sun the maps were drawn for (it differs from this frame's by a fraction
   // of a degree while the clock runs fast).
   let sun = G.cs[4].xyz;

@@ -44,6 +44,16 @@ fn stars(rd: vec3f) -> vec3f {
   }
   return c;
 }
+// Deep space for the start screen, where the planet hangs in the dark: just
+// stars, denser than the night sky shows, with no Milky Way or nebulae.
+// Display-ready (the night sky scales `stars` down behind the atmosphere).
+fn space(rd: vec3f) -> vec3f {
+  let q = celestial(rd);
+  var c = (star_layer(q, 58.0, 0.075, 0.0) + star_layer(q.zxy, 41.0, 0.06, 17.3) * 0.8) * 0.2;
+  // Faint dust of stars too far to pick out one by one.
+  c += star_layer(q.yxz, 150.0, 0.14, 31.7) * 0.05 + star_layer(q.zyx, 240.0, 0.12, 47.1) * 0.025;
+  return c;
+}
 // The moon's disc: lit by the sun so it shows its phase, with darker maria.
 fn moon_disc(rd: vec3f) -> vec3f {
   let m = G.moon.xyz;
@@ -85,7 +95,7 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
   } else {
     let cs = dot(rd, sun);
     col += sc.T * smoothstep(0.999978, 0.999990, cs) * G.sun_dir.w * 600.0;
-    col += sc.T * (stars(rd) * 0.11 + moon_disc(rd));
+    col += sc.T * (select(stars(rd) * 0.11, space(rd), G.start.x > 0.0) + moon_disc(rd));
     // City light scattered by the haze: an orange glow low over the horizon.
     let el = dot(rd, G.up.xyz);
     col += SKYGLOW * 0.0022 * G.misc.y * night_cam() * exp(-max(el, 0.0) * 9.0) * (1.0 + G.cloud.x);

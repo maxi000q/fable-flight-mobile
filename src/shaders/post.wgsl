@@ -99,3 +99,10 @@ const TAA_SHARPEN = 0.8;
 @fragment fn fs_blit_srgb(in: FsIn) -> @location(0) vec4f {
   return vec4f(pow(textureSampleLevel(t_src, s_clamp, in.uv, 0.0).rgb, vec3f(2.2)), 1.0);
 }
+// The start screen's title (logo.rs), over the finished frame: the source is
+// its coverage, and the blend (src x (1 - dst) + dst x (1 - src)) turns each
+// pixel it covers into the inverse of the colour already there.
+@fragment fn fs_logo(in: FsIn) -> @location(0) vec4f {
+  let m = textureSampleLevel(t_src, s_clamp, in.uv, 0.0).r;
+  return vec4f(m, m, m, 0.0);
+}

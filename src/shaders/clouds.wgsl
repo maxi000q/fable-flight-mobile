@@ -149,6 +149,9 @@ fn depth_match(a: f32, b: f32) -> f32 {
   var tscene = 1e9;
   if (z > 0.0) { tscene = length(ray / z); }
   o.dist.y = min(tscene * 0.001, SKY_KM);
+  // No clouds at all (the globe on the start screen): even at zero cover the
+  // noise leaves scattered puffs and cirrus veils.
+  if (G.start.x > 0.0) { return o; }
   let rg = G.planet.w;
   let oc = -G.planet.xyz;
   let base = G.cloud.y;

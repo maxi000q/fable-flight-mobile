@@ -421,6 +421,52 @@ pub fn wide_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, ena
     resp
 }
 
+/// A chevron pointing right, turned `turn` quarter turns clockwise (1 = down).
+pub fn chevron(p: &egui::Painter, c: egui::Pos2, size: f32, turn: f32, col: Color32) {
+    let rot = egui::emath::Rot2::from_angle(turn * std::f32::consts::FRAC_PI_2);
+    let pts = [egui::vec2(-0.3, -0.6), egui::vec2(0.3, 0.0), egui::vec2(-0.3, 0.6)].map(|v| c + rot * v * size);
+    p.line(pts.to_vec(), Stroke::new(1.8, col));
+}
+
+/// A collapsible section: a full-width header row (its title, a few words
+/// on what is inside while it is shut, a chevron) that opens and closes the
+/// body under it. Shut ones keep a first look at the start screen calm.
+pub fn section(ui: &mut egui::Ui, id: &str, title: &str, summary: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.make_persistent_id(("section", id));
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::click());
+    let k = state.openness(ui.ctx());
+    let lit = resp.hovered() || resp.has_focus();
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0, Color32::from_white_alpha(if lit { 16 } else { 7 }));
+    let title_col = if k > 0.5 { ACCENT } else if lit { Color32::WHITE } else { TEXT };
+    p.text(rect.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(15.0), title_col);
+    if k < 1.0 && !summary.is_empty() {
+        let col = DIM.gamma_multiply(1.0 - k);
+        p.text(rect.right_center() - egui::vec2(30.0, 0.0), egui::Align2::RIGHT_CENTER, summary, egui::FontId::proportional(12.0), col);
+    }
+    chevron(p, rect.right_center() - egui::vec2(15.0, 0.0), 6.0, k, if lit { Color32::WHITE } else { DIM });
+    if resp.clicked() {
+        state.toggle(ui);
+    }
+    state.show_body_unindented(ui, |ui| {
+        ui.add_space(2.0);
+        egui::Frame::new().inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 4 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
+    });
+    ui.add_space(2.0);
+}
+
+/// The title bar of a start-screen window: a small capitalised name, then a hairline.
+pub fn window_title(ui: &mut egui::Ui, s: &str) {
+    ui.label(RichText::new(s).size(11.5).strong().color(DIM).extra_letter_spacing(1.5));
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, Color32::from_white_alpha(18)));
+    ui.add_space(8.0);
+}
+
 /// A small section heading.
 pub fn heading(ui: &mut egui::Ui, s: &str) {
     if !ui.layout().is_horizontal() {
@@ -478,7 +524,7 @@ pub const PAD_MENUS: &[(&str, &[(&str, &str)])] = &[
         ("LT / RT", "zoom out / in"),
         ("X", "start at the crosshair"),
         ("Menu", "take off"),
-        ("View", "this controls list"),
+        ("View", "settings and this controls list"),
     ]),
 ];
 

@@ -212,6 +212,9 @@ pub struct Spec {
     /// names it answers to on the command line
     pub keys: &'static [&'static str],
     pub blurb: &'static str,
+    /// its picture in the start screen's aircraft window: a PNG with alpha,
+    /// 680 x 392 (the window's 340 x 196 at twice the size, for hi-dpi)
+    pub still: &'static [u8],
     pub build: fn() -> Model,
     /// the breakable groups (see airframe::G_*): name, mass (kg)
     pub groups: [(&'static str, f32); 7],
