@@ -14,6 +14,7 @@ mod fetch;
 mod fluid;
 mod geo;
 mod i18n;
+mod live;
 mod settings;
 mod gauges;
 mod gmaps;
@@ -665,6 +666,10 @@ struct Game {
     prefs: settings::Settings,
     prefs_lang: Option<i18n::Lang>,
     prefs_t: f64,
+    /// real air traffic around the player, and the last frame's camera
+    /// (view-projection, position) to put labels on it
+    live: live::Live,
+    live_view: Option<(Mat4, DVec3)>,
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
 }
@@ -771,6 +776,8 @@ impl Game {
             airport_rx: None, hold_spot: None,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
+            live: live::Live::new(prefs.live_traffic),
+            live_view: None,
             prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
                 let i = airports::Db::get().find(c);
@@ -1786,7 +1793,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -2647,6 +2654,11 @@ impl Game {
             self.world.airport_instances(cam, self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32, self.time, &mut insts, &mut air_lights);
             self.world.photo_beacons(cam, &mut air_lights);
         }
+        self.live.step(&self.src, (!in_menu).then_some(self.plane.pos));
+        if !in_menu {
+            self.live.instances(cam, &mut insts, &mut air_lights);
+        }
+        self.live_view = Some((vp, cam));
 
         let ui = if in_menu { self.menu_ui(vp, cam, w, h) } else { self.ui(agl) };
         // The smoke volume: a grid around the effects anchor, on its local east/north/up axes.
@@ -3154,13 +3166,14 @@ impl Game {
         let g = &self.src.google;
         let p = self.world.photo();
         let photo = if p.zone_r > 0.0 && p.stats.0 > 0 { format!("3D: {}  ·  ", if p.credits.is_empty() { "Google" } else { &p.credits }) } else { String::new() };
+        let live = if self.live.enabled() && !self.live.planes.is_empty() { format!("  ·  {}", t!("Traffic: adsb.lol (ODbL)", "Trafic : adsb.lol (ODbL)")) } else { String::new() };
         photo + &if g.enabled() {
             let c = g.attribution.lock();
             let c = if c.is_empty() { t!("Imagery © Google", "Imagerie © Google").to_string() } else { c.clone() };
             format!("{c}  ·  {}", attribution_rest())
         } else {
             format!("{}  ·  {}", attribution_default(), attribution_rest())
-        }
+        } + &live
     }
 
     /// The bottom-right credits: Google's logo (its official outlined
@@ -3377,6 +3390,14 @@ impl Game {
                             ui.label(t!("Anti-aliasing", "Anticrénelage"));
                             ui.checkbox(&mut self.taa, t!("temporal (TAA)", "temporel (TAA)"));
                             ui.end_row();
+                            menu::heading(ui, t!("TRAFFIC", "TRAFIC"));
+                            ui.end_row();
+                            ui.label(t!("Live air traffic", "Trafic aérien réel"));
+                            let mut on = self.live.enabled();
+                            if ui.checkbox(&mut on, t!("real aircraft, from adsb.lol", "vrais avions, via adsb.lol")).changed() {
+                                self.live.set_enabled(on);
+                            }
+                            ui.end_row();
                         });
                         ui.add_space(6.0);
                         self.google_settings(ui);
@@ -3587,6 +3608,28 @@ impl Game {
                                 row(ui, t!("Clouds", "Nuages"), if self.wx.clouds < 0.05 { t!("clear", "dégagé").into() } else { format!("{:.0}%, base {:.0} ft", self.wx.clouds * 100.0, self.wx.cloud_base * 3.28084) }, TEXT);
                                 row(ui, t!("Visibility", "Visibilité"), format!("{:.0} km", self.wx.visibility_km()), TEXT);
                             });
+                            ui.add_space(6.0);
+                            menu::heading(ui, t!("LIVE TRAFFIC", "TRAFIC RÉEL"));
+                            if !self.live.enabled() {
+                                ui.label(RichText::new(t!("Off (pause menu, Settings).", "Désactivé (menu pause, Réglages).")).size(12.0).color(DIM));
+                            } else if self.live.planes.is_empty() {
+                                let e = self.live.error();
+                                let msg = if e.is_empty() { t!("Waiting for aircraft…", "En attente d'avions…").to_string() } else { t!("No data: {}", "Pas de données : {}", e.chars().take(60).collect::<String>()) };
+                                ui.label(RichText::new(msg).size(12.0).color(DIM));
+                            } else {
+                                let me = self.plane.pos;
+                                let mut near: Vec<&live::Plane> = self.live.planes.iter().collect();
+                                near.sort_by(|a, b| (a.pos - me).length().total_cmp(&(b.pos - me).length()));
+                                ui.label(RichText::new(t!("{} aircraft within 110 km", "{} avions à moins de 110 km", near.len())).size(12.0).color(DIM));
+                                egui::Grid::new("info_live").num_columns(3).spacing([10.0, 2.0]).show(ui, |ui| {
+                                    for p in near.iter().take(6) {
+                                        ui.label(RichText::new(&p.call).monospace().size(12.5).color(TEXT));
+                                        ui.label(RichText::new(if p.ty.is_empty() { "?" } else { p.ty.as_str() }).monospace().size(12.0).color(DIM));
+                                        ui.label(RichText::new(format!("{:.1} km · {:.0} ft", (p.pos - me).length() / 1000.0, p.alt_ft)).monospace().size(12.0).color(DIM));
+                                        ui.end_row();
+                                    }
+                                });
+                            }
                             ui.add_space(4.0);
                             ui.label(RichText::new(if padui::active() { t!("Menu pauses: settings, the globe, quit.", "Menu met en pause : réglages, globe, quitter.") } else { t!("Esc pauses: settings, the globe, quit.", "Échap met en pause : réglages, globe, quitter.") }).size(11.5).color(ACCENT.gamma_multiply(0.8)));
                         }
@@ -3769,6 +3812,35 @@ impl Game {
                         }
                     });
                 });
+            }
+            // Real traffic: a tag beside each aircraft within range.
+            if let (true, Some((vp, cam))) = (self.show_hud && self.live.enabled(), self.live_view) {
+                let screen = ctx.content_rect();
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                for p in &self.live.planes {
+                    let rel = p.pos - cam;
+                    let d = rel.length();
+                    if d > 40_000.0 || d < 30.0 {
+                        continue;
+                    }
+                    let c = vp * rel.as_vec3().extend(1.0);
+                    if c.w <= 0.0 {
+                        continue;
+                    }
+                    let at = egui::pos2(screen.left() + (c.x / c.w * 0.5 + 0.5) * screen.width(), screen.top() + (0.5 - c.y / c.w * 0.5) * screen.height());
+                    if !screen.expand(40.0).contains(at) {
+                        continue;
+                    }
+                    let a = (255.0 * (1.0 - d / 40_000.0).clamp(0.35, 1.0)) as u8;
+                    let col = Color32::from_rgba_unmultiplied(150, 225, 255, a);
+                    painter.circle_stroke(at, 5.0, egui::Stroke::new(1.3, col));
+                    let line2 = format!("{}  {:.0} ft  {:.0} kt  {:.1} km", if p.ty.is_empty() { "?" } else { p.ty.as_str() }, p.alt_ft, p.gs_kt, d / 1000.0);
+                    for (k, (s, size)) in [(p.call.as_str(), 12.5), (line2.as_str(), 11.0)].into_iter().enumerate() {
+                        let pos = at + egui::vec2(9.0, -10.0 + 14.0 * k as f32);
+                        painter.text(pos + egui::vec2(1.0, 1.0), Align2::LEFT_TOP, s, FontId::proportional(size), Color32::from_black_alpha(a / 2));
+                        painter.text(pos, Align2::LEFT_TOP, s, FontId::proportional(size), col);
+                    }
+                }
             }
             // Google's imagery has to carry its credit, HUD or not.
             if self.show_hud || self.google_shown() {

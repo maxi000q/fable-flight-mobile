@@ -17,11 +17,13 @@ pub struct Settings {
     pub look_sens: f64,
     pub show_hud: bool,
     pub taa: bool,
+    /// real air traffic (see live.rs)
+    pub live_traffic: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, taa: true }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, taa: true, live_traffic: true }
     }
 }
 
@@ -51,6 +53,7 @@ impl Settings {
             look_sens: f("mouse_look_speed", d.look_sens).clamp(0.25, 3.0),
             show_hud: b("hud", d.show_hud),
             taa: b("taa", d.taa),
+            live_traffic: b("live_traffic", d.live_traffic),
         }
     }
 
@@ -64,6 +67,7 @@ impl Settings {
             "mouse_look_speed": self.look_sens,
             "hud": self.show_hud,
             "taa": self.taa,
+            "live_traffic": self.live_traffic,
         })
     }
 
@@ -87,7 +91,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, taa: false };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, taa: false, live_traffic: false };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         // Missing or odd values fall back to the defaults.
         let j = serde_json::json!({ "volume": 7.0, "language": "xx" });

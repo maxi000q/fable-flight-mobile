@@ -19,6 +19,9 @@ cargo run --release
 # Language
 The interface is in English or French. It follows the system language, can be changed in Settings (start screen or pause menu), and is remembered. For one run: `cargo run --release -- --lang fr`.
 
+# Live air traffic
+Real aircraft around you, as reported by ADS-B receivers (data from [adsb.lol](https://adsb.lol), ODbL), fly in the sky with tags (callsign, type, altitude, speed, distance); the flight panel (Tab) lists the nearest. It can be switched off in the pause menu's Settings.
+
 Settings (language, sound, camera, HUD, anti-aliasing) are kept in `settings.json` in the config folder (`~/.config/fablegame` on Linux).
 
 # Contributions
@@ -36,6 +39,9 @@ Sous Linux, il faut aussi les bibliothèques ALSA et udev (`libasound2-dev libud
 
 ## Langue
 L'interface est disponible en anglais et en français. Elle suit la langue du système, se change dans les Réglages (écran de départ ou menu pause) et est mémorisée. Pour une seule session : `cargo run --release -- --lang fr`.
+
+## Trafic aérien réel
+Les vrais avions autour de vous, tels que les captent les récepteurs ADS-B (données [adsb.lol](https://adsb.lol), ODbL), volent dans le ciel avec une étiquette (indicatif, type, altitude, vitesse, distance) ; le panneau de vol (Tab) liste les plus proches. Se désactive dans les Réglages du menu pause.
 
 Les réglages (langue, son, caméra, HUD, anticrénelage) sont enregistrés dans `settings.json`, dans le dossier de configuration (`~/.config/fablegame` sous Linux).
 
