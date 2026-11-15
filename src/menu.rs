@@ -219,6 +219,7 @@ impl Menu {
 
 // ---- shared look and widgets for the start screen and the in-flight menu
 
+use crate::i18n::tr;
 use crate::padui::{self, Hint};
 use egui::{Color32, RichText, Stroke};
 
@@ -258,6 +259,12 @@ impl Page {
             Page::Graphics => "Graphics",
             Page::Controls => "Controls",
         }
+    }
+
+    /// The name shown on its tab, in the interface language (`name` stays
+    /// English: the command line's `--pause-menu` goes by it).
+    pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.name())
     }
 
     /// on the flight panel (Tab), not the pause menu
@@ -478,18 +485,18 @@ pub fn heading(ui: &mut egui::Ui, s: &str) {
 }
 
 /// One `keys … action` row of the controls list.
-pub fn key_row(ui: &mut egui::Ui, keys: &str, what: &str) {
+pub fn key_row(ui: &mut egui::Ui, keys: &'static str, what: &'static str) {
     egui::Frame::new().fill(Color32::from_rgb(38, 45, 56)).corner_radius(4.0).inner_margin(egui::Margin::symmetric(6, 0)).show(ui, |ui| {
-        ui.label(RichText::new(keys).monospace().size(12.0).color(Color32::WHITE));
+        ui.label(RichText::new(tr(keys)).monospace().size(12.0).color(Color32::WHITE));
     });
-    ui.label(RichText::new(what).size(13.0).color(TEXT));
+    ui.label(RichText::new(tr(what)).size(13.0).color(TEXT));
     ui.end_row();
 }
 
 /// One `buttons … action` row of the gamepad controls list.
-pub fn pad_row(ui: &mut egui::Ui, spec: &str, what: &str) {
+pub fn pad_row(ui: &mut egui::Ui, spec: &str, what: &'static str) {
     padui::glyphs(ui, spec, 20.0);
-    ui.label(RichText::new(what).size(13.0).color(TEXT));
+    ui.label(RichText::new(tr(what)).size(13.0).color(TEXT));
     ui.end_row();
 }
 
@@ -535,14 +542,14 @@ pub const PAD_MENUS: &[(&str, &[(&str, &str)])] = &[
 pub fn controls_list(ui: &mut egui::Ui) {
     if padui::active() {
         ui.columns(2, |cols| {
-            heading(&mut cols[0], "GAMEPAD · FLYING");
+            heading(&mut cols[0], tr("GAMEPAD · FLYING"));
             egui::Grid::new("pad_fly").num_columns(2).min_row_height(23.0).spacing([10.0, 3.0]).show(&mut cols[0], |ui| {
                 for (k, w) in PAD_FLYING {
                     pad_row(ui, k, w);
                 }
             });
             for (title, rows) in PAD_MENUS {
-                heading(&mut cols[1], title);
+                heading(&mut cols[1], tr(title));
                 egui::Grid::new(("pad", *title)).num_columns(2).min_row_height(23.0).spacing([10.0, 3.0]).show(&mut cols[1], |ui| {
                     for (k, w) in rows.iter() {
                         pad_row(ui, k, w);
@@ -558,7 +565,7 @@ pub fn controls_list(ui: &mut egui::Ui) {
         for (c, ui) in cols.iter_mut().enumerate() {
             let range = if c == 0 { 0..half } else { half..CONTROLS.len() };
             for (title, rows) in &CONTROLS[range] {
-                heading(ui, title);
+                heading(ui, tr(title));
                 egui::Grid::new(("keys", *title)).num_columns(2).min_row_height(19.0).spacing([10.0, 3.0]).show(ui, |ui| {
                     for (k, w) in rows.iter() {
                         key_row(ui, k, w);

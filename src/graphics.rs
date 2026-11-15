@@ -166,6 +166,12 @@ impl Graphics {
         }
     }
 
+    /// Whether the settings have ever been saved (else the defaults may
+    /// adapt to the machine, e.g. a lower resolution on an integrated GPU).
+    pub fn saved() -> bool {
+        Self::path().is_some_and(|p| p.exists())
+    }
+
     fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("fablegame").join("graphics.json"))
     }

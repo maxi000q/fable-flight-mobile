@@ -100,10 +100,8 @@ const TAA_SHARPEN = 0.8;
     let s = scaled(in.uv + vec2f(0.0, d.y)).rgb;
     let w = scaled(in.uv + vec2f(-d.x, 0.0)).rgb;
     let e = scaled(in.uv + vec2f(d.x, 0.0)).rgb;
-    let lo = min(min(min(n, s), min(w, e)), c.rgb);
-    let hi = max(max(max(n, s), max(w, e)), c.rgb);
     let k = TAA_SHARPEN * max(c.a, select(0.0, 0.35, G.quality.y < 1.0));
-    return finish(clamp(c.rgb + (c.rgb - (n + s + w + e) * 0.25) * k, lo, hi), in);
+    return finish(sharpen(c.rgb, n, s, w, e, k), in);
   }
   let px = vec2i(in.pos.xy);
   let dmax = vec2i(textureDimensions(t_src)) - 1;
@@ -112,10 +110,12 @@ const TAA_SHARPEN = 0.8;
   let s = textureLoad(t_src, clamp(px + vec2i(0, 1), vec2i(0), dmax), 0).rgb;
   let w = textureLoad(t_src, clamp(px + vec2i(-1, 0), vec2i(0), dmax), 0).rgb;
   let e = textureLoad(t_src, clamp(px + vec2i(1, 0), vec2i(0), dmax), 0).rgb;
-  let lo = min(min(min(n, s), min(w, e)), c.rgb);
-  let hi = max(max(max(n, s), max(w, e)), c.rgb);
-  let sharp = c.rgb + (c.rgb - (n + s + w + e) * 0.25) * (TAA_SHARPEN * c.a);
-  return finish(clamp(sharp, lo, hi), in);
+  return finish(sharpen(c.rgb, n, s, w, e, TAA_SHARPEN * c.a), in);
+}
+fn sharpen(c: vec3f, n: vec3f, s: vec3f, w: vec3f, e: vec3f, k: f32) -> vec3f {
+  let lo = min(min(min(n, s), min(w, e)), c);
+  let hi = max(max(max(n, s), max(w, e)), c);
+  return clamp(c + (c - (n + s + w + e) * 0.25) * k, lo, hi);
 }
 
 // Final copy to the window.
