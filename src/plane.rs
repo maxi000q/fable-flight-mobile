@@ -1070,7 +1070,7 @@ impl Plane {
             // Flaps add lift (and stall a little earlier); flaps and gear add drag.
             let flap_cl = spec.flap_cl * self.flaps * flap_eff;
             let stall_a = self.stall_alpha();
-            let stall = smooth(stall_a, stall_a + 0.13, alpha.abs());
+            let stall = stall_amount(stall_a, alpha);
             self.stalled = stall > 0.5 && v > 8.0;
             // Ground effect: within a span of the ground the wing tip vortices are
             // squashed, so there is less induced drag and a little more lift (the
@@ -1082,17 +1082,10 @@ impl Plane {
                 }
                 _ => 1.0,
             };
-            let cl = ((spec.cl0 + flap_cl + spec.cl_a * alpha) * (1.0 - stall) + (2.0 * alpha).sin() * 0.95 * stall) * (1.0 + 0.12 * (1.0 - ge)) - spec.spoiler_cl * self.spoilers;
+            let (cl, cd) = lift_drag(spec, alpha, beta, flap_cl, stall, self.flaps, self.gear, self.spoilers, ge);
             // Ragged stumps and missing fairings all drag.
             let rag = ((spec.span - dm.wing[0]) + (spec.span - dm.wing[1])) as f64 / k as f64;
-            let cd = spec.cd0
-                + spec.k_ind * cl * cl * ge
-                + stall * 1.2 * alpha.sin().powi(2)
-                + 0.6 * beta * beta
-                + spec.cd_flap[0] * self.flaps
-                + spec.cd_flap[1] * self.flaps * self.flaps
-                + spec.cd_gear * self.gear
-                + spec.spoiler_cd * self.spoilers
+            let cd = cd
                 + self.wave_cd(mach)
                 + 0.02 * rag
                 + 0.03 * (1.0 - st)
@@ -1906,6 +1899,30 @@ pub fn pressure_ratio(h: f64) -> f64 {
 pub fn sound_speed(h: f64) -> f64 {
     let t = 288.15 - 0.0065 * h.clamp(-500.0, 11_000.0);
     (1.4 * 287.05 * t).sqrt()
+}
+
+/// The intact airframe's lift and drag coefficients (wave drag and the
+/// damage's own drag are added in `Plane::step`). `flap_cl`: the lift the
+/// flaps add as they are now; `stall`: how far into the stall (0..1); `ge`:
+/// ground effect (1 clear of the ground, less near it). Also used by the
+/// JSBSim comparison (jsbsim.rs), so the two always agree.
+#[allow(clippy::too_many_arguments)]
+pub fn lift_drag(spec: &Spec, alpha: f64, beta: f64, flap_cl: f64, stall: f64, flaps: f64, gear: f64, spoilers: f64, ge: f64) -> (f64, f64) {
+    let cl = ((spec.cl0 + flap_cl + spec.cl_a * alpha) * (1.0 - stall) + (2.0 * alpha).sin() * 0.95 * stall) * (1.0 + 0.12 * (1.0 - ge)) - spec.spoiler_cl * spoilers;
+    let cd = spec.cd0
+        + spec.k_ind * cl * cl * ge
+        + stall * 1.2 * alpha.sin().powi(2)
+        + 0.6 * beta * beta
+        + spec.cd_flap[0] * flaps
+        + spec.cd_flap[1] * flaps * flaps
+        + spec.cd_gear * gear
+        + spec.spoiler_cd * spoilers;
+    (cl, cd)
+}
+
+/// How far into the stall at this angle of attack (0..1), past `stall_a`.
+pub fn stall_amount(stall_a: f64, alpha: f64) -> f64 {
+    smooth(stall_a, stall_a + 0.13, alpha.abs())
 }
 
 fn smooth(a: f64, b: f64, x: f64) -> f64 {
