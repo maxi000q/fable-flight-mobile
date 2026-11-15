@@ -20,6 +20,7 @@ mod live;
 mod livewx;
 mod nav;
 mod settings;
+mod systems;
 mod gauges;
 mod gmaps;
 mod graphics;
@@ -721,6 +722,10 @@ struct Game {
     /// joysticks, pedals and moved keys, and what was last saved of them
     binds: bind::Bindings,
     binds_stamp: String,
+    /// random failures: on, the mean interval (minutes), when the next one comes
+    fail_random: bool,
+    fail_mean: f64,
+    fail_next: Option<f64>,
     /// NAV 1, the ADF, the OBS and the altimeter setting
     radios: nav::Radios,
     /// waiting on the ground for the terrain to load: where, and until when at most
@@ -854,6 +859,9 @@ impl Game {
             livewx: livewx::LiveWx::new(),
             binds_stamp: String::new(),
             binds: bind::Bindings::load(),
+            fail_random: false,
+            fail_mean: 30.0,
+            fail_next: None,
             radios: nav::Radios::default(),
             prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
@@ -952,6 +960,8 @@ impl Game {
         let strobe = { let s = t.rem_euclid(1.3); if s < 0.045 || (s > 0.16 && s < 0.2) { 1.0 } else { 0.0 } };
         let beacon = (1.0 - ((t * 1.1).rem_euclid(1.0) - 0.15).abs() * 7.0).max(0.0);
         let (mut g, card) = self.gauges.readings(p);
+        // (The navigation lights, beacon and strobes run off the bus.)
+        let (lit, pw) = if p.sys.powered() { (1000.0, 1.0) } else { (0.0, 0.0) };
         g[0][1] += self.radios.alt_error_ft(self.wx.qnh) as f32;
         if self.spec.is_jet() {
             // The glass cockpit's engine and air data (b747/deck747.wgsl).
@@ -977,7 +987,7 @@ impl Game {
                 [p.n1 as f32, egt as f32, ff as f32, fuel as f32],
                 [mach as f32, gs as f32, (agl * 3.28084) as f32, tat as f32],
                 [p.throttle as f32, local as f32, p.gear as f32, p.flap_deg() as f32],
-                [1000.0 + card.rem_euclid(360.0), strobe, beacon as f32, if p.gear_down { 1.0 } else { 0.0 }],
+                [lit + card.rem_euclid(360.0), strobe * pw, beacon as f32 * pw, if p.gear_down { 1.0 } else { 0.0 }],
             ];
         }
         // Row 5's first slot carries the nav lights (on above 1000) and the compass card.
@@ -987,7 +997,7 @@ impl Game {
             g[2],
             g[3],
             [g[4][0], local as f32, p.gear as f32, p.flap_deg() as f32],
-            [1000.0 + card.rem_euclid(360.0), strobe, beacon as f32, if p.gear_down { 1.0 } else { 0.0 }],
+            [lit + card.rem_euclid(360.0), strobe * pw, beacon as f32 * pw, if p.gear_down { 1.0 } else { 0.0 }],
         ]
     }
 
@@ -1403,6 +1413,57 @@ impl Game {
         }
     }
 
+    /// The pause menu's failures: each one by hand, or one now and then at random.
+    fn failures_page(&mut self, ui: &mut egui::Ui) {
+        use egui::RichText;
+        use menu::{DIM, TEXT};
+        menu::heading(ui, t!("FAILURES", "PANNES"));
+        ui.label(RichText::new(t!("They act as the real ones do: on the engine, the electrics, the gyros, the airspeed and altimeter, the fuel.", "Elles agissent comme les vraies : sur le moteur, l'électricité, les gyroscopes, l'anémomètre et l'altimètre, le carburant.")).size(12.0).color(DIM));
+        for i in 0..systems::Failures::N {
+            let mut on = self.plane.sys.fail.get(i);
+            if ui.checkbox(&mut on, RichText::new(systems::Failures::label(i)).color(TEXT)).changed() {
+                self.plane.sys.fail.set(i, on);
+            }
+        }
+        if ui.button(t!("Repair everything", "Tout réparer")).clicked() {
+            self.plane.sys.fail = systems::Failures::default();
+        }
+        ui.add_space(6.0);
+        menu::heading(ui, t!("AT RANDOM", "AU HASARD"));
+        if ui.checkbox(&mut self.fail_random, t!("A failure now and then, without warning", "Une panne de temps en temps, sans prévenir")).changed() {
+            self.fail_next = None;
+        }
+        ui.add_enabled_ui(self.fail_random, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(t!("About every", "En moyenne toutes les"));
+                ui.add(egui::Slider::new(&mut self.fail_mean, 5.0..=120.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.0} min")));
+            });
+        });
+    }
+
+    /// Random failures: one at a time, at intervals drawn around the mean.
+    fn random_failures(&mut self) {
+        if !self.fail_random || self.mode != Mode::Fly || self.crashed || self.pause_open {
+            if !self.fail_random {
+                self.fail_next = None;
+            }
+            return;
+        }
+        let mean = self.fail_mean * 60.0;
+        let next = *self.fail_next.get_or_insert_with(|| self.real + -(1.0 - self.rng.f() as f64).max(1e-6).ln() * mean);
+        if self.real < next {
+            return;
+        }
+        self.fail_next = None;
+        let free: Vec<usize> = (0..systems::Failures::N).filter(|&i| !self.plane.sys.fail.get(i)).collect();
+        if free.is_empty() {
+            return;
+        }
+        let i = free[((self.rng.f() * free.len() as f32) as usize).min(free.len() - 1)];
+        self.plane.sys.fail.set(i, true);
+        self.flash.push((t!("FAILURE: {}", "PANNE : {}", systems::Failures::label(i).to_uppercase()), self.real));
+    }
+
     /// The flight panel's radios: NAV 1 (VOR or ILS) and the ADF tuned from
     /// the stations around, the OBS, and the altimeter setting.
     fn radio_page(&mut self, ui: &mut egui::Ui) {
@@ -1539,8 +1600,16 @@ impl Game {
     fn nav_overlay(&self, ctx: &egui::Context, hdg: f64) {
         use egui::{Align2, Color32, FontId, Stroke};
         let pos = self.plane.pos;
-        let nav = self.radios.nav.as_ref().map(|s| (s, nav::nav_reading(s, self.radios.obs, pos)));
-        let adf = self.radios.adf.as_ref().map(|s| (s, nav::adf_bearing(s, pos, hdg)));
+        // (Without power the receivers are dead: OFF flags.)
+        let pw = self.plane.sys.powered();
+        let nav = self.radios.nav.as_ref().map(|s| {
+            let mut r = nav::nav_reading(s, self.radios.obs, pos);
+            if !pw {
+                (r.live, r.gs, r.dme) = (false, None, None);
+            }
+            (s, r)
+        });
+        let adf = self.radios.adf.as_ref().map(|s| (s, nav::adf_bearing(s, pos, hdg).filter(|_| pw)));
         if nav.is_none() && adf.is_none() {
             return;
         }
@@ -1924,6 +1993,12 @@ impl Game {
             KeyCode::KeyP => self.paused = !self.paused,
             KeyCode::KeyH => self.show_hud = !self.show_hud,
             KeyCode::KeyJ => self.radios.show = !self.radios.show,
+            KeyCode::Insert => {
+                let m = &mut self.plane.sys.elec.master;
+                *m = !*m;
+                self.status = if *m { t!("Battery master on", "Batterie (master) sur ON") } else { t!("Battery master off", "Batterie (master) sur OFF") }.into();
+                self.status_until = self.real + 3.0;
+            }
             KeyCode::KeyI => {
                 self.plane.ignition = !self.plane.ignition;
                 let on = self.plane.ignition;
@@ -2412,6 +2487,7 @@ impl Game {
 
     fn frame(&mut self) {
         self.keep_settings(false);
+        self.random_failures();
         let now = Instant::now();
         let mut dt_real = (now - self.last).as_secs_f64().min(0.05);
         if self.fps_log.0 {
@@ -4096,6 +4172,7 @@ impl Game {
                         }
                         menu::controls_list(ui)
                     }
+                    Page::Failures => self.failures_page(ui),
                     Page::Bindings => {
                         egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
                             self.bindings_page(ui);
@@ -4304,6 +4381,17 @@ impl Game {
                                     t!("magnetos {} · mixture {:.0}%", "magnétos {} · mélange {:.0}%", if p.ignition { "ON" } else { "OFF" }, p.mixture * 100.0)
                                 };
                                 row(ui, t!("Engine", "Moteur"), format!("{state}  ·  {detail}"), if p.running { TEXT } else { low });
+                                let el = &p.sys.elec;
+                                let elec = if !el.master {
+                                    t!("master OFF (Ins)", "master sur OFF (Inser)").to_string()
+                                } else {
+                                    t!("{:.1} V  ·  battery {:.0}%  ·  {:+.0} A", "{:.1} V  ·  batterie {:.0}%  ·  {:+.0} A", el.volts, el.charge * 100.0, el.amps)
+                                };
+                                row(ui, t!("Electrics", "Électricité"), elec, if p.sys.powered() { TEXT } else { low });
+                                if p.sys.fail.any() {
+                                    let list: Vec<&str> = (0..systems::Failures::N).filter(|&i| p.sys.fail.get(i)).map(systems::Failures::label).collect();
+                                    row(ui, t!("Failures", "Pannes"), list.join(", "), Color32::from_rgb(255, 90, 60));
+                                }
                             });
                             let on = p.running || p.starter_on;
                             if ui.button(if on { t!("Shut the engine down  F4", "Couper le moteur  F4") } else { t!("Start the engine  F4", "Démarrer le moteur  F4") }).clicked() {
@@ -4612,6 +4700,13 @@ impl Game {
                 }
                 if !p.running && !p.on_ground {
                     warn.push(("ENGINE OFF", red));
+                }
+                let el = &p.sys.elec;
+                if el.master && (el.volts < 24.0 || (p.sys.fail.alternator && p.running)) {
+                    warn.push(("LOW VOLTS", amber));
+                }
+                if p.sys.fail.vacuum && !p.spec.is_jet() {
+                    warn.push(("VACUUM", amber));
                 }
             }
             let report = if self.crashed { Vec::new() } else { p.dmg.report() };

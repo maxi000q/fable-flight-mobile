@@ -86,6 +86,8 @@ pub struct Plane {
     /// and an automatic start under way (seconds it still has)
     pub starter_on: bool,
     auto_start: f64,
+    /// the electrical system and the failures (systems.rs)
+    pub sys: crate::systems::Systems,
     /// a jet's fan speed, fraction of 100% N1
     pub n1: f64,
     /// how far the afterburners are lit, 0..1 (what is seen and heard of them; the thrust is immediate)
@@ -211,6 +213,7 @@ impl Plane {
             running: true,
             starter_on: false,
             auto_start: 0.0,
+            sys: Default::default(),
             n1: 0.0,
             burner: 0.0,
             drop: 0.0,
@@ -341,12 +344,14 @@ impl Plane {
     pub fn cold_and_dark(&mut self) {
         (self.ignition, self.mixture, self.running, self.starter_on, self.auto_start) = (false, 0.0, false, false, 0.0);
         (self.throttle, self.charge, self.power, self.prop_rate, self.n1, self.fuel_flow) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        self.sys.elec.master = false;
     }
 
     /// The start a pilot would make: mixture rich, magnetos (fuel controls)
     /// on, throttle at idle, and the starter until the engine runs.
     pub fn start_engine(&mut self) {
         (self.mixture, self.ignition) = (1.0, true);
+        self.sys.elec.master = true;
         self.throttle = self.throttle.min(0.1);
         if self.spec.is_jet() {
             self.starter_on = true;
@@ -1261,8 +1266,9 @@ impl Plane {
                 // It fires with the magnetos on, fuel, a mixture that will burn and the
                 // crankshaft turning (by the starter, or windmilling in the air); the
                 // starter motor's torque falls away as it spins up (it cranks at ~200 rpm).
-                let cranking = c.starter || self.auto_start > 0.0;
-                self.running = self.ignition && self.fuel > 0.0 && self.mixture > 0.08 && w > 8.0 && eng > 0.0;
+                // (The starter needs power from the bus; the magnetos do not.)
+                let cranking = (c.starter || self.auto_start > 0.0) && self.sys.powered();
+                self.running = self.ignition && self.fuel > 0.0 && self.mixture > 0.08 && w > 8.0 && eng > 0.0 && !self.sys.fail.engine;
                 let mix = smooth(0.08, 0.45, self.mixture);
                 let q_eng = if self.running { Self::engine_torque(pe, self.charge, rho, c.boost, eng) * mix } else { 0.0 } + if cranking { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
                 if self.auto_start > 0.0 {
@@ -1322,7 +1328,7 @@ impl Plane {
                 // dead engine windmills in the airflow.
                 // Starting: the starter turns the core up; past light-off, with the fuel
                 // controls at RUN, it lights and runs itself up to idle.
-                let can_run = self.ignition && self.fuel > 0.0 && eng > 0.0;
+                let can_run = self.ignition && self.fuel > 0.0 && eng > 0.0 && !self.sys.fail.engine;
                 if !can_run {
                     self.running = false;
                 } else if !self.running && self.n1 > 0.4 * fe.idle {
@@ -1339,7 +1345,7 @@ impl Plane {
                 target = target.min(fe.idle + (1.0 - fe.idle) * eng);
                 if !self.running {
                     // Not burning: windmilling in the airflow, or turned by the starter.
-                    target = if self.starter_on { 0.5 * fe.idle } else { (0.02 + v / 900.0).min(fe.idle * 0.8) };
+                    target = if self.starter_on && self.sys.powered() { 0.5 * fe.idle } else { (0.02 + v / 900.0).min(fe.idle * 0.8) };
                 }
                 let up = target > self.n1;
                 let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
@@ -1363,6 +1369,18 @@ impl Plane {
         }
         self.prop += dt * self.prop_rate;
         self.fuel = (self.fuel - self.fuel_flow * dt).max(0.0);
+        if self.sys.fail.fuel_leak {
+            // A leak bleeds about 40% of a full-power burn, engine or not.
+            self.fuel = (self.fuel - spec.fuel_flow[1] * 0.4 * dt).max(0.0);
+        }
+        // The electrics: the alternator (the jets' generators) charging once the
+        // engine turns fast enough (a piston's above ~900 rpm), the starter drawing.
+        let charging = match &spec.engine {
+            Engine::Piston(_) => self.running && self.prop_rate > 95.0,
+            Engine::Fan(fe) => self.running && self.n1 > 0.8 * fe.idle,
+        };
+        let cranking = !self.running && (c.starter || self.auto_start > 0.0 || self.starter_on);
+        self.sys.update(dt, charging, cranking, true);
 
         // Ground contact.
         let mut force_w = self.rot * force_b - upw * (mass * 9.81);
@@ -2236,8 +2254,12 @@ mod tests {
         let idle = Controls { brake: true, ..Default::default() };
         run(&mut p, 2.0, &idle);
         assert!(!p.running && p.prop_rate < 1.0 && p.fuel == full);
-        // The starter alone, magnetos off: it cranks (~200 rpm) but does not fire.
+        // The starter on a dead bus (master off): nothing. With the master on
+        // but the magnetos off: it cranks (~200 rpm) but does not fire.
         let crank = Controls { starter: true, ..idle };
+        run(&mut p, 1.0, &crank);
+        assert!(rpm(&p) < 5.0);
+        p.sys.elec.master = true;
         run(&mut p, 2.0, &crank);
         assert!(!p.running && rpm(&p) > 120.0 && rpm(&p) < 300.0, "{}", rpm(&p));
         // The proper start: it fires and settles at idle on its own.
@@ -2263,6 +2285,66 @@ mod tests {
         p.fuel = 50.0;
         run(&mut p, 2.0, &Controls::default());
         assert!(p.running, "{}", rpm(&p));
+    }
+
+    #[test]
+    fn electrics_and_failures() {
+        let w = flat_world();
+        let dt = 1.0 / 180.0;
+        let run = |p: &mut Plane, secs: f64| {
+            for _ in 0..(secs / dt) as usize {
+                assert!(p.step(dt, &Controls { brake: true, ..Default::default() }, &w).is_none());
+            }
+        };
+        let ground = || {
+            let mut p = Plane::spawn_ground(C172, 37.8, -122.46, 0.0, 0.5, 0.0);
+            (p.hold, p.t) = (false, 2.0);
+            p.cold_and_dark();
+            p
+        };
+        // Cold and dark with a flat battery: the starter is dead, nothing turns.
+        let mut p = ground();
+        p.sys.fail.battery = true;
+        p.start_engine();
+        run(&mut p, 6.0);
+        assert!(!p.running && rpm(&p) < 5.0 && !p.sys.powered());
+        // Battery back: it starts, and once running fast enough the alternator charges.
+        p.sys.fail.battery = false;
+        p.sys.elec.charge = 0.8;
+        p.start_engine();
+        run(&mut p, 6.0);
+        assert!(p.running);
+        p.throttle = 0.3;
+        run(&mut p, 3.0);
+        assert!(p.sys.elec.amps > 0.0 && p.sys.elec.volts > 27.0, "{} A {} V at {:.0} rpm", p.sys.elec.amps, p.sys.elec.volts, rpm(&p));
+        // An engine failure: it quits whatever the switches say.
+        p.sys.fail.engine = true;
+        run(&mut p, 1.0);
+        assert!(!p.running && p.fuel_flow == 0.0);
+        // A leak drains the tanks with the engine off.
+        let before = p.fuel;
+        p.sys.fail.fuel_leak = true;
+        run(&mut p, 10.0);
+        assert!(p.fuel < before - 0.03, "{} -> {}", before, p.fuel);
+
+        // In the air: a blocked pitot turns the airspeed indicator into an
+        // altimeter; a failed vacuum pump lets the suction fall away.
+        let w = empty_world();
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+        let mut g = crate::gauges::Gauges::new(&p, 1);
+        g.update(0.1, &p, 0.0);
+        let asi0 = g.readings(&p).0[0][0];
+        p.sys.fail.pitot = true;
+        p.sys.fail.vacuum = true;
+        g.update(0.1, &p, 0.0);
+        p.pos = p.pos.normalize() * (p.pos.length() + 300.0);
+        for _ in 0..200 {
+            g.update(0.05, &p, 0.0);
+        }
+        let r = g.readings(&p).0;
+        let _ = &w;
+        assert!((r[0][0] - asi0 - 9.84).abs() < 1.5, "asi {} from {}", r[0][0], asi0);
+        assert!(r[4][0] < 1.0, "suction {}", r[4][0]);
     }
 
     #[test]

@@ -120,6 +120,7 @@ pub const ACTIONS: &[Action] = &[
     act("reversers", KeyCode::KeyZ, "Thrust reversers (hold)", "Inverseurs de poussée (maintenir)"),
     act("boost", KeyCode::Space, "Boost / afterburner", "Boost / postcombustion"),
     act("engine_auto", KeyCode::F4, "Start / stop the engine", "Démarrer / couper le moteur"),
+    act("master", KeyCode::Insert, "Battery master switch", "Batterie (interrupteur général)"),
     act("ignition", KeyCode::KeyI, "Magnetos (jets: fuel controls)", "Magnétos (jets : robinets carburant)"),
     act("starter", KeyCode::KeyO, "Starter", "Démarreur"),
     act("mixture_rich", KeyCode::PageUp, "Mixture richer", "Mélange plus riche"),

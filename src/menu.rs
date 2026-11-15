@@ -248,11 +248,12 @@ pub enum Page {
     Graphics,
     Controls,
     Bindings,
+    Failures,
 }
 
 impl Page {
     pub const INFO: [Page; 4] = [Page::Flight, Page::Places, Page::Radio, Page::Weather];
-    pub const PAUSE: [Page; 5] = [Page::Game, Page::Settings, Page::Graphics, Page::Controls, Page::Bindings];
+    pub const PAUSE: [Page; 6] = [Page::Game, Page::Settings, Page::Graphics, Page::Controls, Page::Bindings, Page::Failures];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -265,6 +266,7 @@ impl Page {
             Page::Graphics => "Graphics",
             Page::Controls => "Controls",
             Page::Bindings => "Bindings",
+            Page::Failures => "Failures",
         }
     }
 
@@ -312,6 +314,7 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("K", "set the heading indicator to the compass"),
         ("Num 7 / Num 1", "trim nose down / up"),
         ("F4", "start / stop the engine (automatic)"),
+        ("Ins", "battery master switch"),
         ("I", "magnetos on / off (jets: fuel controls)"),
         ("O", "starter (hold; jets: engage)"),
         ("Page Up / Down", "mixture richer / leaner"),

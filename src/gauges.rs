@@ -46,6 +46,10 @@ pub struct Gauges {
     amps: f64,
     seed: u64,
     t: f64,
+    /// a blocked pitot tube: the airspeed and altitude it was blocked at;
+    /// a blocked static port: the altitude it holds
+    pitot_hold: Option<(f64, f64)>,
+    static_hold: Option<f64>,
 }
 
 /// Small deterministic noise (a few octaves of sines), -1..1.
@@ -95,7 +99,7 @@ fn truth(p: &Plane) -> Truth {
         oil_p: (22.0 + 58.0 * smooth(500.0, 2300.0, rpm)) * eng.sqrt() * running,
         egt: (0.45 + 0.3 * thr) * running,
         // The engine-driven vacuum pump: about 5 in. Hg from a fast idle up.
-        suction: 5.2 * smooth(250.0, 1000.0, rpm).sqrt() * (0.4 + 0.6 * eng),
+        suction: if p.sys.fail.vacuum { 0.0 } else { 5.2 * smooth(250.0, 1000.0, rpm).sqrt() * (0.4 + 0.6 * eng) },
     }
 }
 fn smooth(a: f64, b: f64, x: f64) -> f64 {
@@ -133,6 +137,8 @@ impl Gauges {
             amps: 0.0,
             seed: seed | 1,
             t: 0.0,
+            pitot_hold: None,
+            static_hold: None,
         }
     }
 
@@ -157,9 +163,25 @@ impl Gauges {
 
         // Pitot-static: the airspeed needle and altimeter a touch behind, the
         // VSI well behind.
-        self.asi = lag(self.asi, tr.ias_kt, 0.25, dt);
-        self.alt = lag(self.alt, tr.alt_ft, 0.35, dt);
-        self.vsi = lag(self.vsi, tr.vs_fpm, 2.6, dt);
+        // A blocked static port holds the altimeter where it was and stills the
+        // VSI; a blocked pitot (drain blocked too) traps the air in it, so the
+        // airspeed reads what it was plus the change in altitude: an altimeter.
+        let (mut ias, mut alt, mut vs) = (tr.ias_kt, tr.alt_ft, tr.vs_fpm);
+        if p.sys.fail.static_port {
+            alt = *self.static_hold.get_or_insert(self.alt);
+            vs = 0.0;
+        } else {
+            self.static_hold = None;
+        }
+        if p.sys.fail.pitot {
+            let (a0, h0) = *self.pitot_hold.get_or_insert((self.asi, alt));
+            ias = (a0 + (alt - h0) / 100.0).max(0.0);
+        } else {
+            self.pitot_hold = None;
+        }
+        self.asi = lag(self.asi, ias, 0.25, dt);
+        self.alt = lag(self.alt, alt, 0.35, dt);
+        self.vsi = lag(self.vsi, vs, 2.6, dt);
 
         // Vacuum system and the attitude gyro.
         self.suction = lag(self.suction, tr.suction, 0.8, dt);
@@ -213,7 +235,8 @@ impl Gauges {
         let yaw_r = -p.omega.y;
         let roll_r = -p.omega.z;
         let rate = (yaw_r * 0.866 + roll_r * 0.5).to_degrees() / 0.866;
-        self.tc = lag(self.tc, rate, 0.12, dt);
+        // (The turn coordinator's gyro is electric: without power it runs down.)
+        self.tc = if p.sys.powered() { lag(self.tc, rate, 0.12, dt) } else { lag(self.tc, 0.0, 20.0, dt) };
         // The ball rolls to where the apparent gravity is, damped by its fluid.
         let ball_to = (-p.sf.x).atan2(p.sf.y.max(0.5)) / 0.14;
         let (w0, zeta) = (9.0, 0.65);
@@ -227,7 +250,8 @@ impl Gauges {
         let side = -p.sf.x / 9.81;
         let vert = p.sf.y / 9.81 - 1.0;
         // The fuel on board, in US gallons a tank (avgas, 0.72 kg/l).
-        let gal = p.fuel / 0.72 / 3.785 / 2.0;
+        // (Electric gauges: without power they drop to empty.)
+        let gal = if p.sys.powered() { p.fuel / 0.72 / 3.785 / 2.0 } else { 0.0 };
         let (left, right) = (gal * 1.02, gal * 0.98);
         let slosh = |s: f64, k: f64| s * (1.0 + 0.22 * side * k - 0.08 * vert) + 0.25 * wobble(t * 0.9, k * 3.0) * p.air.sigma_w.min(3.0) / 3.0;
         self.fuel[0] = lag(self.fuel[0], slosh(left, -1.0), 1.4, dt);
@@ -241,8 +265,8 @@ impl Gauges {
         self.mp = lag(self.mp, tr.mp, 0.25, dt);
         self.rpm = lag(self.rpm, tr.rpm, 0.12, dt);
         // The alternator charges once the revs are up; below that the battery carries the load.
-        let charge = if tr.rpm > 900.0 { 2.0 + 6.0 * (-t / 90.0).exp() } else if tr.rpm > 200.0 { -3.0 } else { -6.0 };
-        self.amps = lag(self.amps, charge, 1.5, dt);
+        // The ammeter: the battery's current, charging or not.
+        self.amps = lag(self.amps, p.sys.elec.amps.clamp(-60.0, 60.0), 1.5, dt);
     }
 
     /// The instrument readings as plane.wgsl takes them (rows 0..4, and the
