@@ -185,7 +185,9 @@ fn baggage_door(L: vec3f) -> f32 {
 // ---------------------------------------------------------------- lettering
 
 // Stroke font: digits, N E S W and a point (glyphs 0-14; 15 is a space).
-var<private> GSEG: array<vec4f, 237> = array<vec4f, 237>(
+// (const, not var<private>: on Metal a private array is a per-pixel copy made
+// at the start of every invocation, which cost the aircraft ~7 ms a frame on an M4.)
+const GSEG = array<vec4f, 237>(
   vec4f(0.25, 0.0, 0.75, 0.0),
   vec4f(0.75, 0.0, 1.0, 0.4),
   vec4f(1.0, 0.4, 1.0, 1.6),
@@ -424,7 +426,7 @@ var<private> GSEG: array<vec4f, 237> = array<vec4f, 237>(
   vec4f(0.95, 1.95, 0.05, 1.95),
   vec4f(0.05, 1.95, 0.05, 0.05)
 );
-var<private> GSTART: array<u32, 53> = array<u32, 53>(0u, 8u, 10u, 16u, 27u, 30u, 38u, 49u, 51u, 65u, 76u, 79u, 83u, 94u, 98u, 99u, 99u, 102u, 112u, 119u, 125u, 128u, 137u, 140u, 143u, 147u, 150u, 152u, 156u, 164u, 170u, 179u, 186u, 188u, 193u, 195u, 197u, 200u, 203u, 204u, 205u, 207u, 209u, 213u, 215u, 217u, 220u, 223u, 226u, 229u, 232u, 233u, 237u);
+const GSTART = array<u32, 53>(0u, 8u, 10u, 16u, 27u, 30u, 38u, 49u, 51u, 65u, 76u, 79u, 83u, 94u, 98u, 99u, 99u, 102u, 112u, 119u, 125u, 128u, 137u, 140u, 143u, 147u, 150u, 152u, 156u, 164u, 170u, 179u, 186u, 188u, 193u, 195u, 197u, 200u, 203u, 204u, 205u, 207u, 209u, 213u, 215u, 217u, 220u, 223u, 226u, 229u, 232u, 233u, 237u);
 
 fn glyph_d(g: u32, p: vec2f) -> f32 {
   var d = 1e3;

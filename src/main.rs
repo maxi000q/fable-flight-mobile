@@ -90,6 +90,10 @@ const PSHADOW_DEPTH: f32 = 1600.0;
 /// Moonlight relative to sunlight. Far brighter than the real ratio, so a
 /// moonlit night reads like a film's night scene instead of a black screen.
 const MOON_E: f32 = SUN_E * 0.0035;
+/// Default --render-scale on an integrated GPU (Apple silicon and the like):
+/// it shares memory bandwidth and power with the CPU, and the full-resolution
+/// scene is too much for it. The temporal AA and its sharpening hide most of it.
+const INTEGRATED_SCALE: f32 = 0.75;
 /// What a 3D tiles detail level costs, as measured over San Francisco (see
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
@@ -175,6 +179,13 @@ struct Args {
     weather_panel: bool,
     vsync: bool,
     taa: bool,
+    /// the 3D scene's resolution as a fraction of the window's (default: 1, or
+    /// INTEGRATED_SCALE on a GPU without memory of its own)
+    render_scale: Option<f32>,
+    /// log the frame rate once a second (average and slowest frame)
+    fps_log: bool,
+    /// draw without showing anything (benchmarks and scripted shots with the screen off)
+    headless: bool,
     offline: bool,
     shots: Vec<(f64, PathBuf, Option<(f64, f64, f64)>)>,
     /// record frames + audio to a directory: (dir, start, seconds), fixed 30 fps steps
@@ -237,6 +248,9 @@ fn parse_args() -> Args {
         weather_panel: false,
         vsync: true,
         taa: true,
+        render_scale: None,
+        fps_log: false,
+        headless: false,
         offline: false,
         shots: Vec::new(),
         record: None,
@@ -391,6 +405,15 @@ fn parse_args() -> Args {
                 a.taa = false;
                 used = 1;
             }
+            "--render-scale" => a.render_scale = num(&v, i).map(|s| s as f32),
+            "--headless" => {
+                a.headless = true;
+                used = 1;
+            }
+            "--fps-log" => {
+                a.fps_log = true;
+                used = 1;
+            }
             "--no-hud" => {
                 a.no_hud = true;
                 used = 1;
@@ -431,7 +454,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -536,6 +559,8 @@ struct Game {
     plane_box: [[f32; 4]; 2],
     frame: u64,
     fps: f64,
+    /// --fps-log: on, start of this second, frames in it, its slowest frame
+    fps_log: (bool, Instant, u32, f64),
     paused: bool,
     show_help: bool,
     show_hud: bool,
@@ -644,6 +669,8 @@ impl Game {
         let r = pollster::block_on(Renderer::new(window.clone(), args.vsync))?;
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         let mut r = r;
+        r.headless = args.headless;
+        r.set_render_scale(args.render_scale.unwrap_or(if r.integrated { INTEGRATED_SCALE } else { 1.0 }));
         // Cached scans load offline too; missing ones keep the procedural layer.
         r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline));
         let google = Arc::new(gmaps::Google::load(args.google_key.clone()));
@@ -729,7 +756,7 @@ impl Game {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len()], window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { 0 }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
-            frame: 0, fps: 60.0, paused: false, show_help: false, show_hud: !args.no_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
+            frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: true, volume: 1.0, info_open: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, look_sens: 1.0, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(cockpit::FOV).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
@@ -1753,6 +1780,18 @@ impl Game {
     fn frame(&mut self) {
         let now = Instant::now();
         let mut dt_real = (now - self.last).as_secs_f64().min(0.05);
+        if self.fps_log.0 {
+            let l = &mut self.fps_log;
+            l.2 += 1;
+            l.3 = l.3.max((now - self.last).as_secs_f64());
+            let el = (now - l.1).as_secs_f64();
+            if el >= 1.0 {
+                let n = l.2 as f64;
+                let st = std::mem::take(&mut self.r.stats);
+                log::info!("{:.1} fps avg ({:.1} ms), slowest frame {:.1} ms | game {:.1}  wait-gpu {:.1}  encode {:.1}  submit {:.1} ms", n / el, el / n * 1000.0, l.3 * 1000.0, st[0] / n * 1000.0, st[1] / n * 1000.0, st[2] / n * 1000.0, st[3] / n * 1000.0);
+                (l.1, l.2, l.3) = (now, 0, 0.0);
+            }
+        }
         if self.record.is_some() {
             // Frozen for a few wall-clock seconds so the city streams in first.
             dt_real = if self.rec_t0.elapsed().as_secs_f64() < 8.0 { 0.0 } else { 1.0 / REC_FPS };
@@ -2140,8 +2179,9 @@ impl Game {
         }
 
         // ---- camera
-        let size = self.window.inner_size();
-        let (w, h) = (size.width.max(1) as f32, size.height.max(1) as f32);
+        // (in the 3D scene's pixels, which --render-scale may make fewer than the window's)
+        let (w, h) = self.r.render_size();
+        let (w, h) = (w as f32, h as f32);
         let mut fov = 60f32.to_radians();
         let (cam, dir, upv);
         if !(self.cam_mode == 1 && !self.crashed && !in_menu) {
@@ -2392,7 +2432,7 @@ impl Game {
             vol_e: [0.0; 4],
             vol_n: [0.0; 4],
             pshadow_vp: casc_vp[3],
-            pshadow: [self.spec.shadow_r * 2.0 / render::PLANE_SHADOW_RES as f32, 0.0012 / PSHADOW_DEPTH, render::PLANE_SHADOW_RES as f32 / 4096.0, if shadow_on && !self.crashed { 1.0 } else { 0.0 }],
+            pshadow: [self.spec.shadow_r * 2.0 / self.r.plane_shadow_res() as f32, 0.0012 / PSHADOW_DEPTH, self.r.plane_shadow_res() as f32 / 4096.0, if shadow_on && !self.crashed { 1.0 } else { 0.0 }],
             taa: [jitter.x * 0.5, -jitter.y * 0.5, if self.taa { 1.0 } else { 0.0 }, 0.0],
             plane_inv: [[0.0; 4]; 4],
             plane_prev: [[0.0; 4]; 4],
@@ -2582,7 +2622,9 @@ impl Game {
             self.world.photo_beacons(cam, &mut air_lights);
         }
 
-        let ui = if in_menu { self.menu_ui(vp, cam, w, h) } else { self.ui(agl) };
+        // The globe's labels are placed in the window's pixels, not the (maybe smaller) 3D scene's.
+        let (ww, wh) = (self.r.config.width as f32, self.r.config.height as f32);
+        let ui = if in_menu { self.menu_ui(vp, cam, ww, wh) } else { self.ui(agl) };
         // The smoke volume: a grid around the effects anchor, on its local east/north/up axes.
         {
             let site = cam + DVec3::new(psim.anchor[0] as f64, psim.anchor[1] as f64, psim.anchor[2] as f64);
@@ -2650,6 +2692,7 @@ impl Game {
         }
         let had_shots = shot.is_some() && self.shots.is_empty();
         let (skin_slots, skins) = if in_menu { (Vec::new(), Vec::new()) } else { self.destr.skin_draws() };
+        self.r.stats[0] += now.elapsed().as_secs_f64();
         self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.ocean.uniform(), egui: Some(ui), shot, logo: in_menu.then(|| self.window.scale_factor() as f32) });
         if (had_shots && std::env::args().any(|a| a == "--shot") && self.record.is_none()) || rec_done {
             self.quit = true;
@@ -4038,11 +4081,31 @@ fn load_fonts(ctx: &egui::Context) {
         fc.iter().map(|s| s.trim().to_string()).chain(fallbacks.iter().map(|s| s.to_string())).filter(|p| p.ends_with(".ttf") || p.ends_with(".otf")).find_map(|p| std::fs::read(p).ok())
     };
     let mut fonts = egui::FontDefinitions::empty();
-    for (name, family, kind, fb) in [
-        ("mono", egui::FontFamily::Monospace, "monospace", ["/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf", "C:/Windows/Fonts/consola.ttf"]),
-        ("sans", egui::FontFamily::Proportional, "sans", ["/usr/share/fonts/google-noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "C:/Windows/Fonts/segoeui.ttf"]),
-    ] {
-        if let Some(data) = find(kind, &fb) {
+    // fontconfig's answer where there is one (Linux), then each system's own fonts.
+    let mono: &[&str] = &[
+        "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/cour.ttf",
+    ];
+    let sans: &[&str] = &[
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Geneva.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ];
+    for (name, family, kind, fb) in [("mono", egui::FontFamily::Monospace, "monospace", mono), ("sans", egui::FontFamily::Proportional, "sans", sans)] {
+        if let Some(data) = find(kind, fb) {
             fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
             fonts.families.entry(family).or_default().push(name.into());
         } else {
