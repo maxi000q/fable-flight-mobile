@@ -1411,6 +1411,13 @@ impl Game {
                     if ui.add_enabled(!busy, egui::Button::new(t!("Assign", "Assigner")).small()).clicked() {
                         self.binds.start_capture(Capture::Axis(a));
                     }
+                    if let Some(b) = self.binds.axes.get_mut(&a) {
+                        // The sign is learnt when binding; this flips it.
+                        let mut inv = b.sign < 0.0;
+                        if ui.checkbox(&mut inv, t!("Invert", "Inverser")).changed() {
+                            b.sign = -b.sign;
+                        }
+                    }
                     if self.binds.axes.contains_key(&a) && ui.small_button(t!("Clear", "Effacer")).clicked() {
                         self.binds.axes.remove(&a);
                     }
