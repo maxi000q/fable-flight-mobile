@@ -4,6 +4,12 @@
 @group(1) @binding(2) var t_depth: texture_depth_2d;
 @group(1) @binding(3) var t_ao: texture_2d<f32>;
 @group(1) @binding(4) var t_amb: texture_2d<f32>;
+// Keep the original samples at water silhouettes: resolved material parameters
+// mix water depth/class with foreground normals and cannot be shaded correctly.
+@group(1) @binding(5) var t_color_ms: texture_multisampled_2d<f32>;
+@group(1) @binding(6) var t_aux_ms: texture_multisampled_2d<f32>;
+@group(1) @binding(7) var t_depth_ms: texture_depth_multisampled_2d;
+@group(1) @binding(8) var t_amb_ms: texture_multisampled_2d<f32>;
 
 // Wave texture lookup at the mip that matches the pixel footprint (fp, metres).
 fn wtex(uv: vec2f, size: f32, fp: f32) -> vec4f {
@@ -40,7 +46,8 @@ fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
       }
       let px = vec2i(huv * dims);
       let c = textureLoad(t_color, px, 0);
-      if (textureLoad(t_aux, px, 0).a > 0.5 || c.a < 0.99 || textureLoad(t_depth, px, 0) == 0.0) { break; }
+      // (any water share at all: its samples hold the unlit tint, not a colour)
+      if (textureLoad(t_aux, px, 0).a > 0.004 || c.a < 0.99 || textureLoad(t_depth, px, 0) == 0.0) { break; }
       let e = min(min(huv.x, 1.0 - huv.x), min(huv.y, 1.0 - huv.y));
       return vec4f(c.rgb, smoothstep(0.0, 0.08, e));
     }
@@ -244,8 +251,7 @@ fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
 }
 
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
-  // Edge pixels average in the normals other geometry writes here: keep the
-  // water parameters in range or the absorption maths goes negative.
+  // Keep the water parameters in their physical ranges.
   let wd = max(aux.x, 0.0);
   let wclass = clamp(aux.y, 0.0, 3.0);
   let shore = clamp(aux.z, 0.0, 1.0);
@@ -523,10 +529,8 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   return max(col, vec3f(0.0));
 }
 
-@fragment fn fs(in: FsIn) -> @location(0) vec4f {
+fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
   let px = vec2i(in.pos.xy);
-  let z = textureLoad(t_depth, px, 0);
-  let c0 = textureLoad(t_color, px, 0);
   let ray = view_ray(in.uv);
   let rd = normalize(ray);
   let jit = ign(in.pos.xy);
@@ -534,39 +538,19 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // Alpha is how much of the pixel geometry covers (the anti-aliased edge).
   let cov = c0.a;
   if (z == 0.0 || cov < 0.004) {
-    return vec4f(clamp(sky_color(rd, jit), vec3f(0.0), vec3f(3000.0)), 1.0);
+    return clamp(sky_color(rd, jit), vec3f(0.0), vec3f(3000.0));
   }
   let P = ray / z;
   let dist = length(P);
   var col = c0.rgb / cov;
-  let aux = textureLoad(t_aux, px, 0) / cov;
+  let aux = a0 / cov;
   if (aux.a <= 0.004) {
     // Ambient occlusion takes away from the sky and bounce light only.
-    let share = clamp(textureLoad(t_amb, px, 0).r / cov, 0.0, 1.0);
+    let share = clamp(amb / cov, 0.0, 1.0);
     col *= 1.0 - share * (1.0 - textureLoad(t_ao, px, 0).r);
   }
   if (aux.a > 0.996) {
     col = water(P, rd, dist, col, aux, jit);
-  } else if (aux.a > 0.004) {
-    // Water's edge: some samples are water, which stores its unlit tint, the
-    // rest lit geometry. Take the tint and parameters from the all-water
-    // pixels around, and swap the water's share of the pixel for shaded water.
-    var n = 0.0;
-    var wt = vec3f(0.0);
-    var wa = vec4f(0.0);
-    for (var k = 0; k < 8; k++) {
-      let o = vec2i(vec2f(cos(f32(k) * 0.785398), sin(f32(k) * 0.785398)) * 1.5);
-      let c2 = textureLoad(t_color, px + o, 0);
-      let a2 = textureLoad(t_aux, px + o, 0);
-      if (c2.a > 0.996 && a2.a > 0.996) { wt += c2.rgb; wa += a2; n += 1.0; }
-    }
-    let wf = aux.a;
-    if (n > 0.0) {
-      wt /= n;
-      col = max(col + wf * (water(P, rd, dist, wt, wa / n, jit) - wt), vec3f(0.0));
-    } else if (wf > 0.5) {
-      col = water(P, rd, dist, col, aux, jit);
-    }
   }
   else if (aux.a < -0.01 && G.misc.z > 0.5) {
     // Glass: swap the sky the building shader reflected for whatever stands
@@ -590,5 +574,28 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     }
   }
   if (cov < 0.996) { col = mix(sky_color(rd, jit), col, cov); }
-  return vec4f(clamp(col, vec3f(0.0), vec3f(3000.0)), 1.0);
+  return clamp(col, vec3f(0.0), vec3f(3000.0));
+}
+
+@fragment fn fs(in: FsIn) -> @location(0) vec4f {
+  let px = vec2i(in.pos.xy);
+  var water_samples = 0;
+  for (var i = 0; i < 4; i++) {
+    if (textureLoad(t_aux_ms, px, i).a > 0.996) { water_samples++; }
+  }
+  if (water_samples > 0 && water_samples < 4) {
+    // Shade before resolving: each water sample needs its own tint, parameters
+    // and depth, even when no neighbouring pixel is entirely water. Foreground
+    // samples retain their own lighting and haze rather than water's colour.
+    var col = vec3f(0.0);
+    for (var i = 0; i < 4; i++) {
+      col += composite_sample(in, textureLoad(t_depth_ms, px, i),
+        textureLoad(t_color_ms, px, i), textureLoad(t_aux_ms, px, i),
+        textureLoad(t_amb_ms, px, i).r);
+    }
+    return vec4f(col * 0.25, 1.0);
+  }
+  return vec4f(composite_sample(in, textureLoad(t_depth, px, 0),
+    textureLoad(t_color, px, 0), textureLoad(t_aux, px, 0),
+    textureLoad(t_amb, px, 0).r), 1.0);
 }

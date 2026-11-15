@@ -34,7 +34,6 @@ const PANEL_DK: Mat = mt(mat::PLASTIC, 0.105, 0.088, 0.072).pat(pat::PANEL);
 const BEZEL: Mat = mt(mat::PLASTIC, 0.135, 0.112, 0.090).pat(pat::PANEL);
 const GLARE: Mat = mt(mat::FABRIC, 0.030, 0.028, 0.027).pat(pat::LINING);
 const LINER: Mat = mt(mat::PLASTIC, 0.46, 0.43, 0.38).pat(pat::LINING);
-const TRIM_C: Mat = mt(mat::PLASTIC, 0.24, 0.22, 0.195);
 const CARPET: Mat = mt(mat::FABRIC, 0.032, 0.034, 0.040).pat(pat::CARPET);
 const CREAM: Mat = mt(mat::PLASTIC, 0.60, 0.56, 0.46);
 const BTN: Mat = mt(mat::PLASTIC, 0.020, 0.020, 0.022);
@@ -240,11 +239,6 @@ fn outline(w: [f32; 4], e: f32, n: usize) -> Vec<(f32, f32)> {
     out
 }
 
-/// The lining radially inside a point of the skin (at its station).
-fn radial_lining(p: Vec3) -> Vec3 {
-    let q = ray_pt(&lsec(p.z), p.x.atan2(p.y - 0.3));
-    Vec3::new(q.x, q.y, p.z)
-}
 /// The lining's distance to its window cut-outs: measured on the skin
 /// radially outside it, less the trim (as plane.wgsl does).
 pub fn lining_window(q: Vec3) -> f32 {
@@ -636,38 +630,8 @@ fn lining(m: &mut Mesh) {
     m.append(&side.mirror_x());
     m.append(&side);
 
-    // The window reveals: the frame's trim from the skin's opening in to the
-    // lining's (a little larger), and the posts between them.
-    let mut rev = Mesh::default();
-    for k in 0..3 {
-        let skin = window_ring(k, 0.0, false);
-        let lin: Vec<Vec3> = window_ring(k, TRIM, false).iter().map(|&p| radial_lining(p)).collect();
-        let n = skin.len();
-        let rows: Vec<Vec<SP>> = (0..=n)
-            .map(|i| {
-                let (a, c) = (skin[i % n], lin[i % n]);
-                // A little proud of the skin's cut, then straight in, then out to the lining.
-                let r = Vec2::new(a.x, a.y - 0.3).normalize();
-                let r = Vec3::new(r.x, r.y, 0.0);
-                let out = a + r * 0.004;
-                let mid = a - r * 0.05;
-                let u = i as f32 * 0.04;
-                vec![(out, [u, 0.0], 0.0), (mid, [u, 0.05], 0.0), (c, [u, 0.12], 0.0)]
-            })
-            .collect();
-        let start = rev.v.len();
-        rev.grid(&TRIM_C, &rows, false, false);
-        // Face the opening.
-        let centre = skin.iter().copied().sum::<Vec3>() / n as f32;
-        let v0 = &rev.v[start + 1];
-        if Vec3::from(v0.nrm).dot(centre - Vec3::from(v0.pos)) < 0.0 {
-            for v in &mut rev.v[start..] {
-                v.nrm = (-Vec3::from(v.nrm)).into();
-            }
-        }
-    }
-    m.append(&rev.mirror_x());
-    m.append(&rev);
+    // The window frames and the post covers between the windows.
+    window_frames(m);
 
     // The bulkheads: in front, under the windshield; behind, round the door.
     let zf = bz(D_FRONT);
@@ -680,6 +644,579 @@ fn lining(m: &mut Mesh) {
         })
         .collect();
     m.fan(&mt(mat::PLASTIC, 0.10, 0.09, 0.08), Vec3::new(0.0, FLOOR + 0.5, zf), &ring, Vec3::Z);
+}
+
+// ---------------------------------------------------------------- window frames and posts
+
+/// The moulded window surrounds, the covers over the posts between the
+/// windows, and the seals where they meet the glass.
+const SURROUND: Mat = mt(mat::PLASTIC, 0.285, 0.262, 0.226);
+const POST: Mat = mt(mat::PLASTIC, 0.262, 0.240, 0.205);
+const SEAL: Mat = mt(mat::RUBBER, 0.022, 0.022, 0.024);
+
+/// Signed distance to one window's opening, as `window` measures it (0 the
+/// right windshield, 1 and 2 the right side windows; negative inside).
+fn win_k(k: usize, p: Vec3) -> f32 {
+    let d = p.z + ZN;
+    if k == 0 {
+        let poly = WSHIELD.map(|v| Vec2::new(v[0], v[1]));
+        return (sd_poly(Vec2::new(p.x, p.y), &poly) - 0.06).max(d - 5.26);
+    }
+    let w = WIN[k];
+    let th = p.x.atan2(p.y - 0.3);
+    let q = Vec2::new((d - (w[0] + w[1]) * 0.5).abs() - (w[1] - w[0]) * 0.5, ((th - (w[2] + w[3]) * 0.5).abs() - (w[3] - w[2]) * 0.5) * 3.4);
+    let q = q + Vec2::splat(0.06);
+    q.max(Vec2::ZERO).length() + q.x.max(q.y).min(0.0) - 0.06
+}
+/// The same for the lining's cut round window k (`lining_window`).
+fn lin_k(k: usize, q: Vec3) -> f32 {
+    let r = Vec2::new(q.x, q.y - 0.3).normalize_or_zero();
+    win_k(k, q + Vec3::new(r.x, r.y, 0.0) * INSET) - TRIM
+}
+/// The opening that is not window k nearest to p (the left windshield counts).
+fn win_other(k: usize, p: Vec3) -> f32 {
+    let mut d = win_k(0, Vec3::new(-p.x, p.y, p.z));
+    for j in 0..3 {
+        if j != k {
+            d = d.min(win_k(j, p));
+        }
+    }
+    d
+}
+
+/// Angle round the section (from the crown, about 0.3 m up) of a point.
+fn polar(p: Vec3) -> f32 {
+    p.x.atan2(p.y - 0.3)
+}
+/// The skin (or the lining) at station z, polar angle a.
+fn shell_pt(z: f32, a: f32, lining: bool) -> Vec3 {
+    let q = ray_pt(&if lining { lsec(z) } else { sec(z) }, a);
+    Vec3::new(q.x, q.y, z)
+}
+/// The point of the skin (or the lining) radially in line with p.
+fn snap(p: Vec3, lining: bool) -> Vec3 {
+    shell_pt(p.z, polar(p), lining)
+}
+/// Outward normal of the skin (or the lining) at p.
+fn shell_n(p: Vec3, lining: bool) -> Vec3 {
+    let (z, a, e) = (p.z, polar(p), 0.002);
+    let dz = shell_pt(z + e, a, lining) - shell_pt(z - e, a, lining);
+    let da = shell_pt(z, a + e, lining) - shell_pt(z, a - e, lining);
+    let n = dz.cross(da).normalize_or_zero();
+    if n.dot(Vec3::new(p.x, p.y - 0.3, 0.0)) < 0.0 { -n } else { n }
+}
+/// Direction along a shell (normal n) in which f grows fastest.
+fn grad_on(p: Vec3, n: Vec3, f: &dyn Fn(Vec3) -> f32) -> Vec3 {
+    let e = 0.002;
+    let g = Vec3::new(f(p + Vec3::X * e) - f(p - Vec3::X * e), f(p + Vec3::Y * e) - f(p - Vec3::Y * e), f(p + Vec3::Z * e) - f(p - Vec3::Z * e));
+    (g - n * g.dot(n)).normalize_or_zero()
+}
+/// From p, along the shell in direction g, the point where f reaches `level`.
+fn walk(p: Vec3, g: Vec3, lining: bool, f: &dyn Fn(Vec3) -> f32, level: f32) -> Vec3 {
+    let at = |t: f32| snap(p + g * t, lining);
+    let (mut t0, mut v0) = (0.0f32, f(p));
+    let mut t1 = level - v0;
+    let mut v1 = f(at(t1));
+    for _ in 0..10 {
+        if (v1 - level).abs() < 2e-5 || (v1 - v0).abs() < 1e-7 {
+            break;
+        }
+        let t2 = t1 + ((level - v1) * (t1 - t0) / (v1 - v0)).clamp(-0.05, 0.05);
+        (t0, v0) = (t1, v1);
+        t1 = t2;
+        v1 = f(at(t1));
+    }
+    at(t1)
+}
+/// Whether p is inside the lining's section (in the cabin).
+fn in_cabin(p: Vec3) -> bool {
+    let s = lsec(p.z);
+    let up = p.y > s.mid;
+    let n = if up { s.nt } else { s.nb };
+    let h = if up { s.top - s.mid } else { s.mid - s.bot };
+    (p.x / s.w).abs().powf(n) + ((p.y - s.mid) / h).abs().powf(n) < 1.0
+}
+/// A closed ring resampled every `step` metres.
+fn even(ring: &[Vec3], step: f32) -> Vec<Vec3> {
+    let n = ring.len();
+    let mut acc = vec![0.0f32];
+    for k in 0..n {
+        acc.push(acc[k] + (ring[(k + 1) % n] - ring[k]).length());
+    }
+    let total = acc[n];
+    let m = (total / step).round().max(3.0) as usize;
+    let mut j = 0;
+    (0..m)
+        .map(|i| {
+            let s = total * i as f32 / m as f32;
+            while acc[j + 1] < s {
+                j += 1;
+            }
+            let t = (s - acc[j]) / (acc[j + 1] - acc[j]).max(1e-9);
+            ring[j].lerp(ring[(j + 1) % n], t)
+        })
+        .collect()
+}
+/// Window k's opening in the skin, every centimetre, exactly on its edge.
+fn edge_ring(k: usize) -> Vec<Vec3> {
+    let f = |p: Vec3| win_k(k, p);
+    even(&window_ring(k, 0.0, false), 0.01)
+        .into_iter()
+        .map(|p| {
+            let p = snap(p, false);
+            walk(p, grad_on(p, shell_n(p, false), &f), false, &f, 0.0)
+        })
+        .collect()
+}
+/// Moving average along an open run, ends held.
+fn smooth<T: Copy + std::ops::Add<Output = T> + std::ops::Mul<f32, Output = T>>(v: &mut [T], passes: usize) {
+    for _ in 0..passes {
+        let o = v.to_vec();
+        for i in 1..v.len().saturating_sub(1) {
+            v[i] = o[i - 1] * 0.25 + o[i] * 0.5 + o[i + 1] * 0.25;
+        }
+    }
+}
+
+/// A post between two windows: its centre line on the skin and half width.
+struct Post {
+    c: Vec<Vec3>,
+    half: Vec<f32>,
+    /// 0 standing proud of the lining, 1 sunk behind it (the ends).
+    sink: Vec<f32>,
+    /// Along the line, across it, and into the cabin.
+    ax: Vec<(Vec3, Vec3, Vec3)>,
+    /// How far the face stands in from the skin.
+    depth: Vec<f32>,
+}
+impl Post {
+    /// Whether a point of the skin lies at least `margin` inside the cover where it stands proud.
+    fn covers(&self, p: Vec3, margin: f32) -> bool {
+        (0..self.c.len()).any(|i| self.sink[i] < 0.5 && (self.c[i] - p).length() + margin < self.half[i])
+    }
+}
+
+/// The post where the openings `a` and `b` (edge rings) come within `maxgap`
+/// of each other; the cover laps `over` onto the glass either side, at least
+/// `min_half` wide, and runs on `ext` past where the gap opens up.
+fn post_between(a: &[Vec3], b: &[Vec3], maxgap: f32, over: f32, min_half: f32, ext: f32) -> Post {
+    let n = a.len();
+    let near: Vec<(Vec3, f32)> = a
+        .iter()
+        .map(|&p| {
+            let q = b.iter().copied().min_by(|x, y| (*x - p).length().total_cmp(&(*y - p).length())).unwrap();
+            (snap((p + q) * 0.5, false), (q - p).length())
+        })
+        .collect();
+    // The longest run (round the ring) where the openings are close.
+    let start = (0..n).find(|&i| near[i].1 >= maxgap).unwrap_or(0);
+    let (mut best, mut cur) = (Vec::new(), Vec::new());
+    for k in 1..=n {
+        let i = (start + k) % n;
+        if near[i].1 < maxgap {
+            cur.push(near[i]);
+        } else if !cur.is_empty() {
+            if cur.len() > best.len() {
+                best = std::mem::take(&mut cur);
+            }
+            cur.clear();
+        }
+    }
+    if cur.len() > best.len() {
+        best = cur;
+    }
+    let mut c: Vec<Vec3> = best.iter().map(|x| x.0).collect();
+    let mut gap: Vec<f32> = best.iter().map(|x| x.1).collect();
+    smooth(&mut c, 12);
+    smooth(&mut gap, 12);
+    // Even spacing along the line, then the ends carried on.
+    let mut acc = vec![0.0f32];
+    for k in 1..c.len() {
+        acc.push(acc[k - 1] + (c[k] - c[k - 1]).length());
+    }
+    let total = *acc.last().unwrap();
+    let m = (total / 0.012).ceil().max(2.0) as usize;
+    let mut j = 0;
+    let mut line = Vec::new();
+    let mut half = Vec::new();
+    for i in 0..=m {
+        let s = total * i as f32 / m as f32;
+        while j + 2 < acc.len() && acc[j + 1] < s {
+            j += 1;
+        }
+        let t = ((s - acc[j]) / (acc[j + 1] - acc[j]).max(1e-9)).clamp(0.0, 1.0);
+        line.push(snap(c[j].lerp(c[j + 1], t), false));
+        half.push((gap[j] + (gap[j + 1] - gap[j]) * t) * 0.5 + over);
+    }
+    // Carried on past each end, sinking into the lining as it goes.
+    let mut sink = vec![0.0f32; line.len()];
+    for end in [0usize, 1] {
+        let (p, q) = if end == 0 { (line[0], line[3]) } else { (line[line.len() - 1], line[line.len() - 4]) };
+        let d = (p - q).normalize();
+        let steps = (ext / 0.012).ceil() as usize;
+        for s in 1..=steps {
+            let f = s as f32 / steps as f32;
+            let e = snap(p + d * (ext * f), false);
+            let h = if end == 0 { half[0] } else { *half.last().unwrap() };
+            let k = smoothstep(0.15, 0.85, f);
+            if end == 0 {
+                line.insert(0, e);
+                half.insert(0, h);
+                sink.insert(0, k);
+            } else {
+                line.push(e);
+                half.push(h);
+                sink.push(k);
+            }
+        }
+    }
+    for h in &mut half {
+        *h = h.max(min_half);
+    }
+    smooth(&mut half, 6);
+    let n = line.len();
+    let ax: Vec<(Vec3, Vec3, Vec3)> = (0..n)
+        .map(|i| {
+            let t = (line[(i + 1).min(n - 1)] - line[i.saturating_sub(1)]).normalize();
+            let t = if t.y < 0.0 { -t } else { t };
+            let out = shell_n(line[i], false);
+            let d = (-out + t * out.dot(t)).normalize();
+            (t, t.cross(d).normalize(), d)
+        })
+        .collect();
+    // How deep the lining is along the cover's own axis: it stands 2 cm proud.
+    let mut depth: Vec<f32> = (0..n)
+        .map(|i| {
+            let (c, d) = (line[i], ax[i].2);
+            let mut t = 0.0;
+            while t < 0.25 && !in_cabin(c + d * t) {
+                t += 0.002;
+            }
+            let t = t.clamp(0.04, 0.16);
+            t + 0.02 - 0.034 * sink[i]
+        })
+        .collect();
+    smooth(&mut depth, 10);
+    Post { c: line, half, sink, ax, depth }
+}
+impl Post {
+    /// A face on the cover's crown at fraction f of its proud length, upright
+    /// along the post.
+    fn face(&self, f: f32) -> Face {
+        let mut proud: Vec<usize> = (0..self.c.len()).filter(|&i| self.sink[i] < 0.5).collect();
+        if self.c[proud[0]].y > self.c[*proud.last().unwrap()].y {
+            proud.reverse();
+        }
+        let i = proud[((proud.len() - 1) as f32 * f.clamp(0.0, 1.0)).round() as usize];
+        let (t, _, d) = self.ax[i];
+        Face::new(self.c[i] + d * (self.depth[i] + 0.0048), t.cross(d), t)
+    }
+}
+
+/// The moulded cover over a post: a shallow box section from the glass on
+/// one side to the glass on the other, standing a little proud of the
+/// lining, with a seal along each edge and its ends closed.
+fn post_cover(m: &mut Mesh, p: &Post) {
+    let n = p.c.len();
+    let (frames, depth) = (&p.ax, &p.depth);
+    let mut rows: Vec<Vec<SP>> = Vec::new();
+    let mut seals = [Vec::new(), Vec::new()];
+    let mut arc = 0.0;
+    for i in 0..n {
+        if i > 0 {
+            arc += (p.c[i] - p.c[i - 1]).length();
+        }
+        let (c, (_, s, d), h, dd) = (p.c[i], frames[i], p.half[i], depth[i]);
+        let side = [(h, 0.002), (h - 0.002, 0.008), (h - 0.009, dd * 0.45), (h - 0.018, dd - 0.011), (h - 0.025, dd - 0.003), (h - 0.036, dd), (h * 0.45, dd + 0.004)];
+        let mut prof: Vec<(f32, f32)> = side.iter().map(|&(x, y)| (-x, y)).collect();
+        prof.push((0.0, dd + 0.0048));
+        prof.extend(side.iter().rev().copied());
+        let mut u = 0.0;
+        let mut row: Vec<SP> = Vec::new();
+        for (j, &(x, y)) in prof.iter().enumerate() {
+            if j > 0 {
+                let (px, py) = prof[j - 1];
+                u += Vec2::new(x - px, y - py).length();
+            }
+            row.push((c + s * x + d * y, [arc, u], 0.0));
+        }
+        rows.push(row);
+        for (k, sx) in [-1.0f32, 1.0].iter().enumerate() {
+            seals[k].push(c + s * (sx * (h - 0.0005)) + d * 0.0025);
+        }
+    }
+    let start = m.v.len();
+    let nc = rows[0].len();
+    m.grid(&POST, &rows, false, false);
+    let probe = &m.v[start + (n / 2) * nc + nc / 2];
+    if Vec3::from(probe.nrm).dot(frames[n / 2].2) < 0.0 {
+        for v in &mut m.v[start..] {
+            v.nrm = (-Vec3::from(v.nrm)).into();
+        }
+    }
+    for (i, sgn) in [(0usize, -1.0f32), (n - 1, 1.0)] {
+        let ring: Vec<Vec3> = rows[i].iter().map(|r| r.0).collect();
+        let cen = ring.iter().copied().sum::<Vec3>() / ring.len() as f32;
+        m.fan(&POST, cen, &ring, frames[i].0 * sgn);
+    }
+    for s in &seals {
+        m.tube(&SEAL, s, &|_| 0.0042, 8, true);
+    }
+}
+
+/// One window's frame from inside: a rubber seal round the glass, the reveal
+/// straight in from the skin to the lining, and a moulded surround whose
+/// rounded lip laps over the lining's cut edge. Skips what a post covers.
+/// Returns where screws go (point, normal, seed).
+fn frame_window(m: &mut Mesh, k: usize, ring: &[Vec3], posts: &[&Post]) -> Vec<(Vec3, Vec3, f32)> {
+    let fs = |p: Vec3| win_k(k, p);
+    let fl = |p: Vec3| lin_k(k, p);
+    let n = ring.len();
+    // How wide the surround can be before it meets the next window's.
+    let mut w: Vec<f32> = ring.iter().map(|&p| ((win_other(k, p) - 2.0 * TRIM) * 0.5 - 0.004).clamp(0.012, 0.042)).collect();
+    for _ in 0..8 {
+        let o = w.clone();
+        for i in 0..n {
+            w[i] = o[(i + n - 1) % n].min(o[i]).min(o[(i + 1) % n]) * 0.5 + (o[(i + n - 1) % n] + o[i] + o[(i + 1) % n]) / 6.0;
+        }
+    }
+    let prof: [(f32, f32); 9] = [(-0.004, 0.0065), (-0.001, 0.0105), (0.004, 0.0125), (0.010, 0.0118), (0.30, 0.0085), (0.55, 0.0055), (0.78, 0.003), (0.93, 0.0015), (1.0, 0.0006)];
+    // Where a post hides the whole frame (out to the lining's cut) leave it out;
+    // where it hides only part, the frame runs on under the post's side.
+    let hidden: Vec<bool> = ring.iter().map(|&p| posts.iter().any(|q| q.covers(p, TRIM + 0.006))).collect();
+    // Start the loop where it is hidden, so runs don't wrap.
+    let first = (0..n).find(|&i| hidden[i]).map(|i| i + 1).unwrap_or(0);
+    let mut runs: Vec<(Vec<Vec<SP>>, Vec<Vec<SP>>)> = Vec::new();
+    let (mut seal, mut trim): (Vec<Vec<SP>>, Vec<Vec<SP>>) = (Vec::new(), Vec::new());
+    let mut screws = Vec::new();
+    let mut arc = 0.0;
+    let closed = !hidden.iter().any(|&h| h);
+    let count = if closed { n + 1 } else { n };
+    for s in 0..count {
+        let i = (first + s) % n;
+        let p = ring[i];
+        if s > 0 {
+            arc += (p - ring[(first + s - 1) % n]).length();
+        }
+        if hidden[i] {
+            if seal.len() > 1 {
+                runs.push((std::mem::take(&mut seal), std::mem::take(&mut trim)));
+            }
+            seal.clear();
+            trim.clear();
+            continue;
+        }
+        let ns = shell_n(p, false);
+        let g = grad_on(p, ns, &fs);
+        let l0 = snap(p, true);
+        let nl = shell_n(l0, true);
+        let gl = grad_on(l0, nl, &fl);
+        seal.push(vec![
+            (p - g * 0.010 - ns * 0.0012, [arc, 0.0], 0.0),
+            (p - g * 0.008 - ns * 0.0042, [arc, 0.003], 0.0),
+            (p - g * 0.004 - ns * 0.0065, [arc, 0.007], 0.0),
+            (p + g * 0.001 - ns * 0.0075, [arc, 0.012], 0.0),
+        ]);
+        let on_lin = |a: f32, h: f32| walk(l0, gl, true, &fl, a) - nl * h;
+        let lip = on_lin(-0.004, 0.0065);
+        let a0 = p + g * 0.0005 - ns * 0.006;
+        let mut row: Vec<SP> = vec![(a0, [arc, 0.0], 0.0)];
+        for t in [0.33f32, 0.66] {
+            row.push((a0.lerp(lip, t), [arc, 0.1 * t], 0.0));
+        }
+        for &(a, h) in &prof {
+            let a = if a <= 0.02 { a } else { a * w[i] };
+            row.push((on_lin(a, h), [arc, 0.12 + a], 0.0));
+        }
+        trim.push(row);
+        if (arc / 0.32).fract() < (0.01 / 0.32) && arc > 0.05 {
+            screws.push((on_lin(0.55 * w[i], 0.0061), -nl, arc + k as f32 * 7.0));
+        }
+    }
+    if seal.len() > 1 {
+        runs.push((seal, trim));
+    }
+    for (g, t) in runs {
+        for (rows, mat, probe, lining) in [(g, SEAL, 2usize, false), (t, SURROUND, 5usize, true)] {
+            let start = m.v.len();
+            let nc = rows[0].len();
+            m.grid(&mat, &rows, false, false);
+            // Face the cabin.
+            let v = &m.v[start + (rows.len() / 2) * nc + probe];
+            let into = -shell_n(Vec3::from(v.pos), lining);
+            if Vec3::from(v.nrm).dot(into) < 0.0 {
+                for v in &mut m.v[start..] {
+                    v.nrm = (-Vec3::from(v.nrm)).into();
+                }
+            }
+        }
+    }
+    screws
+}
+
+/// A screw in a cup washer, painted over with the trim.
+fn trim_screw(m: &mut Mesh, p: Vec3, n: Vec3, seed: f32) {
+    m.lathe(&mt(mat::PLASTIC, 0.27, 0.25, 0.215), p, n, &[[0.0048, 0.0], [0.0048, 0.0005], [0.0035, 0.0013], [0.0, 0.0013]], 14, false);
+    m.screw(&mt(mat::SCREW, 0.30, 0.28, 0.25).x(1.0), p + n * 0.001, n, 0.0027, seed);
+}
+
+fn window_frames(m: &mut Mesh) {
+    let rings: Vec<Vec<Vec3>> = (0..3).map(edge_ring).collect();
+    let left: Vec<Vec3> = rings[0].iter().map(|p| Vec3::new(-p.x, p.y, p.z)).collect();
+    // The centre post between the windshields, and on each side the post
+    // between the windshield and the first side window and the one between
+    // the side windows.
+    let centre = post_between(&rings[0], &left, 0.17, 0.04, 0.085, 0.10);
+    let fwd = post_between(&rings[0], &rings[1], 0.12, 0.045, 0.072, 0.10);
+    let aft = post_between(&rings[1], &rings[2], 0.16, 0.042, 0.07, 0.14);
+    post_cover(m, &centre);
+    let mut side = Mesh::default();
+    post_cover(&mut side, &fwd);
+    post_cover(&mut side, &aft);
+    let mut screws = Vec::new();
+    for k in 0..3 {
+        screws.extend(frame_window(&mut side, k, &rings[k], &[&centre, &fwd, &aft]));
+    }
+    for (p, n, seed) in screws {
+        trim_screw(&mut side, p, n, seed);
+    }
+    window_fittings(&mut side, &rings, &fwd, &aft);
+    m.append(&side.mirror_x());
+    m.append(&side);
+    // A deviation card under the standby compass at the top of the centre post.
+    let f = centre.face(0.94);
+    rect(m, &mt(mat::PLASTIC, 0.05, 0.05, 0.05), f.at_h(0.0, 0.0, 0.0008), f.ax, f.ay, 0.034, 0.026);
+    rect(m, &legend_mat(style::PLACARD, 0, Vec3::new(0.80, 0.79, 0.74)), f.at_h(0.0, 0.0, 0.0016), f.ax, f.ay, 0.030, 0.022);
+    for (u, v) in [(-0.028f32, 0.020f32), (0.028, 0.020), (-0.028, -0.020), (0.028, -0.020)] {
+        m.screw(&SCREW_BLACK, f.at_h(u, v, 0.0012), f.n(), 0.0018, u * 31.0 + v);
+    }
+}
+
+/// The lining `a` metres out beyond window k's cut, out from its edge point
+/// p, and the way into the cabin there.
+fn beyond(k: usize, p: Vec3, a: f32) -> (Vec3, Vec3) {
+    let fl = |q: Vec3| lin_k(k, q);
+    let l0 = snap(p, true);
+    let nl = shell_n(l0, true);
+    let q = walk(l0, grad_on(l0, nl, &fl), true, &fl, a);
+    (q, -shell_n(q, true))
+}
+/// A face lying on the lining at q (normal `n` into the cabin), its x axis
+/// along the station (aft), raised by h.
+fn lining_face(q: Vec3, n: Vec3, h: f32) -> Face {
+    let ax = (Vec3::Z - n * n.z).normalize();
+    Face::new(q + n * h, ax, n.cross(ax))
+}
+
+/// What hangs round the windows: flood lights along the windshield header,
+/// the sun visors stowed above the side windows on their tracks, the No. 2
+/// window's slide rails and its opening handle, gaspers on the posts.
+fn window_fittings(m: &mut Mesh, rings: &[Vec<Vec3>], fwd: &Post, aft: &Post) {
+    let black = mt(mat::PLASTIC, 0.035, 0.034, 0.033);
+    // Flood lights: four swivelling cans on the header over each windshield,
+    // aimed down at the glareshield and the panel.
+    for (k, xt) in [0.50f32, 0.60, 0.70, 0.80].iter().enumerate() {
+        let Some(&p) = rings[0].iter().filter(|p| (p.x - xt).abs() < 0.012).max_by(|a, b| a.y.total_cmp(&b.y)) else { continue };
+        let (q, n) = beyond(0, p, 0.062);
+        m.lathe(&black, q, n, &[[0.016, -0.002], [0.016, 0.002], [0.012, 0.005], [0.0, 0.006]], 16, false);
+        let ball = q + n * 0.008;
+        m.dome(&black, ball - n * 0.003, n, 0.0075, 0.0075, 10, 0.0);
+        let aim = (Vec3::new(xt * 0.55, 3.10, EYE.z - 0.80 + k as f32 * 0.05) - ball).normalize();
+        let can = ball + aim * 0.007;
+        m.lathe(&black, can, aim, &[[0.0, 0.0], [0.010, 0.0], [0.012, 0.008], [0.012, 0.027], [0.0125, 0.0285], [0.0125, 0.031], [0.0102, 0.031]], 16, false);
+        m.disc(&mt(mat::PLASTIC, 0.16, 0.15, 0.13), can + aim * 0.0295, aim, Vec3::Y, 0.0103, 16);
+        // The cooling ribs round the back of the can.
+        for r in 0..3 {
+            m.lathe(&black, can + aim * (0.010 + r as f32 * 0.005), aim, &[[0.0121, 0.0], [0.0129, 0.001], [0.0121, 0.002]], 16, true);
+        }
+    }
+
+    // Sun visor stowed flat against the ceiling over the No. 2 window, on a
+    // track running fore and aft.
+    let c1 = rings[1].iter().copied().sum::<Vec3>() / rings[1].len() as f32;
+    let top = rings[1].iter().copied().filter(|p| (p.z - c1.z).abs() < 0.02 && p.y > c1.y).max_by(|a, b| a.y.total_cmp(&b.y)).unwrap();
+    let (q, n) = beyond(1, top, 0.13);
+    let f = lining_face(q, n, 0.016);
+    let visor: Vec<Vec2> = outline_rr(0.15, 0.08, 0.025);
+    let rim: Vec<Vec2> = outline_rr(0.156, 0.086, 0.029);
+    m.slab(&black, &rim, &[visor.clone()], f.at_h(0.0, 0.0, 0.0025), f.ax, f.ay, 0.006);
+    m.slab(&mt(mat::PAINT, 0.075, 0.068, 0.058), &visor, &[], f.at_h(0.0, 0.0, 0.001), f.ax, f.ay, 0.003);
+    // Its arm to the carriage on the track, the track screwed to the ceiling.
+    let (tq, tn) = beyond(1, top, 0.225);
+    let tf = lining_face(tq, tn, 0.0);
+    let rail: Vec<Vec3> = (0..=8).map(|j| {
+        let p = snap(tf.at(-0.13 + j as f32 * 0.04, 0.0), true);
+        p - shell_n(p, true) * 0.006
+    }).collect();
+    m.tube(&mt(mat::ALU, 0.36, 0.36, 0.37), &rail, &|_| 0.005, 8, true);
+    for j in [1usize, 4, 7] {
+        m.screw(&SCREW_STEEL, rail[j] + tf.n() * 0.0048, tf.n(), 0.0018, j as f32);
+    }
+    let car = tf.at_h(-0.07, 0.0, 0.010);
+    m.rbox(&black, car, Vec3::new(0.02, 0.011, 0.009), 0.004, tf.rot());
+    let hinge = f.at_h(-0.07, 0.083, 0.004);
+    m.tube(&black, &[car, hinge], &|_| 0.004, 8, true);
+    m.lathe(&CHROME, hinge, f.ax, &[[0.0055, -0.018], [0.0055, 0.018]], 10, false);
+
+    // The No. 2 window slides aft to open: rails along its sill and head.
+    let fs = |p: Vec3| win_k(1, p);
+    for upper in [false, true] {
+        let pts: Vec<Vec3> = rings[1]
+            .iter()
+            .copied()
+            .filter(|p| (p.z - c1.z).abs() < 0.20 && (p.y > c1.y) == upper)
+            .collect();
+        let mut pts = pts;
+        pts.sort_by(|a, b| a.z.total_cmp(&b.z));
+        let rail: Vec<Vec3> = pts.iter().step_by(3).map(|&p| {
+            let ns = shell_n(p, false);
+            let g = grad_on(p, ns, &fs);
+            p - ns * 0.022 - g * 0.006
+        }).collect();
+        if rail.len() > 2 {
+            m.tube(&mt(mat::ALU, 0.42, 0.42, 0.43), &rail, &|_| 0.0045, 8, true);
+        }
+    }
+    // Its handle low on the post ahead of it: a cast housing, the crank
+    // folded down, the red-tipped lock lever and the placard.
+    let pf = fwd.face(0.30);
+    let side = (c1 - pf.o).dot(pf.ax).signum();
+    let hf = pf.sub(side * 0.004, 0.0, 0.0);
+    let at = |u: f32, v: f32, h: f32| hf.at_h(u * side, v, h);
+    m.rbox(&black, at(0.0, 0.0, 0.010), Vec3::new(0.026, 0.045, 0.012), 0.008, hf.rot());
+    let hub = at(0.0, 0.012, 0.024);
+    m.lathe(&CHROME, hub - hf.n() * 0.004, hf.n(), &[[0.013, 0.0], [0.013, 0.006], [0.010, 0.009], [0.0, 0.009]], 14, false);
+    let tip = at(0.008, -0.085, 0.030);
+    m.tube(&black, &[hub + hf.n() * 0.004, at(0.004, -0.04, 0.030), tip], &|t| 0.0058 - 0.0015 * t, 8, true);
+    m.lathe(&black, tip, hf.n(), &[[0.0075, 0.0], [0.0085, 0.012], [0.0078, 0.026], [0.0, 0.028]], 12, true);
+    let lock = [at(-0.012, -0.02, 0.020), at(-0.026, -0.035, 0.024)];
+    m.tube(&black, &lock, &|_| 0.0042, 8, true);
+    m.dome(&mt(mat::PAINT, 0.55, 0.05, 0.04), lock[1], (lock[1] - lock[0]).normalize(), 0.0055, 0.008, 10, 0.0);
+    rect(m, &legend_mat(style::PLACARD, 0, Vec3::new(0.80, 0.79, 0.74)), at(0.0, 0.075, 0.0012), hf.ax, hf.ay, 0.022, 0.016);
+
+    // Gaspers on the posts, at shoulder height.
+    for (post, f) in [(fwd, 0.42f32), (aft, 0.55)] {
+        let pf = post.face(f);
+        let c = pf.at_h(0.0, 0.0, 0.0);
+        let n = pf.n();
+        m.lathe(&mt(mat::PLASTIC, 0.20, 0.19, 0.17), c, n, &[[0.026, -0.001], [0.026, 0.004], [0.022, 0.010], [0.016, 0.012]], 18, true);
+        let aim = (n * 0.85 + (EYE - c).normalize() * 0.5).normalize();
+        m.dome(&mt(mat::PLASTIC, 0.16, 0.155, 0.14), c + n * 0.006, aim, 0.0155, 0.012, 14, 0.0);
+        m.lathe(&CHROME, c + n * 0.006 + aim * 0.010, aim, &[[0.0065, 0.0], [0.0065, 0.008], [0.0045, 0.009], [0.0, 0.009]], 12, false);
+    }
+}
+
+/// A rounded rectangle outline, half sizes hx, hy and corner radius r.
+fn outline_rr(hx: f32, hy: f32, r: f32) -> Vec<Vec2> {
+    let mut v = Vec::new();
+    for (q, (sx, sy)) in [(1.0f32, 1.0f32), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)].iter().enumerate() {
+        let c = Vec2::new(sx * (hx - r), sy * (hy - r));
+        for i in 0..=6 {
+            let a = (q as f32 + i as f32 / 6.0) * FRAC_PI_2;
+            v.push(c + Vec2::new(a.cos(), a.sin()) * r);
+        }
+    }
+    v
 }
 
 fn floor(m: &mut Mesh) {
@@ -1696,3 +2233,4 @@ mod tests {
         assert!(down.to_degrees() < -10.0);
     }
 }
+

@@ -100,6 +100,8 @@ pub struct BHit {
     pub bridge: bool,
     pub tile: TileId,
     pub idx: usize,
+    /// footprint area (m²)
+    pub area: f32,
 }
 
 /// A standing tree, as the physics sees it.
@@ -464,7 +466,7 @@ impl World {
             let p = [u as f32, v as f32];
             for (i, f) in b.footprints.iter().enumerate() {
                 if f.alive && p[0] >= f.min[0] && p[0] <= f.max[0] && p[1] >= f.min[1] && p[1] <= f.max[1] && buildings::point_in_ring(p, &f.ring) {
-                    return Some(BHit { base: f.base as f64, top: f.top as f64, bridge: f.kind == 1, tile: id, idx: i });
+                    return Some(BHit { base: f.base as f64, top: f.top as f64, bridge: f.kind == 1, tile: id, idx: i, area: f.area });
                 }
             }
         }
@@ -653,6 +655,12 @@ impl World {
 
     /// Footprints of small buildings whose centre is within `r` of a point.
     /// (Under the 3D tiles too: they are cut out of the mesh when they come down.)
+    /// A standing building's base, top and footprint area.
+    pub fn footprint(&self, tile: TileId, idx: usize) -> Option<(f64, f64, f32)> {
+        let Some(BSlot::Ready(b)) = self.builds.get(&tile) else { return None };
+        b.footprints.get(idx).filter(|f| f.alive).map(|f| (f.base as f64, f.top as f64, f.area))
+    }
+
     pub fn buildings_near(&self, p: DVec3, r: f64, max_area: f32) -> Vec<(TileId, usize)> {
         let (lat, lon, _) = geo::pos_to_lla(p);
         let id = TileId::at(lat, lon, DATA_ZOOM);

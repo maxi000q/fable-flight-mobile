@@ -1880,38 +1880,60 @@ impl Game {
                         }
                     }
                 }
-                if let Some(imp) = imp {
+                if let Some(mut imp) = imp {
                     self.r.clear_particles();
                     let tears = self.wreck_meshes();
-                    let mut crash = Crash::new(&imp, &self.plane, &self.group_mesh, &self.group_pivots, &tears, self.rng.0 ^ self.frame, self.wx.steady(imp.pos, 40.0));
+                    // A house is no match for an airliner: it goes through
+                    // it and on, slowed about as much as the house weighs.
+                    let size = (self.spec.span / 5.5).max(1.0);
+                    let heavy = size > 2.0;
+                    let mut through = 0.0f32;
+                    if let Some((tile, idx)) = imp.building.filter(|_| heavy) {
+                        if let Some((base, top, area)) = self.world.footprint(tile, idx) {
+                            let mb = area.max(25.0) as f64 * (top - base).max(3.0) * 120.0 * 0.3;
+                            let keep = self.spec.mass / (self.spec.mass + mb);
+                            if keep > 0.55 {
+                                through = keep as f32;
+                                let (la, lo, _) = geo::pos_to_lla(imp.pos);
+                                imp.ground_h = self.world.ground(la, lo).map(|g| g.h).unwrap_or(base);
+                            }
+                        }
+                    }
+                    let mut crash = Crash::new(&imp, &self.plane, &self.group_mesh, &self.model.groups, &self.group_pivots, &tears, through, self.rng.0 ^ self.frame, self.wx.steady(imp.pos, 40.0));
                     self.r.fluid.latest = None;
                     let (site, power) = (crash.site, crash.power);
                     self.fx_anchor = site;
                     let mut gone = 0.0;
+                    // How far the blast reaches beyond a light aircraft's.
+                    let reach = if heavy { size.powf(0.6) } else { 1.0 };
                     if let Some((tile, idx)) = imp.building {
                         // The building that was hit comes down, and any shed or small house right beside it.
                         let (la, lo, alt) = geo::pos_to_lla(site);
-                        if let Some(g) = self.world.ground(la, lo) {
-                            crash.set_lift(alt - g.h);
+                        if through == 0.0 {
+                            if let Some(g) = self.world.ground(la, lo) {
+                                crash.set_lift(alt - g.h);
+                            }
                         }
                         let d = &self.plane.dmg;
                         let hit = destruct::Hitter { right: self.plane.right(), up: self.plane.up(), span: d.wing, shape: &self.spec.hole, full: self.spec.span, stab: d.stab, fin: d.fin };
                         self.bring_down(tile, idx, imp.pos, imp.vel, Some(hit), &mut femit);
-                        for (t, i) in self.world.buildings_near(site, 9.0 * power as f64, 160.0) {
+                        for (t, i) in self.world.buildings_near(site, 9.0 * (power * reach) as f64, if heavy { 700.0 } else { 160.0 }) {
                             self.bring_down(t, i, imp.pos, imp.vel * 0.3, None, &mut femit);
                         }
                     } else if !imp.water {
-                        // Open ground: a bite is taken out of it.
-                        let r = 3.0 + 5.0 * power;
+                        // Open ground: a bite is taken out of it (a big one
+                        // where an airliner came down steeply).
+                        let steep = (-imp.vel.dot(site.normalize()) / imp.vel.length().max(1.0)).clamp(0.0, 1.0) as f32;
+                        let r = (3.0 + 5.0 * power) * (1.0 + (size.sqrt() - 1.0) * steep);
                         self.world.add_crater(site, r);
                         self.destr.eject(site, r, imp.vel, &mut femit);
                         gone = r as f64;
-                        for (t, i) in self.world.buildings_near(site, r as f64 + 4.0, 400.0) {
+                        for (t, i) in self.world.buildings_near(site, r as f64 + 4.0 * reach as f64, if heavy { 900.0 } else { 400.0 }) {
                             self.bring_down(t, i, imp.pos, imp.vel * 0.3, None, &mut femit);
                         }
                     }
                     if !imp.water {
-                        self.destr.blast_trees(&mut self.world, &self.r.queue, site, 26.0 + 30.0 * power as f64, gone, &mut femit);
+                        self.destr.blast_trees(&mut self.world, &self.r.queue, site, (26.0 + 30.0 * power as f64) * reach as f64, gone, &mut femit);
                     }
                     self.crash = Some(crash);
                     self.crashed = true;
@@ -1977,6 +1999,17 @@ impl Game {
                 };
                 cr.update(dt, &self.world, &mut emit);
             }
+        }
+        // What the wreckage ploughed through on its way comes down.
+        let crushed: Vec<_> = self.crash.as_mut().map(|cr| cr.crush.drain(..).collect()).unwrap_or_default();
+        for (t, i, p, v) in crushed {
+            self.bring_down(t, i, p, v * 0.5, None, &mut femit);
+            self.destr.booms.push(0.6);
+            if let Some(a) = &self.audio {
+                a.event(audio::Event::Crunch(1.4));
+            }
+        }
+        if let Some(cr) = self.crash.as_mut() {
             if let Some(a) = &self.audio {
                 let near = 1.0 / (1.0 + ((self.cam_pos - cr.site).length() as f32 / 250.0).powi(2));
                 for p in &cr.booms {
@@ -2052,8 +2085,16 @@ impl Game {
             // After an impact up the side of a building, the wreck ends up in the street below.
             let street = cr.site - cr.up * cr.lift;
             let mut target = cr.debris.first().filter(|d| !d.sunk).map(|d| d.pos).unwrap_or(street) * 0.5 + street * 0.5 + cr.up * 6.0;
-            let mut dist = 70.0 + 34.0 * cr.power as f64 + self.cam_dist;
+            // (an airliner's fireball is a few hundred metres across: further back)
+            let mut dist = (70.0 + 34.0 * cr.power as f64) * (cr.size as f64).sqrt() + self.cam_dist;
             let (mut centre, mut rise) = (street, 18.0 + dist * 0.24);
+            // An airliner's wreck slides a long way: watch the middle of the
+            // trail it leaves, and the fireball over it.
+            if let Some(w) = cr.wreck_centre() {
+                let w = w - cr.up * (w - street).dot(cr.up);
+                target = w * 0.6 + street * 0.4 + cr.up * (6.0 * (cr.size as f64).sqrt());
+                centre = w * 0.5 + street * 0.5;
+            }
             // A tower coming down: back off and watch all of it from the side.
             if let Some((mid, hgt)) = self.destr.focus().filter(|f| (f.0 - cr.site).length() < 800.0) {
                 target = target * 0.25 + mid * 0.75;
@@ -2318,7 +2359,7 @@ impl Game {
             // The ground under an impact up the side of a building is further down.
             psim.anchor = v4(cr.site - cam, -cr.lift);
             psim.upv = v4(cr.up, dt);
-            g.light_pos = v4(cr.site + cr.up * 8.0 - cam, 12.0 + 8.0 * cr.power as f64);
+            g.light_pos = v4(cr.site + cr.up * 8.0 * cr.size as f64 - cam, (12.0 + 8.0 * cr.power as f64) * cr.size as f64);
             let l = cr.light();
             g.light_col = [1.0 * l, 0.5 * l, 0.2 * l, 0.0];
             let grow = (cr.time as f32 / 1.2).min(1.0);
@@ -2331,7 +2372,7 @@ impl Game {
                         continue;
                     }
                     let m = Mat4::from_scale_rotation_translation(Vec3::splat(d.scale), d.rot.as_quat(), (d.pos - cam).as_vec3()) * Mat4::from_translation(-d.origin);
-                    objs.push(DrawObj { mesh: d.mesh, model: m, tint: [1.0, 1.0, 1.0, d.char], glow: [if d.burn > 0.0 { 1.0 } else { 0.25 }, self.spec.id as f32, 0.0, i as f32 * 0.37], cast: 0b11, cut: true, tear: [d.tear[0].gpu(), d.tear[1].gpu()], dmg: [d.tear[0].mode, d.tear[1].mode, 0.6, d.jag], ..DrawObj::DEFAULT });
+                    objs.push(DrawObj { mesh: d.mesh, model: m, tint: [1.0, 1.0, 1.0, d.char], glow: [if d.burn > 0.0 { if d.rigid { 0.35 } else { 1.0 } } else { 0.25 }, self.spec.id as f32, 0.0, i as f32 * 0.37], cast: 0b11, cut: true, tear: [d.tear[0].gpu(), d.tear[1].gpu()], dmg: [d.tear[0].mode, d.tear[1].mode, 0.6, d.jag], ..DrawObj::DEFAULT });
                 }
             }
         }
@@ -2347,7 +2388,7 @@ impl Game {
                     // A ball about as big as the burning gas, as bright as flame.
                     let (t, p, _) = cr.last_blast;
                     let flash = p * 6.0 * (-(t as f32) / 0.25).exp();
-                    let rad = (0.75 * st.emit.max(0.0).cbrt()).clamp(3.0, 25.0);
+                    let rad = (0.75 * st.emit.max(0.0).cbrt()).clamp(3.0, 25.0 * cr.size);
                     let l = flash + 2.5 * (st.emit / 300.0).min(1.0);
                     g.light_pos = v4(dm.at_frac(st.emit_c) - cam, rad as f64);
                     g.light_col = [1.0 * l, 0.48 * l, 0.17 * l, 0.0];
@@ -2440,7 +2481,9 @@ impl Game {
         {
             let site = cam + DVec3::new(psim.anchor[0] as f64, psim.anchor[1] as f64, psim.anchor[2] as f64);
             let (ve, vn, vu) = geo::enu(site);
-            let (cs, zmin) = (render::VOL_CELL as f64, render::VOL_ZMIN as f64);
+            // (coarser round a big fire, as its grid is: see fluid.rs `coarse`)
+            let vs = self.crash.as_ref().and_then(|c| c.domain.as_ref()).map(|d| d.sc as f64).unwrap_or(1.0);
+            let (cs, zmin) = (render::VOL_CELL as f64 * vs, render::VOL_ZMIN as f64 * vs);
             let lift = self.crash.as_ref().map(|c| c.lift).unwrap_or(0.0);
             let corner = site - ve * (cs * render::VOL_N[0] as f64 * 0.5) - vn * (cs * render::VOL_N[1] as f64 * 0.5) + vu * (zmin - lift);
             g.vol_o = v4(corner - cam, cs);

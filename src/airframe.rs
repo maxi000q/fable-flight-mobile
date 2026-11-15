@@ -52,6 +52,7 @@ pub mod pat {
     pub const NACELLE: f32 = 13.0; // a jet engine's cowling: seams and fasteners, no openings
     pub const LEGEND: f32 = 14.0; // printed panel legend, button face or scale: extra = style + 16 * string (b747::deck)
     pub const FLEECE: f32 = 15.0; // sheepskin seat cover
+    pub const SPINNER: f32 = 16.0; // a jet engine's spinner (747: the swirl)
 }
 /// Light ids (vertex `mat.w` on LAMP); keep in step with plane.wgsl.
 pub mod lamp {
@@ -1009,8 +1010,12 @@ pub fn bake_ao(pieces: &mut [Piece], cfg: &AoBake) {
         if n == Vec3::ZERO {
             return 1.0;
         }
-        let q = Quat::from_rotation_arc(Vec3::Z, n);
-        let o = Vec3::from(v.pos) + n * (vox * 1.1);
+        // The ray set turned a different way at every vertex: the same set
+        // everywhere aliases into blotches as the hits flip together.
+        let pos = Vec3::from(v.pos);
+        let spin = hash(pos.x * 71.3 + pos.y * 113.9 + pos.z * 37.1) * TAU;
+        let q = Quat::from_rotation_arc(Vec3::Z, n) * Quat::from_rotation_z(spin);
+        let o = pos + n * (vox * 1.1);
         let hit = dirs.iter().filter(|d| occluded(o, q * **d)).count();
         1.0 - hit as f32 / rays as f32
     };
@@ -1038,5 +1043,62 @@ pub fn bake_ao(pieces: &mut [Piece], cfg: &AoBake) {
                 });
             }
         });
+        smooth_ao(verts, vox * 1.6, threads);
+    }
+}
+
+/// Averages each vertex's AO with its neighbours within `r` that face the
+/// same way, so the per-vertex ray noise doesn't show as speckle.
+fn smooth_ao(verts: &mut [PartVertex], r: f32, threads: usize) {
+    use std::collections::HashMap;
+    let key = |p: [f32; 3]| ((p[0] / r).floor() as i32, (p[1] / r).floor() as i32, (p[2] / r).floor() as i32);
+    let mut cells: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    for (i, v) in verts.iter().enumerate() {
+        cells.entry(key(v.pos)).or_default().push(i as u32);
+    }
+    let src: &[PartVertex] = verts;
+    let out: Vec<f32> = {
+        let chunk = src.len().div_ceil(threads).max(256);
+        let cells = &cells;
+        std::thread::scope(|s| {
+            let hs: Vec<_> = (0..src.len())
+                .step_by(chunk)
+                .map(|a| {
+                    s.spawn(move || {
+                        (a..(a + chunk).min(src.len()))
+                            .map(|i| {
+                                let v = &src[i];
+                                let (p, n) = (Vec3::from(v.pos), Vec3::from(v.nrm));
+                                let (cx, cy, cz) = key(v.pos);
+                                let (mut sum, mut wsum) = (0.0f32, 0.0f32);
+                                for dx in -1..=1 {
+                                    for dy in -1..=1 {
+                                        for dz in -1..=1 {
+                                            let Some(list) = cells.get(&(cx + dx, cy + dy, cz + dz)) else { continue };
+                                            for &j in list {
+                                                let o = &src[j as usize];
+                                                let d2 = (Vec3::from(o.pos) - p).length_squared();
+                                                let nd = Vec3::from(o.nrm).dot(n);
+                                                if d2 > r * r || nd < 0.8 {
+                                                    continue;
+                                                }
+                                                let w = (-d2 / (r * r * 0.35)).exp() * (nd - 0.8) * 5.0;
+                                                sum += o.col[3] * w;
+                                                wsum += w;
+                                            }
+                                        }
+                                    }
+                                }
+                                if wsum > 0.0 { sum / wsum } else { v.col[3] }
+                            })
+                            .collect::<Vec<f32>>()
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        })
+    };
+    for (v, a) in verts.iter_mut().zip(out) {
+        v.col[3] = a;
     }
 }

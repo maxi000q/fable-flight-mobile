@@ -403,6 +403,17 @@ const LINER: Mat = mt(mat::SATIN, 0.62, 0.63, 0.64);
 const TITANIUM: Mat = mt(mat::STEEL, 0.50, 0.50, 0.52);
 const NOZZLE: Mat = mt(mat::EXHAUST, 0.3, 0.28, 0.26);
 const STRUT: Mat = mt(mat::PAINT, 0.62, 0.63, 0.64);
+const HOSE: Mat = mt(mat::BLACK, 0.03, 0.03, 0.032);
+const PIPE: Mat = mt(mat::STEEL, 0.55, 0.56, 0.58);
+
+/// A static discharger: a thin composite rod trailing aft from a trailing edge,
+/// its brush tip at the end.
+fn wick(m: &mut Mesh, at: Vec3, dir: Vec3) {
+    let d = dir.normalize();
+    m.rbox(&mt(mat::SATIN, 0.5, 0.5, 0.5), at + d * 0.01, Vec3::new(0.012, 0.006, 0.03), 0.004, Quat::from_rotation_arc(Vec3::Z, d));
+    m.tube(&DARK, &[at - d * 0.02, at + d * 0.17], &|t| 0.0065 * (1.0 - 0.45 * t), 6, true);
+    m.tube(&mt(mat::SATIN, 0.35, 0.35, 0.36), &[at + d * 0.17, at + d * 0.205], &|_| 0.0022, 4, true);
+}
 
 // ---------------------------------------------------------------- the model
 
@@ -536,6 +547,22 @@ fn fuselage(b: &mut Builder) {
         }
         let (p, n) = on_side(bz(4.5), -0.25, sx, 0.0);
         deck.slab(&DARK, &[Vec2::new(0.0, 0.0), Vec2::new(0.09, 0.0), Vec2::new(0.06, 0.06), Vec2::new(0.0, 0.06)], &[], p, Vec3::Z, n, 0.01);
+    }
+    // Drain masts under the belly, ahead of and behind the wing: small swept blades.
+    for d in [16.0f32, 47.0] {
+        let z = bz(d);
+        let y = sec(z).bot;
+        let pts = [Vec2::new(-0.07, 0.0), Vec2::new(0.07, 0.0), Vec2::new(0.11, -0.15), Vec2::new(0.07, -0.16)];
+        body.slab(&mt(mat::PAINT, 0.70, 0.70, 0.69), &pts, &[], Vec3::new(0.012, y + 0.01, z), Vec3::Z, Vec3::Y, 0.024);
+        body.tube(&DARK, &[Vec3::new(0.0, y - 0.15, z + 0.08), Vec3::new(0.0, y - 0.16, z + 0.12)], &|_| 0.006, 6, true);
+    }
+    // The total air temperature probe on the left of the nose, and an ice detector on the right.
+    {
+        let (p, n) = on_side(bz(6.3), -0.75, -1.0, 0.0);
+        deck.slab(&ALU, &[Vec2::new(-0.05, 0.0), Vec2::new(0.07, 0.0), Vec2::new(0.06, 0.09), Vec2::new(0.0, 0.10)], &[], p - n * 0.01, Vec3::Z, n, 0.014);
+        deck.tube(&ALU, &[p + n * 0.09, p + n * 0.10 + Vec3::Z * 0.03], &|_| 0.012, 8, true);
+        let (p, n) = on_side(bz(6.6), -0.55, 1.0, 0.0);
+        deck.tube(&ALU, &[p - n * 0.01, p + n * 0.07, p + n * 0.08 + Vec3::Z * 0.02], &|t| 0.014 - 0.006 * t, 8, true);
     }
     // Rows of fasteners round the radome joint.
     let zr = bz(D_RADOME) + 0.03;
@@ -756,6 +783,15 @@ fn wings(b: &mut Builder) {
         f.skin(&mut al, &ctrl, s0, s1, ns, &|_| xf + 0.005, &one, 14, true);
         f.cap(&mut al, &ctrl, s0, xf + 0.005, 1.0, true);
         f.cap(&mut al, &ctrl, s1, xf + 0.005, 1.0, true);
+        if span == OB_AIL {
+            for k in 0..4 {
+                let s = s0 + 0.5 + k as f32 * (s1 - s0 - 1.0) / 3.0;
+                wick(&mut al, f.pt(s, 1.0, 0.0, -1.0), wing_sect(s).cdir);
+            }
+        } else {
+            let s = (s0 + s1) * 0.5;
+            wick(&mut al, f.pt(s, 1.0, 0.0, -1.0), wing_sect(s).cdir);
+        }
         let axis = (f.pt(s1, xf + 0.02, 0.0, -1.0) - f.pt(s0, xf + 0.02, 0.0, -1.0)).normalize();
         let pivot = f.pt((s0 + s1) * 0.5, xf + 0.02, 0.0, -1.0);
         let (l, r) = b.pair(name, [G_LWING, G_RWING], al, |s| Anim::hinge(Drive::new(Input::Aileron(s), 0.35)), pivot, axis, [None, None]);
@@ -842,7 +878,33 @@ fn wings(b: &mut Builder) {
     tip.lathe(&mt(mat::LAMP, 0.9, 0.9, 0.9).x(lamp::STROBE), p + Vec3::new(0.05, 0.08, 0.12), Vec3::X, &[[0.05, 0.0], [0.05, 0.05], [0.0, 0.08]], 12, true);
     let te = wl.pt(0.15, 1.0, 0.0, -1.0);
     tip.lathe(&mt(mat::LAMP, 0.95, 0.95, 0.95).x(lamp::TAIL), te, Vec3::Z, &[[0.04, 0.0], [0.04, 0.03], [0.0, 0.05]], 10, true);
+    // Static dischargers on the winglet's trailing edge.
+    for s in [0.55f32, 1.1, 1.6] {
+        wick(&mut tip, wl.pt(s, 1.0, 0.0, -1.0), Vec3::Z);
+    }
     w.append(&tip);
+    // Static dischargers on the wing tip's trailing edge, the fuel jettison
+    // nozzle beside them.
+    for s in [30.75f32, 31.15] {
+        wick(&mut w, f.pt(s, 1.0, 0.0, -1.0), wing_sect(s).cdir);
+    }
+    let jp = f.pt(30.6, 0.95, -1.0, -1.0);
+    w.tube(&ALU, &[jp + Vec3::Y * 0.03, jp + wing_sect(30.6).cdir * 0.32 - Vec3::Y * 0.02], &|t| 0.028 - 0.008 * t, 10, true);
+    w.disc(&DARK, jp + wing_sect(30.6).cdir * 0.322 - Vec3::Y * 0.02, wing_sect(30.6).cdir, Vec3::Y, 0.018, 10);
+    // A row of vortex generators along the outboard wing, ahead of the ailerons.
+    let mut k = 0;
+    let mut s = 21.8f32;
+    while s < 30.2 {
+        let (p, n) = foil_frame(&f, s, 0.10, 1.0);
+        let fwd = -wing_sect(s).cdir;
+        let tw = if k % 2 == 0 { 0.26f32 } else { -0.26 };
+        let ax = Quat::from_axis_angle(n, tw) * fwd;
+        let side = n.cross(ax).normalize();
+        let pts = [Vec2::new(-0.05, 0.0), Vec2::new(0.05, 0.0), Vec2::new(-0.03, 0.045), Vec2::new(-0.05, 0.045)];
+        w.slab(&GREY_SKIN, &pts, &[], p - n * 0.004 + side * 0.0015, ax, n, 0.003);
+        s += 0.42;
+        k += 1;
+    }
 
     let mut lw = w.mirror_x();
     for t in lw.i.chunks_mut(3) {
@@ -891,6 +953,23 @@ fn engine(e: [f32; 3], f: &Foil) -> (Mesh, Mesh, Mesh, Vec3) {
     m.lathe(&cowl, c, ax, &[[1.27, 0.20], [1.285, 0.45], [1.292, 0.9], [1.292, 1.9]], 48, true);
     // Behind the fan: the dark duct and the core's intake.
     m.disc(&DARK, c + ax * 1.48, Vec3::NEG_Z, Vec3::Y, 1.19, 40);
+    // The core's splitter lip, and the ring of outlet guide vanes behind the fan.
+    m.lathe(&mt(mat::ALU, 0.6, 0.61, 0.63), c, ax, &[[0.70, 1.47], [0.68, 1.40], [0.655, 1.385], [0.63, 1.40], [0.62, 1.47]], 40, true);
+    let ogv = mt(mat::SATIN, 0.22, 0.22, 0.23);
+    for k in 0..44 {
+        let a = (k as f32 + 0.5) / 44.0 * TAU;
+        let rot = Quat::from_rotation_z(a);
+        let (rad, tang) = (rot * Vec3::Y, rot * Vec3::NEG_X);
+        // Cambered to turn the swirl back to axial: leading edge angled with the flow.
+        for (flip, off) in [(false, 0.004f32), (true, -0.004)] {
+            m.patch(&ogv, 2, 4, flip, |u, v| {
+                let r = 0.70 + (1.185 - 0.70) * u;
+                let z = 1.28 + 0.14 * v;
+                let sw = 0.05 * (1.0 - v) * (1.0 - v);
+                (c + rad * r + tang * (sw + off) + ax * z, [r, z], 0.0)
+            });
+        }
+    }
     // The reverser cascades the sleeve uncovers, and the fan duct's inner wall.
     m.lathe(&DARK, c, ax, &[[1.27, 1.88], [1.27, 2.5]], 48, false);
     m.lathe(&mt(mat::SATIN, 0.15, 0.15, 0.16), c, ax, &[[1.15, 2.95], [1.17, 2.2], [1.19, 1.48]], 48, true);
@@ -929,7 +1008,7 @@ fn engine(e: [f32; 3], f: &Foil) -> (Mesh, Mesh, Mesh, Vec3) {
     let mut fan = Mesh::default();
     // (tip first, so the lathe's normals face out)
     let sp: Vec<[f32; 2]> = (0..=14).map(|k| { let u = k as f32 / 14.0; [0.44 * (1.0 - (1.0 - u).powf(2.2)).max(0.0).sqrt(), 0.72 + 0.42 * u] }).collect();
-    fan.lathe(&mt(mat::SATIN, 0.20, 0.20, 0.21), c, ax, &sp, 32, true);
+    fan.lathe(&mt(mat::SATIN, 0.20, 0.20, 0.21).pat(pat::SPINNER), c, ax, &sp, 32, true);
     fan.disc(&mt(mat::SATIN, 0.20, 0.20, 0.21), c + ax * 1.14, Vec3::Z, Vec3::Y, 0.44, 32);
     for k in 0..38 {
         let a0 = k as f32 / 38.0 * TAU;
@@ -1023,6 +1102,11 @@ fn tail(b: &mut Builder) {
         stab.cap(&mut el, &ctrl, x1, stab_hinge(x1) + 0.004, 1.0, true);
         let p0 = stab.pt(x0, stab_hinge(x0), 0.0, -1.0);
         let p1 = stab.pt(x1, stab_hinge(x1), 0.0, -1.0);
+        if x1 > 10.0 {
+            for x in [8.0f32, 9.3, 10.5] {
+                wick(&mut el, stab.pt(x, 1.0, 0.0, -1.0), Vec3::Z);
+            }
+        }
         elevators.push((el, p0, p1 - p0));
     }
 
@@ -1055,6 +1139,7 @@ fn tail(b: &mut Builder) {
     fin.cap(&mut fm, &WELL, 0.9, fh(0.9) - 0.004, 1.0, false);
     fin.cap(&mut fm, &WELL, 9.7, fh(9.7) - 0.004, 1.0, false);
     fin.cap(&mut fm, &SKIN.pat(pat::TAIL), FIN_H, 0.0, 1.0, false);
+    wick(&mut fm, fin.pt(FIN_H - 0.25, 1.0, 0.0, -1.0), Vec3::Z);
     // A dorsal fillet blending the fin's root into the crown.
     let fillet = Foil {
         at: Box::new(|s: f32| {
@@ -1087,6 +1172,11 @@ fn tail(b: &mut Builder) {
         fin.skin(&mut ru, &SKIN.pat(pat::CTRL), s0, s1, 16, &|s| fh(s) + 0.004, &|_| 1.0, 12, true);
         fin.cap(&mut ru, &SKIN.pat(pat::CTRL), s0, fh(s0) + 0.004, 1.0, true);
         fin.cap(&mut ru, &SKIN.pat(pat::CTRL), s1, fh(s1) + 0.004, 1.0, true);
+        if s1 > 9.0 {
+            for s in [6.6f32, 7.9, 9.2] {
+                wick(&mut ru, fin.pt(s, 1.0, 0.0, -1.0), Vec3::Z);
+            }
+        }
         let p0 = fin.pt(s0, 0.707, 0.0, -1.0);
         let p1 = fin.pt(s1, 0.707, 0.0, -1.0);
         let k = b.add(name, G_TAIL, ru, Anim::hinge(Drive::new(Input::Rudder, 0.45)), p0, p1 - p0, None);
@@ -1104,6 +1194,19 @@ fn wheel_pair(axle: Vec3, half_w: f32, rim: f32) -> Mesh {
         wheel(&mut m, c, Vec3::X * sx, TYRE_R, half_w, rim, true);
     }
     m.tube(&STRUT, &[axle - Vec3::X * (TRUCK_W * 0.5 - 0.2), axle + Vec3::X * (TRUCK_W * 0.5 - 0.2)], &|_| 0.08, 12, true);
+    // Carbon brake stacks inboard of each wheel: the housing with its ring of
+    // pistons, the heat-tinted stack showing through the hub.
+    let heat = mt(mat::STEEL, 0.32, 0.29, 0.27).x(2.0);
+    for sx in [-1.0f32, 1.0] {
+        let inner = axle + Vec3::X * (sx * (TRUCK_W * 0.5 - half_w));
+        m.tube(&heat, &[inner, inner - Vec3::X * (sx * 0.07)], &|_| rim * 0.82, 24, true);
+        m.tube(&STRUT, &[inner - Vec3::X * (sx * 0.07), inner - Vec3::X * (sx * 0.11)], &|_| rim * 0.6, 20, true);
+        for k in 0..8 {
+            let a = k as f32 / 8.0 * TAU;
+            let o = Vec3::new(0.0, a.cos(), a.sin()) * (rim * 0.68);
+            m.tube(&STRUT, &[inner + o - Vec3::X * (sx * 0.07), inner + o - Vec3::X * (sx * 0.12)], &|_| 0.022, 8, true);
+        }
+    }
     m
 }
 
@@ -1124,6 +1227,18 @@ fn main_gear(b: &mut Builder, names: [[&'static str; 2]; 5], pivot: Vec3, axle: 
     let brace_a = pivot + down * (len * 0.45);
     let side = axis.cross(down).normalize();
     leg.tube(&STRUT, &[brace_a, pivot + side * 1.1 - down * 0.15], &|_| 0.08, 10, true);
+    // The brace's lock link, and the hydraulic lines clamped down the leg.
+    leg.tube(&STEEL, &[brace_a + side * 0.55 - down * 0.08, pivot + down * (len * 0.25) + side * 0.05], &|_| 0.035, 8, true);
+    let q = (axis * 0.8 + side * 0.6).normalize();
+    for (k, o) in [0.0f32, 0.05].iter().enumerate() {
+        let off = q * (0.255 + o * 0.6) + axis.cross(q) * (o - 0.025);
+        leg.tube(if k == 0 { &HOSE } else { &PIPE }, &[top + off * 1.08, low + off * 0.92], &|_| 0.013, 8, true);
+    }
+    for t in [0.2f32, 0.45, 0.7, 0.92] {
+        let p = top.lerp(low, t);
+        let rr = 0.24 - 0.04 * t;
+        leg.lathe(&STRUT, p, down, &[[rr + 0.005, -0.025], [rr + 0.035, -0.02], [rr + 0.035, 0.02], [rr + 0.005, 0.025]], 18, false);
+    }
     // The slot door: flush with the skin when stowed, so modelled there and
     // carried back to where it sits with the gear down.
     if slot.len() >= 4 {
@@ -1160,7 +1275,12 @@ fn main_gear(b: &mut Builder, names: [[&'static str; 2]; 5], pivot: Vec3, axle: 
     // Torque links in front of the strut.
     let fwd = Vec3::NEG_Z;
     let mid = (low + axle) * 0.5 + fwd * 0.28;
-    oleo.tube(&STRUT, &[low + fwd * 0.12, mid, axle - down * 0.25 + fwd * 0.1], &|_| 0.05, 8, true);
+    oleo.tube(&STRUT, &[low + fwd * 0.12, mid], &|_| 0.05, 8, true);
+    oleo.tube(&STRUT, &[mid, axle - down * 0.25 + fwd * 0.1], &|_| 0.045, 8, true);
+    oleo.tube(&STEEL, &[mid - Vec3::X * 0.07, mid + Vec3::X * 0.07], &|_| 0.03, 10, true);
+    // The brake hoses looping down to the truck.
+    let q = (axis * 0.8 + side * 0.6).normalize();
+    oleo.tube(&HOSE, &[low + q * 0.22 - down * 0.25, low + q * 0.30 + down * 0.25, axle - down * 0.3 + q * 0.2], &|_| 0.016, 8, true);
     let up = -down;
     let (ol, or) = b.pair(names[1], [G_GEAR, G_GEAR], oleo, |s| Anim::slide(Drive::new(Input::Compress(if s < 0.0 { legs[0] } else { legs[1] }), 1.0), up * Vec3::new(s, 1.0, 1.0)), axle, Vec3::X, [Some(ll), Some(lr)]);
     b.role(ol, Role::Gear(legs[0])).role(or, Role::Gear(legs[1]));
@@ -1169,6 +1289,16 @@ fn main_gear(b: &mut Builder, names: [[&'static str; 2]; 5], pivot: Vec3, axle: 
     truck.tube(&STRUT, &[axle + Vec3::Z * (TRUCK_L * 0.5 + 0.12), axle - Vec3::Z * (TRUCK_L * 0.5 + 0.12)], &|_| 0.13, 14, true);
     // Brake rods and the pitch trimmer.
     truck.tube(&STEEL, &[axle + Vec3::new(0.0, 0.35, -0.15), axle + Vec3::new(0.0, 0.12, -TRUCK_L * 0.5)], &|_| 0.035, 8, true);
+    for sx in [-1.0f32, 1.0] {
+        truck.tube(&PIPE, &[axle + Vec3::new(sx * 0.11, 0.10, -TRUCK_L * 0.5 + 0.1), axle + Vec3::new(sx * 0.11, 0.14, 0.0), axle + Vec3::new(sx * 0.11, 0.10, TRUCK_L * 0.5 - 0.1)], &|_| 0.012, 6, true);
+        for dz in [-TRUCK_L * 0.5, TRUCK_L * 0.5] {
+            truck.tube(&HOSE, &[axle + Vec3::new(sx * 0.11, 0.10, dz * 0.85), axle + Vec3::new(sx * (TRUCK_W * 0.5 - 0.30), 0.12, dz)], &|_| 0.012, 6, true);
+        }
+    }
+    // Axle-end fittings with the towing lugs.
+    for dz in [-TRUCK_L * 0.5 - 0.12, TRUCK_L * 0.5 + 0.12] {
+        truck.lathe(&STEEL, axle + Vec3::Z * dz, Vec3::Z * dz.signum(), &[[0.13, 0.0], [0.10, 0.04], [0.0, 0.05]], 14, true);
+    }
     let tilt = |s: f32| {
         let k = if s < 0.0 { legs[0] } else { legs[1] };
         Anim::hinge2(Drive::new(Input::Compress(k), -TILT).smooth(0.0, 0.05).offset(TILT), Drive::new(Input::Gear, -extra).smooth(0.86, 0.98).offset(extra))
@@ -1224,6 +1354,11 @@ fn gear(b: &mut Builder) {
         nl.rbox(&STRUT, c, Vec3::new(0.06, 0.07, 0.06), 0.02, Quat::IDENTITY);
         nl.disc(&mt(mat::LAMP, 0.95, 0.92, 0.85).x(lamp::LANDING), c + Vec3::new(0.0, 0.0, -0.062), Vec3::NEG_Z, Vec3::Y, 0.05, 14);
     }
+    for o in [0.0f32, 0.04] {
+        let q = Vec3::new(0.19, 0.0, 0.0) + Vec3::Z * (0.08 + o);
+        nl.tube(&HOSE, &[NOSE_PIVOT + down * 0.1 + q, low + q * 0.95], &|_| 0.011, 8, true);
+    }
+    nl.lathe(&STRUT, low - down * 0.05, down, &[[0.17, -0.03], [0.21, -0.025], [0.21, 0.025], [0.17, 0.03]], 18, false);
     let leg = b.add("nose leg", G_GEAR, nl, Anim::hinge(Drive::new(Input::Gear, -ang).smooth(0.15, 0.85).offset(ang)), NOSE_PIVOT, axis, None);
     b.role(leg, Role::Gear(0));
     // Steering collar, then the oleo, then the wheels.

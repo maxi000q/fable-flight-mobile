@@ -605,7 +605,8 @@ fn fuselage(b: &mut Builder) {
     cabin.lathe(&ALU, p, n, &[[0.016, 0.0], [0.016, 0.0015], [0.004, 0.0015], [0.004, -0.001], [0.0, -0.001]], 16, false);
     // Door handles and hinges, the fuel-up step and grab handle.
     for sx in [-1.0f32, 1.0] {
-        let (p, n) = on_side(-0.62, 0.20, sx, 0.004);
+        // Below the window (it used to sit on the glass).
+        let (p, n) = on_side(-0.62, -0.01, sx, 0.004);
         let rot = Quat::from_rotation_arc(Vec3::X, n);
         cabin.rbox(&CHROME, p, Vec3::new(0.004, 0.012, 0.055), 0.004, rot);
         cabin.rbox(&BLACK, p - n * 0.003, Vec3::new(0.002, 0.02, 0.07), 0.002, rot);
