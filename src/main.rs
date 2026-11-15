@@ -15,6 +15,7 @@ mod fluid;
 mod geo;
 mod bind;
 mod i18n;
+mod jsbsim;
 mod live;
 mod livewx;
 mod nav;
@@ -4909,8 +4910,56 @@ fn ortho(l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) -> Mat4 {
     Mat4::from_cols_array(&[2.0 / (r - l), 0.0, 0.0, 0.0, 0.0, 2.0 / (t - b), 0.0, 0.0, 0.0, 0.0, -1.0 / (f - n), 0.0, -(r + l) / (r - l), -(t + b) / (t - b), -n / (f - n), 1.0])
 }
 
+/// `--jsbsim-compare FILE [--aircraft NAME]`: prints how a JSBSim aircraft's
+/// aerodynamics compare with ours (the Cessna unless NAME picks another).
+fn jsbsim_compare(file: Option<&String>, which: Option<&String>) -> i32 {
+    let Some(file) = file else {
+        eprintln!("--jsbsim-compare takes a JSBSim aircraft file (…/c172p/c172p.xml)");
+        return 2;
+    };
+    let j = match jsbsim::Aircraft::load(std::path::Path::new(file)) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("{file}: {e}");
+            return 1;
+        }
+    };
+    let want = which.map(|w| w.to_lowercase()).unwrap_or_else(|| "172".into());
+    let Some(spec) = aircraft::ALL.iter().copied().find(|s| s.name.to_lowercase().contains(&want)) else {
+        eprintln!("no aircraft of ours matches {want:?}: {}", aircraft::ALL.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
+        return 2;
+    };
+    println!("{}", jsbsim::compare(&j, spec, our_roll_rate(spec)));
+    0
+}
+
+/// Ours flown: the highest roll rate full aileron reaches from 90 kt, level,
+/// in the first four seconds (rad/s). No world is loaded (offline, empty).
+fn our_roll_rate(spec: &'static aircraft::Spec) -> Option<f64> {
+    let dir = std::env::temp_dir().join("fablegame-jsbsim-compare");
+    let src = Arc::new(sources::Sources::new(fetch::Fetcher::new(dir, true), String::new()));
+    let w = world::World::new(sources::Loader::new(src, 0), 14);
+    let mut p = Plane::spawn(spec, 45f64.to_radians(), 5f64.to_radians(), 1500.0, 0.0, 90.0 / 1.943_84);
+    p.throttle = 0.7;
+    let c = Controls { roll: 1.0, ..Default::default() };
+    let dt = 1.0 / 180.0;
+    let mut best: f64 = 0.0;
+    for _ in 0..(4.0 / dt) as usize {
+        if p.step(dt, &c, &w).is_some() {
+            break;
+        }
+        best = best.max(p.omega.z.abs());
+    }
+    Some(best)
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,fablegame=info")).init();
+    // A JSBSim aircraft compared with one of ours (see jsbsim.rs), and out.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(i) = argv.iter().position(|a| a == "--jsbsim-compare") {
+        std::process::exit(jsbsim_compare(argv.get(i + 1), argv.iter().position(|a| a == "--aircraft").and_then(|k| argv.get(k + 1))));
+    }
     let args = parse_args();
     i18n::set_lang(args.lang.or(settings::Settings::load().lang).unwrap_or_else(i18n::Lang::detect));
     let el = EventLoop::new()?;
