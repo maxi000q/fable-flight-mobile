@@ -2330,7 +2330,9 @@ impl Game {
             self.world.photo_beacons(cam, &mut air_lights);
         }
 
-        let ui = if in_menu { self.menu_ui(vp, cam, w, h) } else { self.ui(agl) };
+        // The globe's labels are placed in the window's pixels, not the (maybe smaller) 3D scene's.
+        let (ww, wh) = (self.r.config.width as f32, self.r.config.height as f32);
+        let ui = if in_menu { self.menu_ui(vp, cam, ww, wh) } else { self.ui(agl) };
         // The smoke volume: a grid around the effects anchor, on its local east/north/up axes.
         {
             let site = cam + DVec3::new(psim.anchor[0] as f64, psim.anchor[1] as f64, psim.anchor[2] as f64);
