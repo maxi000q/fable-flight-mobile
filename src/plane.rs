@@ -30,6 +30,9 @@ pub struct Controls {
     pub boost: bool,
     /// thrust reversers (on the ground, jets)
     pub reverse: bool,
+    /// a throttle lever's position (0..1), which then sets the power
+    /// outright instead of `throttle` moving it
+    pub throttle_set: Option<f64>,
 }
 
 pub struct Impact {
@@ -1005,7 +1008,10 @@ impl Plane {
             *c -= dt;
         }
         self.fold_tq = [0.0; 2];
-        self.throttle = (self.throttle + c.throttle * dt * 0.6).clamp(0.0, 1.0);
+        self.throttle = match c.throttle_set {
+            Some(t) => t.clamp(0.0, 1.0),
+            None => (self.throttle + c.throttle * dt * 0.6).clamp(0.0, 1.0),
+        };
         // Control surfaces do not snap.
         let target = DVec3::new(c.pitch, c.yaw, c.roll);
         self.stick += (target - self.stick) * (dt * 7.0).min(1.0);

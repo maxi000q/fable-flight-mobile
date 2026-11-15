@@ -116,6 +116,7 @@ fn fr(en: &str) -> Option<&'static str> {
         "Game" => "Jeu",
         "Settings" => "Réglages",
         "Controls" => "Commandes",
+        "Bindings" => "Assignations",
 
         // ---- controls list: headings
         "FLYING" => "PILOTAGE",
@@ -190,6 +191,7 @@ fn fr(en: &str) -> Option<&'static str> {
         "start at the crosshair" => "partir depuis le viseur",
         "take off" => "décoller",
         "settings and this controls list" => "réglages et cette liste des commandes",
+        "parking brake" => "frein de parc",
         // gamepad prompts
         "move" => "naviguer",
         "press" => "appuyer",

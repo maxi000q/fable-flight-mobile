@@ -13,6 +13,7 @@ mod destruct;
 mod fetch;
 mod fluid;
 mod geo;
+mod bind;
 mod i18n;
 mod live;
 mod livewx;
@@ -705,6 +706,9 @@ struct Game {
     live_view: Option<(Mat4, DVec3)>,
     /// real weather (sets `wx` while `wx.live` is on)
     livewx: livewx::LiveWx,
+    /// joysticks, pedals and moved keys, and what was last saved of them
+    binds: bind::Bindings,
+    binds_stamp: String,
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
 }
@@ -832,6 +836,8 @@ impl Game {
             live: live::Live::new(prefs.live_traffic),
             live_view: None,
             livewx: livewx::LiveWx::new(),
+            binds_stamp: String::new(),
+            binds: bind::Bindings::load(),
             prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
                 let i = airports::Db::get().find(c);
@@ -1104,8 +1110,14 @@ impl Game {
             brake: k(KeyCode::KeyB),
             boost: k(KeyCode::Space),
             reverse: k(KeyCode::KeyZ),
+            throttle_set: None,
         };
+        let trim = ax(k(KeyCode::Numpad1), k(KeyCode::Numpad7));
+        if trim != 0.0 && self.mode == Mode::Fly && !self.pause_open && !self.crashed {
+            self.plane.trim = (self.plane.trim + trim * 0.035 * dt).clamp(-0.05, 0.24);
+        }
         self.gamepad(dt, &mut c);
+        self.joystick(&mut c);
         c.brake |= self.parking_brake;
         if let Some(t) = self.crash_at {
             if self.real > t && !self.crashed {
@@ -1146,6 +1158,21 @@ impl Game {
         let Some(g) = self.gilrs.as_mut() else { return };
         let (mut pressed, mut relayout) = (Vec::new(), false);
         while let Some(ev) = g.next_event() {
+            // Every device's axes and buttons go to the bindings (joysticks,
+            // pedals, throttles); one with something bound is not the gamepad.
+            let (uuid, name) = {
+                let p = g.gamepad(ev.id);
+                (p.uuid(), p.name().to_string())
+            };
+            match ev.event {
+                EventType::AxisChanged(_, v, code) => self.binds.axis_event(uuid, &name, code.into_u32(), v),
+                EventType::ButtonPressed(_, code) => self.binds.button_event(uuid, &name, code.into_u32(), true),
+                EventType::ButtonReleased(_, code) => self.binds.button_event(uuid, &name, code.into_u32(), false),
+                _ => {}
+            }
+            if self.binds.uses(&uuid) || self.binds.capture.is_some() {
+                continue;
+            }
             match ev.event {
                 EventType::Connected => relayout = true,
                 EventType::ButtonPressed(b, _) => {
@@ -1169,7 +1196,9 @@ impl Game {
             self.pad_id = None;
             return;
         }
-        let id = self.pad_id.filter(|id| g.connected_gamepad(*id).is_some()).or_else(|| g.gamepads().next().map(|(id, _)| id));
+        let binds = &self.binds;
+        let free = |p: &gilrs::Gamepad| !binds.uses(&p.uuid());
+        let id = self.pad_id.filter(|id| g.connected_gamepad(*id).is_some_and(|p| free(&p))).or_else(|| g.gamepads().find(|(_, p)| free(p)).map(|(id, _)| id));
         let Some(pad) = id.and_then(|id| g.connected_gamepad(id)) else {
             self.pad = Controls::default();
             padui::set_active(false);
@@ -1212,6 +1241,7 @@ impl Game {
             brake: pad.is_pressed(Button::West),
             boost: false,
             reverse: false,
+            throttle_set: None,
         };
         let (look_x, look_y) = (dz(pad.value(Axis::RightStickX)), dz(pad.value(Axis::RightStickY)));
         let trim = if modifier && nav != Nav::Panel { ax_pad(pad.is_pressed(Button::DPadDown), pad.is_pressed(Button::DPadUp)) } else { 0.0 };
@@ -1285,6 +1315,151 @@ impl Game {
 
         for b in pressed {
             self.pad_button(nav, b, modifier);
+        }
+    }
+
+    /// Bound joystick, pedal and throttle axes, and bound buttons (which do
+    /// what their key does).
+    fn joystick(&mut self, c: &mut Controls) {
+        use bind::AxisAct as A;
+        let b = &self.binds;
+        if let Some(v) = b.axis(A::Pitch) {
+            c.pitch = (c.pitch + v).clamp(-1.0, 1.0);
+        }
+        if let Some(v) = b.axis(A::Roll) {
+            c.roll = (c.roll + v).clamp(-1.0, 1.0);
+        }
+        if let Some(v) = b.axis(A::Yaw) {
+            c.yaw = (c.yaw + v).clamp(-1.0, 1.0);
+        }
+        // A throttle lever sets the power, unless the keys are moving it.
+        if let Some(t) = b.axis(A::Throttle) {
+            if c.throttle == 0.0 {
+                c.throttle_set = Some(t);
+            }
+        }
+        if b.axis(A::BrakeLeft).unwrap_or(0.0).max(b.axis(A::BrakeRight).unwrap_or(0.0)) > 0.3 {
+            c.brake = true;
+        }
+        for (id, down) in self.binds.take_edges() {
+            let Some(a) = bind::ACTIONS.iter().find(|a| a.id == id) else { continue };
+            if down {
+                // (Esc on the globe would quit the game.)
+                if !(a.key == KeyCode::Escape && self.mode != Mode::Fly) {
+                    self.key(a.key);
+                }
+                self.keys.insert(a.key);
+            } else {
+                self.keys.remove(&a.key);
+            }
+        }
+    }
+
+    /// The bindings page: devices, axes, joystick buttons and the keyboard.
+    fn bindings_page(&mut self, ui: &mut egui::Ui) {
+        use bind::{AxisAct, Capture, ACTIONS};
+        use egui::{Color32, RichText};
+        use menu::{ACCENT, DIM, TEXT};
+        let label = |id: &str| ACTIONS.iter().find(|a| a.id == id).map(|a| a.label()).unwrap_or("?");
+        if let Some(c) = self.binds.capture.clone() {
+            let what = match &c {
+                Capture::Axis(a) => a.how().to_string(),
+                Capture::Button(id) => t!("Press the button for: {}", "Appuyez sur le bouton pour : {}", label(id)),
+                Capture::Key(id) => t!("Press the key for: {}  (Esc: cancel)", "Appuyez sur la touche pour : {}  (Échap : annuler)", label(id)),
+            };
+            egui::Frame::new().fill(ACCENT.gamma_multiply(0.22)).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(what).size(13.5).color(Color32::WHITE));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(t!("Cancel", "Annuler")).clicked() {
+                            self.binds.capture = None;
+                        }
+                    });
+                });
+            });
+            ui.add_space(4.0);
+        }
+        let dim = |s: String| RichText::new(s).size(12.0).color(DIM);
+        menu::heading(ui, t!("CONNECTED DEVICES", "PÉRIPHÉRIQUES CONNECTÉS"));
+        let devices: Vec<(String, bool)> = self.gilrs.as_ref().map(|g| g.gamepads().map(|(_, p)| (p.name().to_string(), self.binds.uses(&p.uuid()))).collect()).unwrap_or_default();
+        if devices.is_empty() {
+            ui.label(dim(t!("No joystick, pedals or gamepad found.", "Aucun joystick, palonnier ni manette détecté.").into()));
+        }
+        for (name, bound) in devices {
+            let role = if bound { t!("bound", "assigné") } else { t!("gamepad layout", "disposition manette") };
+            ui.label(RichText::new(format!("{name}  ·  {role}")).size(12.5).color(TEXT));
+        }
+        ui.label(dim(t!("A device with anything bound to it no longer works as a gamepad.", "Un périphérique dès qu'on lui assigne quelque chose ne sert plus de manette de jeu.").into()));
+        let busy = self.binds.capture.is_some();
+
+        menu::heading(ui, t!("AXES", "AXES"));
+        egui::Grid::new("bind_axes").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
+            for a in AxisAct::ALL {
+                ui.label(RichText::new(a.label()).size(13.0).color(TEXT));
+                ui.label(dim(self.binds.describe_axis(a).unwrap_or_else(|| "—".into())));
+                match self.binds.axis(a) {
+                    Some(v) => {
+                        let f = if a.centred() { (v as f32 + 1.0) * 0.5 } else { v as f32 };
+                        ui.add(egui::ProgressBar::new(f).desired_width(70.0).desired_height(8.0));
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new(t!("Assign", "Assigner")).small()).clicked() {
+                        self.binds.start_capture(Capture::Axis(a));
+                    }
+                    if self.binds.axes.contains_key(&a) && ui.small_button(t!("Clear", "Effacer")).clicked() {
+                        self.binds.axes.remove(&a);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+
+        menu::heading(ui, t!("BUTTONS (JOYSTICK, THROTTLE, WHEEL)", "BOUTONS (JOYSTICK, MANETTE DES GAZ, VOLANT)"));
+        egui::Grid::new("bind_buttons").num_columns(3).spacing([10.0, 3.0]).show(ui, |ui| {
+            for a in ACTIONS {
+                ui.label(RichText::new(a.label()).size(12.5).color(TEXT));
+                ui.label(dim(self.binds.describe_button(a.id).unwrap_or_else(|| "—".into())));
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new(t!("Assign", "Assigner")).small()).clicked() {
+                        self.binds.start_capture(Capture::Button(a.id));
+                    }
+                    if self.binds.buttons.contains_key(a.id) && ui.small_button(t!("Clear", "Effacer")).clicked() {
+                        self.binds.buttons.remove(a.id);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+
+        menu::heading(ui, t!("KEYBOARD", "CLAVIER"));
+        egui::Grid::new("bind_keys").num_columns(3).spacing([10.0, 3.0]).show(ui, |ui| {
+            for a in ACTIONS.iter().filter(|a| a.keyboard) {
+                ui.label(RichText::new(a.label()).size(12.5).color(TEXT));
+                let moved = self.binds.keys.contains_key(a.id);
+                let name = self.binds.key_of(a).map(bind::key_name).unwrap_or_else(|| t!("(none)", "(aucune)").into());
+                ui.label(RichText::new(name).monospace().size(12.5).color(if moved { ACCENT } else { DIM }));
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new(t!("Change", "Changer")).small()).clicked() {
+                        self.binds.start_capture(Capture::Key(a.id));
+                        self.keys.clear();
+                    }
+                    if moved && ui.small_button(t!("Default", "Par défaut")).clicked() {
+                        self.binds.reset_key(a.id);
+                        self.keys.clear();
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+        if ui.add_enabled(!busy, egui::Button::new(t!("Reset all bindings", "Tout réinitialiser"))).clicked() {
+            self.binds = bind::Bindings::default();
+            self.keys.clear();
         }
     }
 
@@ -1437,6 +1612,11 @@ impl Game {
             KeyCode::F3 => self.wx.open = !self.wx.open,
             KeyCode::KeyP => self.paused = !self.paused,
             KeyCode::KeyH => self.show_hud = !self.show_hud,
+            KeyCode::Period => {
+                self.parking_brake = !self.parking_brake;
+                self.status = if self.parking_brake { t!("Parking brake set", "Frein de parc serré") } else { t!("Parking brake released", "Frein de parc desserré") }.into();
+                self.status_until = self.real + 2.0;
+            }
             KeyCode::KeyK if !self.crashed => {
                 self.gauges.sync_dg(&self.plane);
                 self.status = t!("Heading indicator set to the compass", "Conservateur de cap recalé sur le compas").into();
@@ -1867,6 +2047,13 @@ impl Game {
         if s != self.prefs {
             s.save();
             self.prefs = s;
+        }
+        let stamp = self.binds.stamp();
+        if self.binds_stamp.is_empty() {
+            self.binds_stamp = stamp;
+        } else if stamp != self.binds_stamp {
+            self.binds.save();
+            self.binds_stamp = stamp;
         }
     }
 
@@ -3158,6 +3345,11 @@ impl Game {
                                 ui.spacing_mut().slider_width = 160.0;
                                 self.graphics_settings(ui);
                             });
+                            let n = self.binds.axes.len() + self.binds.buttons.len();
+                            let summary = if n > 0 { t!("{} bound", "{} assignés", n) } else { String::new() };
+                            menu::section(ui, "bindings", t!("Joysticks & key bindings", "Joysticks et assignations"), &summary, false, |ui| {
+                                self.bindings_page(ui);
+                            });
                             menu::section(ui, "controls", t!("Controls", "Commandes"), if padui::active() { t!("Gamepad", "Manette") } else { t!("Keyboard", "Clavier") }, true, |ui| {
                                 let t = if padui::active() { t!("In flight, Y + View shows the flight panel (instruments, places, weather) and Menu pauses: settings, the globe, this list.", "En vol, Y + View affiche le panneau de vol (instruments, destinations, météo) et Menu met en pause : réglages, globe, cette liste.") } else { t!("In flight, Tab shows the flight panel (instruments, places, weather) and Esc pauses: settings, the globe, this list.", "En vol, Tab affiche le panneau de vol (instruments, destinations, météo) et Échap met en pause : réglages, globe, cette liste.") };
                                 ui.label(RichText::new(t).size(12.5).color(DIM));
@@ -3445,7 +3637,7 @@ impl Game {
         if self.pause_page.is_info() {
             self.pause_page = Page::Game;
         }
-        let wide = self.pause_page == Page::Controls;
+        let wide = matches!(self.pause_page, Page::Controls | Page::Bindings);
         let w = if wide { 640.0 } else { 420.0 };
         egui::Area::new(egui::Id::unique("pause")).order(egui::Order::Foreground).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             menu::panel().show(ui, |ui| {
@@ -3549,7 +3741,18 @@ impl Game {
                         ui.label(RichText::new(format!("Google's photorealistic 3D cities ({t}) have their own switch and detail level under Settings › Map imagery.")).size(11.5).color(DIM));
                         padui::follow_focus(ui);
                     }).inner,
-                    Page::Controls => menu::controls_list(ui),
+                    Page::Controls => {
+                        if !self.binds.keys.is_empty() {
+                            ui.label(RichText::new(t!("Some keys have been moved: see Bindings.", "Certaines touches ont été déplacées : voir Assignations.")).size(12.0).color(ACCENT));
+                        }
+                        menu::controls_list(ui)
+                    }
+                    Page::Bindings => {
+                        egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
+                            self.bindings_page(ui);
+                            padui::follow_focus(ui);
+                        });
+                    }
                     _ => {
                         ui.add_space(4.0);
                         let resume = menu::wide_button(ui, t!("RESUME", "REPRENDRE"), Hint::of("Esc", "B"), true, true);
@@ -4214,7 +4417,28 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) => g.keys.clear(),
             WindowEvent::KeyboardInput { event: k, .. } => {
-                if let PhysicalKey::Code(code) = k.physical_key {
+                if let PhysicalKey::Code(raw) = k.physical_key {
+                    // Waiting for a key (or Esc) to bind, or Esc calling off a joystick capture.
+                    let pressed = k.state == ElementState::Pressed;
+                    let capturing = match g.binds.capture.clone() {
+                        Some(bind::Capture::Key(id)) if pressed => {
+                            if raw == KeyCode::Escape {
+                                g.binds.capture = None;
+                            } else if bind::bindable(raw) {
+                                g.binds.capture = None;
+                                g.binds.set_key(id, raw);
+                            }
+                            g.keys.clear();
+                            true
+                        }
+                        Some(_) if pressed && raw == KeyCode::Escape => {
+                            g.binds.capture = None;
+                            true
+                        }
+                        _ => false,
+                    };
+                    let mapped = if capturing { None } else { g.binds.map_key(raw) };
+                    if let Some(code) = mapped {
                     if k.state == ElementState::Pressed {
                         // egui always claims Tab (and, while one of its buttons has
                         // focus, every key), so the menu keys are let through here.
@@ -4243,6 +4467,7 @@ impl ApplicationHandler for App {
                         }
                     } else {
                         g.keys.remove(&code);
+                    }
                     }
                 }
             }
