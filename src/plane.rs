@@ -121,6 +121,9 @@ pub struct Plane {
     /// seconds flown
     pub t: f64,
     near_trees: Vec<TreeRef>,
+    /// trees something went into that are still standing, with how deep the
+    /// worst contact went (1 = foliage, 2 = trunk), so they are not struck again
+    struck: Vec<(geo::TileId, usize, u8)>,
     scan: u32,
     rng: Rng,
     /// held where it is (waiting on the ground for the terrain under it to load)
@@ -216,6 +219,7 @@ impl Plane {
             dirt: Vec::new(),
             t: 0.0,
             near_trees: Vec::new(),
+            struck: Vec::new(),
             scan: 0,
             rng: Rng(pos.x.to_bits() | 1),
             hold: false,
@@ -1692,12 +1696,17 @@ impl Plane {
 
     /// Trees: refresh the list of nearby ones a few times a second, test every
     /// step. Foliage scrapes and tears things off; a trunk through the nose
-    /// or belly is the end.
+    /// or belly is the end. A tree only goes over when the blow carries more
+    /// energy than its trunk can take: a light aircraft's wing shears off
+    /// against a mature trunk and leaves it standing, an airliner mows them down.
     fn trees(&mut self, world: &World) -> Option<Impact> {
         let spec = self.spec;
         if self.scan == 0 {
             self.near_trees.clear();
             world.trees_near(self.pos, 30.0 + spec.b * 0.5 + self.vel.length() * 0.2, &mut self.near_trees);
+            let (pos, reach) = (self.pos, 60.0 + spec.b + self.vel.length());
+            let near = &self.near_trees;
+            self.struck.retain(|s| near.iter().any(|t| t.tile == s.0 && t.idx == s.1 && (t.pos - pos).length() < reach));
         }
         self.scan = (self.scan + 1) % 12;
         let v = self.vel.length();
@@ -1709,51 +1718,97 @@ impl Plane {
             // 0 = miss, 1 = through the foliage, 2 = into the trunk or the heart of the crown.
             let mut worst = 0;
             let mut at = 5;
+            let mut core: Option<DVec3> = None;
             for (hi, r) in spec.hard.into_iter().enumerate() {
                 let d = self.pos + self.rot * r - t.pos;
                 let hgt = d.dot(tu);
                 if hgt < -1.0 || hgt > t.height + 1.0 {
                     continue;
                 }
-                let rad = (d - tu * hgt).length();
+                let flat = d - tu * hgt;
+                let rad = flat.length();
+                let trunk = rad < t.trunk_r + 0.35 && hgt < cc;
+                if trunk && matches!(hi, 0 | 5 | 6) {
+                    core = Some(flat / rad.max(1e-3));
+                }
                 let e = ((rad / t.crown_r.max(0.5)).powi(2) + ((hgt - cc) / ch).powi(2)).sqrt();
-                let level = if (rad < t.trunk_r + 0.35 && hgt < cc) || e < 0.45 { 2 } else if e < 1.0 { 1 } else { 0 };
+                let level = if trunk || e < 0.45 { 2 } else if e < 1.0 { 1 } else { 0 };
                 if level > worst {
                     worst = level;
                     at = hi;
                 }
             }
-            if worst == 0 {
+            let prev = self.struck.iter().position(|s| s.0 == t.tile && s.1 == t.idx);
+            let before = prev.map(|i| self.struck[i].2).unwrap_or(0);
+            if worst <= before {
+                // Already went through this one: a trunk still standing stays solid
+                // against the fuselage instead of letting it creep through.
+                if before == 2 {
+                    if let Some(n) = core {
+                        let vn = self.vel.dot(n);
+                        if vn < 0.0 {
+                            self.vel -= n * vn;
+                        }
+                    }
+                }
                 k += 1;
                 continue;
             }
-            let t = self.near_trees.swap_remove(k);
+            // Energy the trunk soaks up before it snaps, against the share of
+            // the aircraft's that goes into it before the part that hit gives.
+            let ke = 0.5 * spec.mass * v * v;
+            let snap_e = 3.0e5 * (t.trunk_r / 0.25).powi(3) * (t.height / 15.0).clamp(0.6, 1.4);
+            let share = match (worst, at) {
+                (2, 1 | 2) => 0.6,
+                (2, 3 | 4) => 0.4,
+                (2, _) => 1.0,
+                _ => 0.03,
+            };
+            let snaps = ke * share > snap_e;
             let base_h = geo::pos_to_lla(t.pos).2;
-            self.tree_hits.push(t);
+            if snaps {
+                let t = self.near_trees.swap_remove(k);
+                if let Some(i) = prev {
+                    self.struck.swap_remove(i);
+                }
+                // Breaking it costs what it took to break.
+                let v2 = (v * v - 2.0 * snap_e / spec.mass).max(0.36 * v * v);
+                self.vel *= (v2 / (v * v).max(1e-6)).sqrt();
+                self.tree_hits.push(t);
+            } else {
+                let id = (t.tile, t.idx);
+                match prev {
+                    Some(i) => self.struck[i].2 = worst,
+                    None => self.struck.push((id.0, id.1, worst)),
+                }
+                k += 1;
+            }
             self.brushes += 1.0;
             let side = if at == 1 { 0 } else { 1 };
             let sgn = if side == 0 { -1.0 } else { 1.0 };
             let r = self.rng.f();
+            // A tree that holds: what hit it is stopped, and the aircraft pivots on it.
+            let hold = if snaps { 1.0 } else { 1.7 };
             if worst == 2 {
                 match at {
                     1 | 2 => {
                         // A trunk through the outer wing shears it off.
                         self.break_wing(side, self.sta(if v > 45.0 { 0.64 } else { 0.78 }), "TREE");
-                        self.vel *= 0.85;
-                        self.kick(DVec3::new(0.2, -sgn * 0.7, -sgn * 1.5));
+                        self.vel *= if snaps { 0.9 } else { 0.72 };
+                        self.kick(DVec3::new(0.2, -sgn * 0.7, -sgn * 1.5) * hold);
                     }
                     3 | 4 => {
                         self.lose_tail_top(0.4, 0.45, "TREE");
                         self.lose_elevator((r * 2.0) as usize, true, "TREE");
-                        self.vel *= 0.88;
-                        self.kick(DVec3::new(-0.8, 0.6, 0.4));
+                        self.vel *= if snaps { 0.92 } else { 0.8 };
+                        self.kick(DVec3::new(-0.8, 0.6, 0.4) * hold);
                     }
                     // Rolling slowly into a trunk crumples the nose and stops it dead.
                     _ if v < 18.0 => {
                         self.prop_strike("TREE");
                         self.crack_windshield("TREE");
                         self.dmg.hull = (self.dmg.hull + 0.2).min(1.0);
-                        self.vel *= 0.2;
+                        self.vel *= if snaps { 0.4 } else { 0.1 };
                         self.omega *= 0.3;
                     }
                     _ => return Some(Impact { pos: self.pos, vel: self.vel, water: false, ground_h: base_h + 0.2, building: None }),
@@ -1762,9 +1817,11 @@ impl Plane {
             }
             // Clipped the canopy: it costs speed, throws the aircraft about, and
             // whatever went through the branches comes out worse for it.
-            self.vel *= 1.0 - 0.05 * (1100.0 / spec.mass).cbrt();
+            if !snaps {
+                self.vel *= 1.0 - 0.08 * (1100.0 / spec.mass).cbrt();
+            }
             let kick = (self.scan as f64 * 2.4).sin();
-            self.kick(DVec3::new(0.25 * kick, 0.5 * kick, 0.9 * (self.scan as f64 * 1.7).cos()));
+            self.kick(DVec3::new(0.25 * kick, 0.5 * kick, 0.9 * (self.scan as f64 * 1.7).cos()) * hold.sqrt());
             let hard = (v / 45.0) as f32;
             match at {
                 1 | 2 => {
