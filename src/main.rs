@@ -13,6 +13,10 @@ mod destruct;
 mod fetch;
 mod fluid;
 mod geo;
+mod i18n;
+mod live;
+mod livewx;
+mod settings;
 mod gauges;
 mod gmaps;
 mod tiles3d;
@@ -68,6 +72,7 @@ enum PauseAct {
 use crash::Crash;
 use damage::Tear;
 use glam::{DMat4, DQuat, DVec2, DVec3, Mat4, Vec2, Vec3};
+use i18n::{t, tr};
 use padui::Hint;
 use plane::{Controls, Plane};
 use render::{DrawObj, Frame, Globals, PSim, Renderer};
@@ -98,15 +103,28 @@ const INTEGRATED_SCALE: f32 = 0.75;
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
     match d {
-        gmaps::Detail::Low => "Low: softer buildings, 4 km around the aircraft. About 45 MB a minute over a city (a 6 Mbit/s connection keeps up), 250 MB of GPU memory.",
-        gmaps::Detail::Medium => "Medium: 6 km around the aircraft. About 75 MB a minute over a city (10 Mbit/s), 400 MB of GPU memory.",
-        gmaps::Detail::High => "High (default): 9 km around the aircraft. About 90 MB a minute over a city (12 Mbit/s), 640 MB of GPU memory.",
-        gmaps::Detail::Ultra => "Ultra: sharpest close up, 9 km around the aircraft. About 240 MB a minute over a city (32 Mbit/s), 1 GB of GPU memory.",
+        gmaps::Detail::Low => t!("Low: softer buildings, 4 km around the aircraft. About 45 MB a minute over a city (a 6 Mbit/s connection keeps up), 250 MB of GPU memory.", "Faible : bâtiments plus flous, 4 km autour de l'avion. Environ 45 Mo par minute au-dessus d'une ville (une connexion à 6 Mbit/s suffit), 250 Mo de mémoire GPU."),
+        gmaps::Detail::Medium => t!("Medium: 6 km around the aircraft. About 75 MB a minute over a city (10 Mbit/s), 400 MB of GPU memory.", "Moyen : 6 km autour de l'avion. Environ 75 Mo par minute au-dessus d'une ville (10 Mbit/s), 400 Mo de mémoire GPU."),
+        gmaps::Detail::High => t!("High (default): 9 km around the aircraft. About 90 MB a minute over a city (12 Mbit/s), 640 MB of GPU memory.", "Élevé (par défaut) : 9 km autour de l'avion. Environ 90 Mo par minute au-dessus d'une ville (12 Mbit/s), 640 Mo de mémoire GPU."),
+        gmaps::Detail::Ultra => t!("Ultra: sharpest close up, 9 km around the aircraft. About 240 MB a minute over a city (32 Mbit/s), 1 GB of GPU memory.", "Ultra : le plus net de près, 9 km autour de l'avion. Environ 240 Mo par minute au-dessus d'une ville (32 Mbit/s), 1 Go de mémoire GPU."),
     }
 }
 
-const ATTRIBUTION: &str = "Imagery © Esri, Maxar, Earthstar Geographics";
-const ATTRIBUTION_REST: &str = "Elevation: Mapzen / AWS Terrain Tiles  ·  Buildings, roads, land cover & water © OpenStreetMap contributors, OpenFreeMap";
+fn attribution_default() -> &'static str {
+    t!("Imagery © Esri, Maxar, Earthstar Geographics", "Imagerie © Esri, Maxar, Earthstar Geographics")
+}
+fn attribution_rest() -> &'static str {
+    t!(
+        "Elevation: Mapzen / AWS Terrain Tiles  ·  Buildings, roads, land cover & water © OpenStreetMap contributors, OpenFreeMap",
+        "Relief : Mapzen / AWS Terrain Tiles  ·  Bâtiments, routes, occupation du sol et eau © contributeurs OpenStreetMap, OpenFreeMap"
+    )
+}
+
+/// Data sizes ("12.3 MB"), with the French units ("12.3 Mo") in French.
+fn bytes(n: u64) -> String {
+    let s = gmaps::bytes(n);
+    if i18n::is_fr() { s.replace(" GB", " Go").replace(" MB", " Mo").replace(" KB", " Ko").replace(" B", " o") } else { s }
+}
 
 /// An aircraft's model and its meshes on the GPU.
 struct Loaded {
@@ -210,6 +228,8 @@ struct Args {
     /// cockpit vertical field of view (deg)
     fov: Option<f32>,
     mute: bool,
+    /// interface language (else the saved one, else the system's)
+    lang: Option<i18n::Lang>,
     /// start on the globe menu (default unless a place or scripted run is given)
     menu: Option<bool>,
     menu_view: Option<(f64, f64, f64)>,
@@ -267,6 +287,7 @@ fn parse_args() -> Args {
         cockpit: false,
         fov: None,
         mute: false,
+        lang: None,
         menu: None,
         menu_view: None,
         menu_go: None,
@@ -432,6 +453,12 @@ fn parse_args() -> Args {
                 a.mute = true;
                 used = 1;
             }
+            "--lang" => {
+                a.lang = Some(v.get(i + 1).and_then(|s| i18n::Lang::parse(s)).unwrap_or_else(|| {
+                    eprintln!("--lang takes en or fr");
+                    std::process::exit(2)
+                }));
+            }
             "--offline" => {
                 a.offline = true;
                 used = 1;
@@ -454,7 +481,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--mute] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("fablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--weather] [--pause-menu flight|places|weather|game|settings|controls[@SECONDS]] [--airport CODE [--runway 28L] [--approach]] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -474,7 +501,7 @@ fn url_encode(s: &str) -> String {
 
 /// Look a place name up with OpenStreetMap's Nominatim. Returns lat, lon (degrees) and a label.
 fn geocode(f: &fetch::Fetcher, q: &str) -> Option<(f64, f64, String)> {
-    let url = format!("https://nominatim.openstreetmap.org/search?format=json&limit=1&q={}", url_encode(q));
+    let url = format!("https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language={}&q={}", i18n::lang().code(), url_encode(q));
     let j: serde_json::Value = serde_json::from_slice(&f.get(&url).ok()?).ok()?;
     let r = j.get(0)?;
     Some((r["lat"].as_str()?.parse().ok()?, r["lon"].as_str()?.parse().ok()?, r["display_name"].as_str().unwrap_or(q).to_string()))
@@ -660,12 +687,24 @@ struct Game {
     airport_rx: Option<std::sync::mpsc::Receiver<(u32, Option<Arc<airports::Geo>>, Option<String>, bool, bool)>>,
     /// an airport start asked for on the command line
     pending_airport: Option<(u32, Option<String>, bool)>,
+    /// the settings as last saved, the language picked in the game (None: the
+    /// system's), and when they were last compared with the live ones
+    prefs: settings::Settings,
+    prefs_lang: Option<i18n::Lang>,
+    prefs_t: f64,
+    /// real air traffic around the player, and the last frame's camera
+    /// (view-projection, position) to put labels on it
+    live: live::Live,
+    live_view: Option<(Mat4, DVec3)>,
+    /// real weather (sets `wx` while `wx.live` is on)
+    livewx: livewx::LiveWx,
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
 }
 
 impl Game {
     fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
+        let prefs = settings::Settings::load();
         let r = pollster::block_on(Renderer::new(window.clone(), args.vsync))?;
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         let mut r = r;
@@ -691,7 +730,7 @@ impl Game {
                     (lat, lon) = (la, lo);
                     status = name;
                 }
-                None => status = format!("Could not find \"{p}\""),
+                None => status = t!("Could not find \"{}\"", "Introuvable : « {} »", p),
             }
         }
         let alt = args.alt.unwrap_or_else(|| ground_elev(&src, lat, lon) + args.agl.unwrap_or(450.0));
@@ -737,6 +776,11 @@ impl Game {
             wx.haze = h.clamp(0.2, 40.0);
         }
         wx.open = args.weather_panel;
+        // Real weather, unless the command line sets the weather itself.
+        let scripted = std::env::args().any(|a| matches!(a.as_str(), "--clouds" | "--storms" | "--alto" | "--wind" | "--haze"));
+        wx.live = prefs.live_weather && !scripted;
+        let set_time = std::env::args().any(|a| matches!(a.as_str(), "--time" | "--day" | "--time-rate"));
+        wx.real_time = prefs.real_time && !set_time;
         // The spawn speed is through the air: start out moving with the wind,
         // or a headwind starts it off fast (and climbing it away).
         plane.wind = wx.steady(plane.pos, 300.0);
@@ -754,17 +798,23 @@ impl Game {
         let (cy, cp, cd) = args.cam.unwrap_or((0.0, 0.2, spec.cam_dist));
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len()], window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
-            cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { 0 }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa, prev_plane: Mat4::IDENTITY, plane_box,
-            frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
+            cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
+            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], taa: args.taa && prefs.taa, prev_plane: Mat4::IDENTITY, plane_box,
+            frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
-            record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: true, volume: 1.0, info_open: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, look_sens: 1.0, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(cockpit::FOV).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
+            record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, info_open: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
             start_rx: None, name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, gauges: gauges::Gauges::new(&plane, secs.to_bits()), plane,
             airport_rx: None, hold_spot: None,
+            prefs_lang: args.lang.or(prefs.lang),
+            prefs_t: 0.0,
+            live: live::Live::new(prefs.live_traffic),
+            live_view: None,
+            livewx: livewx::LiveWx::new(),
+            prefs: prefs.clone(),
             pending_airport: args.airport.as_deref().and_then(|c| {
                 let i = airports::Db::get().find(c);
                 if i.is_none() {
@@ -966,7 +1016,7 @@ impl Game {
     /// in use, or on a final approach to it.
     fn start_airport(&mut self, idx: u32, runway: Option<String>, approach: bool, keep_local: bool) {
         let a = &airports::Db::get().apts[idx as usize];
-        self.status = format!("Preparing {} {}…", a.code(), a.name);
+        self.status = t!("Preparing {} {}…", "Préparation de {} {}…", a.code(), a.name);
         self.status_until = self.real + 60.0;
         let (tx, rx) = std::sync::mpsc::channel();
         let src = self.src.clone();
@@ -988,7 +1038,7 @@ impl Game {
         let Some(g) = g.filter(|g| !g.runways.is_empty()) else {
             // Nothing on the map to land on: overhead instead.
             self.respawn(a.lat.to_radians(), a.lon.to_radians(), a.elev as f64 + 450.0, self.heading);
-            self.status = format!("{} {} (no runway layout on the map)", a.code(), a.name);
+            self.status = t!("{} {} (no runway layout on the map)", "{} {} (pas de plan des pistes sur la carte)", a.code(), a.name);
             return;
         };
         let want = runway.as_deref().map(airports::norm_ident);
@@ -1007,14 +1057,14 @@ impl Game {
             let (v, notch) = self.spec.approach;
             self.respawn_at(lat, lon, alt, heading, v);
             self.plane.configure(notch, true, v * 3f64.to_radians().sin());
-            self.status = format!("{} {} · final approach runway {} · {:.1} nm", a.code(), a.name, r.ident[e], d / 1852.0);
+            self.status = t!("{} {} · final approach runway {} · {:.1} nm", "{} {} · approche finale piste {} · {:.1} NM", a.code(), a.name, r.ident[e], d / 1852.0);
         } else {
             let start = if e == 0 { r.a } else { r.b } + dir * 25.0;
             let (lat, lon) = g.lla(start);
             // On a sloping runway it stands nose up (or down) with the slope.
             let pitch = ((g.h(start + dir * 3.0) - g.h(start - dir * 3.0)) / 6.0).atan() as f64;
             self.respawn_ground(lat, lon, g.h(start) as f64, heading, pitch);
-            self.status = format!("{} {} · runway {} · {:.0} m × {:.0} m", a.code(), a.name, r.ident[e], r.len, r.width);
+            self.status = t!("{} {} · runway {} · {:.0} m × {:.0} m", "{} {} · piste {} · {:.0} m × {:.0} m", a.code(), a.name, r.ident[e], r.len, r.width);
         }
     }
 
@@ -1262,7 +1312,7 @@ impl Game {
             }
             (_, Button::East) if modifier => {
                 self.parking_brake = !self.parking_brake;
-                self.status = if self.parking_brake { "Parking brake set" } else { "Parking brake released" }.into();
+                self.status = if self.parking_brake { t!("Parking brake set", "Frein de parc serré") } else { t!("Parking brake released", "Frein de parc desserré") }.into();
                 self.status_until = self.real + 2.0;
             }
             (_, Button::DPadUp | Button::DPadDown | Button::DPadLeft | Button::DPadRight) if !modifier => {
@@ -1359,8 +1409,11 @@ impl Game {
                 self.goto_open = true;
                 self.goto_text.clear();
             }
-            KeyCode::KeyT => self.utc = (self.utc + 0.5).rem_euclid(24.0),
-            KeyCode::KeyY => self.utc = (self.utc - 0.5).rem_euclid(24.0),
+            KeyCode::KeyT | KeyCode::KeyY => {
+                // Setting the time by hand leaves real time.
+                self.wx.real_time = false;
+                self.utc = (self.utc + if code == KeyCode::KeyT { 0.5 } else { -0.5 }).rem_euclid(24.0);
+            }
             KeyCode::KeyN => self.wx.clouds = (self.wx.clouds + 0.1).min(1.0),
             KeyCode::KeyM => self.wx.clouds = (self.wx.clouds - 0.1).max(0.0),
             KeyCode::F3 => self.wx.open = !self.wx.open,
@@ -1368,12 +1421,12 @@ impl Game {
             KeyCode::KeyH => self.show_hud = !self.show_hud,
             KeyCode::KeyK if !self.crashed => {
                 self.gauges.sync_dg(&self.plane);
-                self.status = "Heading indicator set to the compass".into();
+                self.status = t!("Heading indicator set to the compass", "Conservateur de cap recalé sur le compas").into();
                 self.status_until = self.real + 2.0;
             }
             KeyCode::KeyU => {
                 self.sound_on = !self.sound_on;
-                self.status = if self.sound_on { "Sound on" } else { "Sound off" }.into();
+                self.status = if self.sound_on { t!("Sound on", "Son activé") } else { t!("Sound off", "Son coupé") }.into();
                 self.status_until = self.real + 2.0;
             }
             KeyCode::F1 => self.show_help = !self.show_help,
@@ -1426,7 +1479,7 @@ impl Game {
     /// Fly from a known spot: its ground height is looked up in the background,
     /// then the aircraft appears above it (see `goto_rx`).
     fn fly_to(&mut self, lat: f64, lon: f64, name: &str) {
-        self.status = format!("Flying to {name}…");
+        self.status = t!("Flying to {}…", "En route vers {}…", i18n::tr_owned(name));
         self.status_until = self.real + 30.0;
         let (tx, rx) = std::sync::mpsc::channel();
         let src = self.src.clone();
@@ -1488,14 +1541,14 @@ impl Game {
         self.menu.airport = None;
         self.menu.runway = None;
         self.menu.pick_name = match menu::Menu::near_city(lat, lon) {
-            Some((name, d)) if d < 40_000.0 => name.to_string(),
-            Some((name, d)) if d < 400_000.0 => format!("{:.0} km from {name}", d / 1000.0),
+            Some((name, d)) if d < 40_000.0 => tr(name).to_string(),
+            Some((name, d)) if d < 400_000.0 => t!("{:.0} km from {}", "À {:.0} km de {}", d / 1000.0, tr(name)),
             _ => String::new(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let src = self.src.clone();
         std::thread::spawn(move || {
-            let url = format!("https://nominatim.openstreetmap.org/reverse?format=json&zoom=12&lat={lat:.5}&lon={lon:.5}");
+            let url = format!("https://nominatim.openstreetmap.org/reverse?format=json&zoom=12&accept-language={}&lat={lat:.5}&lon={lon:.5}", i18n::lang().code());
             let name = src.fetch.get(&url).ok().and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok()).and_then(|j| j["display_name"].as_str().map(String::from));
             if let Some(n) = name {
                 let _ = tx.send(n);
@@ -1777,7 +1830,39 @@ impl Game {
         }
     }
 
+    /// The settings worth keeping, as they are now.
+    fn live_settings(&self) -> settings::Settings {
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time }
+    }
+
+    /// Saves the settings when they have changed (looked at once a second,
+    /// so dragging a slider does not write the file every frame).
+    fn keep_settings(&mut self, now: bool) {
+        if !now && self.real - self.prefs_t < 1.0 {
+            return;
+        }
+        self.prefs_t = self.real;
+        let s = self.live_settings();
+        if s != self.prefs {
+            s.save();
+            self.prefs = s;
+        }
+    }
+
+    /// English / Français, as selectable buttons.
+    fn language_picker(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for l in i18n::Lang::ALL {
+                if ui.selectable_label(i18n::lang() == l, l.name()).clicked() {
+                    i18n::set_lang(l);
+                    self.prefs_lang = Some(l);
+                }
+            }
+        });
+    }
+
     fn frame(&mut self) {
+        self.keep_settings(false);
         let now = Instant::now();
         let mut dt_real = (now - self.last).as_secs_f64().min(0.05);
         if self.fps_log.0 {
@@ -1821,8 +1906,8 @@ impl Game {
                         self.status = name;
                     }
                     None => {
-                        self.status = "Place not found".into();
-                        self.menu.pick_name = "Place not found".into();
+                        self.status = t!("Place not found", "Lieu introuvable").into();
+                        self.menu.pick_name = t!("Place not found", "Lieu introuvable").into();
                     }
                 }
                 self.status_until = self.real + 8.0;
@@ -1895,6 +1980,10 @@ impl Game {
             let t = self.utc + dt * self.wx.time_rate / 3600.0;
             self.doy = (self.doy + (t / 24.0).floor()).rem_euclid(365.0);
             self.utc = t.rem_euclid(24.0);
+            if self.wx.real_time {
+                (self.utc, self.doy) = weather::real_clock();
+                self.wx.time_rate = 1.0;
+            }
             // The air the aircraft flies through, gusts and all.
             let (la, lo, h) = geo::pos_to_lla(self.plane.pos);
             let g = self.world.ground(la, lo);
@@ -2192,6 +2281,13 @@ impl Game {
             (cam, dir, upv) = self.menu.camera();
             // Keep the side of the planet you are looking at in daylight.
             self.utc = (12.6 - self.menu.lon / 15.0).rem_euclid(24.0);
+            // Real time: the start time is the time now at the chosen spot.
+            if self.wx.real_time {
+                let (utc, doy) = weather::real_clock();
+                let lon = self.menu.pick.map(|p| p.1).unwrap_or(self.menu.lon);
+                self.menu.hour = (utc + lon / 15.0).rem_euclid(24.0);
+                self.doy = doy;
+            }
             self.cam_pos = cam;
         } else if self.crashed {
             let cr = self.crash.as_ref().unwrap();
@@ -2621,6 +2717,18 @@ impl Game {
             self.world.airport_instances(cam, self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32, self.time, &mut insts, &mut air_lights);
             self.world.photo_beacons(cam, &mut air_lights);
         }
+        self.live.step(&self.src, (!in_menu).then_some(self.plane.pos));
+        let wx_at = if in_menu {
+            self.menu.pick
+        } else {
+            let (la, lo, _) = geo::pos_to_lla(self.plane.pos);
+            Some((la.to_degrees(), lo.to_degrees()))
+        };
+        self.livewx.step(&self.src, &mut self.wx, wx_at, if in_menu { 0.0 } else { dt_real });
+        if !in_menu {
+            self.live.instances(cam, &mut insts, &mut air_lights);
+        }
+        self.live_view = Some((vp, cam));
 
         // The globe's labels are placed in the window's pixels, not the (maybe smaller) 3D scene's.
         let (ww, wh) = (self.r.config.width as f32, self.r.config.height as f32);
@@ -2740,7 +2848,7 @@ impl Game {
                     }
                     if let Some(p) = project(*lat, *lon) {
                         painter.circle_filled(p, 2.5, Color32::from_rgba_unmultiplied(255, 255, 255, 220));
-                        label(p + egui::vec2(7.0, 0.0), name, if *tier == 1 { 14.0 } else { 12.5 }, Color32::from_rgba_unmultiplied(255, 255, 255, 225));
+                        label(p + egui::vec2(7.0, 0.0), tr(name), if *tier == 1 { 14.0 } else { 12.5 }, Color32::from_rgba_unmultiplied(255, 255, 255, 225));
                     }
                 }
             }
@@ -2775,7 +2883,7 @@ impl Game {
                     let pulse = 11.0 + 3.0 * (self.real * 3.0).sin() as f32;
                     painter.circle_stroke(p, pulse, egui::Stroke::new(2.0, accent));
                     painter.circle_filled(p, 3.5, accent);
-                    label(p + egui::vec2(18.0, 0.0), "Start here", 15.0, accent);
+                    label(p + egui::vec2(18.0, 0.0), t!("Start here", "Départ ici"), 15.0, accent);
                 }
             }
             if let Some(c) = aim {
@@ -2816,7 +2924,7 @@ impl Game {
                         }
                         let name_w = ui.available_width() - 34.0 - ui.spacing().item_spacing.x;
                         ui.allocate_ui_with_layout(egui::vec2(name_w, 34.0), egui::Layout::top_down(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("AIRCRAFT").size(10.5).strong().color(DIM).extra_letter_spacing(1.5));
+                            ui.label(RichText::new(t!("AIRCRAFT", "AVION")).size(10.5).strong().color(DIM).extra_letter_spacing(1.5));
                             ui.label(RichText::new(spec.name).size(18.0).strong().color(Color32::WHITE));
                         });
                         if arrow(ui, 0.0).clicked() {
@@ -2835,7 +2943,7 @@ impl Game {
                 egui::Image::new(&*tex).paint_at(ui, pic);
                 egui::Frame::new().fill(menu::PANEL).corner_radius(bottom).inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 12 }).show(ui, |ui| {
                     ui.set_width(W - 32.0);
-                    ui.label(RichText::new(spec.blurb).size(12.0).color(DIM));
+                    ui.label(RichText::new(tr(spec.blurb)).size(12.0).color(DIM));
                 });
             });
             let r = air.response.rect;
@@ -2850,15 +2958,15 @@ impl Game {
                 ui.set_max_height(screen.bottom() - M - top);
                 menu::panel().inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
                     ui.set_width(W - 32.0);
-                    menu::window_title(ui, "START LOCATION");
+                    menu::window_title(ui, t!("START LOCATION", "LIEU DE DÉPART"));
                     egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let summary = if self.menu.search.trim().is_empty() { String::new() } else { self.menu.search.chars().take(18).collect() };
-                        menu::section(ui, "search", "Search", &summary, true, |ui| {
+                        menu::section(ui, "search", t!("Search", "Recherche"), &summary, true, |ui| {
                             ui.horizontal(|ui| {
-                                let resp = ui.add(egui::TextEdit::singleline(&mut self.menu.search).desired_width(ui.available_width() - 56.0).hint_text("City, address, or airport (SFO, EGLL)").margin(egui::vec2(8.0, 6.0)));
+                                let resp = ui.add(egui::TextEdit::singleline(&mut self.menu.search).desired_width(ui.available_width() - 56.0).hint_text(t!("City, address, or airport (SFO, EGLL)", "Ville, adresse ou aéroport (SFO, EGLL)")).margin(egui::vec2(8.0, 6.0)));
                                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if (ui.add(egui::Button::new(RichText::new("Go").size(14.0)).min_size(egui::vec2(48.0, 28.0))).clicked() || enter) && !self.menu.search.trim().is_empty() {
+                                if (ui.add(egui::Button::new(RichText::new(t!("Go", "Aller")).size(14.0)).min_size(egui::vec2(48.0, 28.0))).clicked() || enter) && !self.menu.search.trim().is_empty() {
                                     go = Some(self.menu.search.trim().to_string());
                                 }
                             });
@@ -2878,16 +2986,16 @@ impl Game {
                                 });
                             }
                             ui.add_space(2.0);
-                            let tip = if padui::active() { "Or turn the globe (left stick, triggers to zoom) and press X at the crosshair." } else { "Or drag the globe, scroll to zoom, and click where you want to start." };
+                            let tip = if padui::active() { t!("Or turn the globe (left stick, triggers to zoom) and press X at the crosshair.", "Ou tournez le globe (stick gauche, gâchettes pour zoomer) et appuyez sur X au viseur.") } else { t!("Or drag the globe, scroll to zoom, and click where you want to start.", "Ou faites glisser le globe, zoomez à la molette et cliquez là où vous voulez partir.") };
                             ui.label(RichText::new(tip).size(11.5).color(DIM));
                         });
-                        let place = menu::QUICK.iter().find(|q| self.menu.pick == Some((q.1, q.2))).map(|q| q.0).unwrap_or("");
-                        menu::section(ui, "places", "Places", place, false, |ui| {
+                        let place = menu::QUICK.iter().find(|q| self.menu.pick == Some((q.1, q.2))).map(|q| tr(q.0)).unwrap_or("");
+                        menu::section(ui, "places", t!("Places", "Lieux"), place, false, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
                                 for (name, lat, lon) in menu::QUICK {
                                     let sel = self.menu.pick == Some((*lat, *lon));
-                                    if ui.add(egui::Button::new(RichText::new(*name).size(12.5)).selected(sel)).clicked() {
+                                    if ui.add(egui::Button::new(RichText::new(tr(name)).size(12.5)).selected(sel)).clicked() {
                                         jump = Some((*lat, *lon, name));
                                     }
                                 }
@@ -2895,47 +3003,47 @@ impl Game {
                         });
                         let db = airports::Db::get();
                         let apt = self.menu.airport.map(|i| db.apts[i as usize].ident.clone()).unwrap_or_default();
-                        menu::section(ui, "airports", "Airports", &apt, false, |ui| {
+                        menu::section(ui, "airports", t!("Airports", "Aéroports"), &apt, false, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
                                 for (code, name) in menu::AIRPORTS {
                                     if let Some(i) = db.find(code) {
-                                        if ui.add(egui::Button::new(RichText::new(*code).size(12.5)).selected(self.menu.airport == Some(i))).on_hover_text(*name).clicked() {
+                                        if ui.add(egui::Button::new(RichText::new(*code).size(12.5)).selected(self.menu.airport == Some(i))).on_hover_text(tr(name)).clicked() {
                                             airport = Some(i);
                                         }
                                     }
                                 }
                             });
-                            ui.label(RichText::new(if padui::active() { "Or put an airport square on the globe in the crosshair and press X." } else { "Or click an airport square on the globe; double-click to go right away." }).size(11.5).color(DIM));
+                            ui.label(RichText::new(if padui::active() { t!("Or put an airport square on the globe in the crosshair and press X.", "Ou placez un carré d'aéroport du globe dans le viseur et appuyez sur X.") } else { t!("Or click an airport square on the globe; double-click to go right away.", "Ou cliquez sur un carré d'aéroport du globe ; double-clic pour y aller directement.") }).size(11.5).color(DIM));
                         });
                         ui.add_space(6.0);
-                        menu::heading(ui, "START POINT");
+                        menu::heading(ui, t!("START POINT", "POINT DE DÉPART"));
                         egui::Frame::new().fill(Color32::from_white_alpha(8)).corner_radius(8.0).inner_margin(10.0).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             match self.menu.pick {
                                 Some((lat, lon)) => {
-                                    let name = if self.menu.pick_name.is_empty() { "Unnamed spot".to_string() } else { self.menu.pick_name.chars().take(90).collect() };
+                                    let name = if self.menu.pick_name.is_empty() { t!("Unnamed spot", "Lieu sans nom").to_string() } else { self.menu.pick_name.chars().take(90).collect() };
                                     ui.label(RichText::new(name).size(14.0).color(Color32::WHITE));
-                                    ui.label(RichText::new(format!("{}   ·   {} local", menu::latlon(lat, lon), menu::hhmm(self.menu.hour))).size(12.0).color(DIM));
+                                    ui.label(RichText::new(t!("{}   ·   {} local", "{}   ·   {} heure locale", menu::latlon(lat, lon), menu::hhmm(self.menu.hour))).size(12.0).color(DIM));
                                     ui.add_space(4.0);
                                     match self.menu.airport {
                                         Some(i) => {
                                             let a = &db.apts[i as usize];
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                                                ui.selectable_value(&mut self.menu.start, menu::Start::Runway, "On the runway");
-                                                ui.selectable_value(&mut self.menu.start, menu::Start::Approach, "Final approach");
-                                                ui.selectable_value(&mut self.menu.start, menu::Start::Overhead, "In the air above");
+                                                ui.selectable_value(&mut self.menu.start, menu::Start::Runway, t!("On the runway", "Sur la piste"));
+                                                ui.selectable_value(&mut self.menu.start, menu::Start::Approach, t!("Final approach", "Approche finale"));
+                                                ui.selectable_value(&mut self.menu.start, menu::Start::Overhead, t!("In the air above", "En vol au-dessus"));
                                             });
                                             if self.menu.start != menu::Start::Overhead && !a.rwys.is_empty() {
                                                 ui.horizontal_wrapped(|ui| {
                                                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                                                    ui.label(RichText::new("Runway").size(12.5).color(TEXT));
-                                                    ui.selectable_value(&mut self.menu.runway, None, RichText::new("into the wind").size(12.0));
+                                                    ui.label(RichText::new(t!("Runway", "Piste")).size(12.5).color(TEXT));
+                                                    ui.selectable_value(&mut self.menu.runway, None, RichText::new(t!("into the wind", "face au vent")).size(12.0));
                                                     for r in &a.rwys {
                                                         for id in &r.ident {
                                                             if !id.is_empty() {
-                                                                ui.selectable_value(&mut self.menu.runway, Some(id.clone()), RichText::new(id).size(12.0).monospace()).on_hover_text(format!("{:.0} m × {:.0} m{}", r.len, r.width, if r.paved { "" } else { ", unpaved" }));
+                                                                ui.selectable_value(&mut self.menu.runway, Some(id.clone()), RichText::new(id).size(12.0).monospace()).on_hover_text(format!("{:.0} m × {:.0} m{}", r.len, r.width, if r.paved { "" } else { t!(", unpaved", ", non revêtue") }));
                                                             }
                                                         }
                                                     }
@@ -2948,8 +3056,8 @@ impl Game {
                                             if let Some((i, d)) = near {
                                                 let a = &db.apts[i as usize];
                                                 ui.horizontal(|ui| {
-                                                    ui.label(RichText::new(format!("Nearest airport {} · {:.0} km", a.ident, d / 1000.0)).size(12.0).color(DIM));
-                                                    if ui.button(RichText::new("Start there").size(12.0)).clicked() {
+                                                    ui.label(RichText::new(t!("Nearest airport {} · {:.0} km", "Aéroport le plus proche : {} · {:.0} km", a.ident, d / 1000.0)).size(12.0).color(DIM));
+                                                    if ui.button(RichText::new(t!("Start there", "Partir de là")).size(12.0)).clicked() {
                                                         airport = Some(i);
                                                     }
                                                 });
@@ -2958,14 +3066,14 @@ impl Game {
                                     }
                                 }
                                 None => {
-                                    ui.label(RichText::new("Pick a place, or click the globe.").size(13.5).color(DIM));
+                                    ui.label(RichText::new(t!("Pick a place, or click the globe.", "Choisissez un lieu, ou cliquez sur le globe.")).size(13.5).color(DIM));
                                 }
                             }
                         });
                         padui::follow_focus(ui);
                     });
                     ui.add_space(10.0);
-                    let text = if self.menu.starting { "Preparing…" } else { "TAKE OFF" };
+                    let text = if self.menu.starting { t!("Preparing…", "Préparation…") } else { t!("TAKE OFF", "DÉCOLLER") };
                     let ready = self.menu.pick.is_some() && !self.menu.starting;
                     let take_off = menu::wide_button(ui, text, if ready { Hint::of("Enter", "Menu") } else { Hint::None }, true, ready);
                     if take_off.clicked() {
@@ -2977,12 +3085,12 @@ impl Game {
                     ui.add_space(6.0);
                     let mut home = None;
                     ui.columns(2, |c| {
-                        let b = menu::wide_button(&mut c[0], "Settings", Hint::of("", "View"), false, true);
+                        let b = menu::wide_button(&mut c[0], t!("Settings", "Réglages"), Hint::of("", "View"), false, true);
                         if b.clicked() {
                             self.menu.show_controls = !self.menu.show_controls;
                         }
                         home = Some(b);
-                        if menu::wide_button(&mut c[1], "Quit", Hint::of("Esc", ""), false, true).clicked() {
+                        if menu::wide_button(&mut c[1], t!("Quit", "Quitter"), Hint::of("Esc", ""), false, true).clicked() {
                             self.quit = true;
                         }
                     });
@@ -3000,22 +3108,25 @@ impl Game {
                     menu::panel().show(ui, |ui| {
                         ui.set_width(720.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Settings").size(22.0).strong().color(Color32::WHITE));
+                            ui.label(RichText::new(t!("Settings", "Réglages")).size(22.0).strong().color(Color32::WHITE));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(egui::Button::new(RichText::new("Close").size(13.0)).min_size(egui::vec2(64.0, 28.0))).clicked() {
+                                if ui.add(egui::Button::new(RichText::new(t!("Close", "Fermer")).size(13.0)).min_size(egui::vec2(64.0, 28.0))).clicked() {
                                     self.menu.show_controls = false;
                                 }
                             });
                         });
                         ui.add_space(6.0);
                         egui::ScrollArea::vertical().max_height(screen.height() - 220.0).min_scrolled_height(screen.height() - 220.0).show(ui, |ui| {
-                            let on = if self.src.google.enabled() { "Google" } else { "Default" };
-                            menu::section(ui, "imagery", "Map imagery", on, false, |ui| {
+                            menu::section(ui, "language", t!("Language", "Langue"), i18n::lang().name(), true, |ui| {
+                                self.language_picker(ui);
+                            });
+                            let on = if self.src.google.enabled() { "Google" } else { t!("Default", "Par défaut") };
+                            menu::section(ui, "imagery", t!("Map imagery", "Imagerie cartographique"), on, false, |ui| {
                                 ui.spacing_mut().slider_width = 130.0;
                                 self.google_settings(ui);
                             });
-                            menu::section(ui, "controls", "Controls", if padui::active() { "Gamepad" } else { "Keyboard" }, true, |ui| {
-                                let t = if padui::active() { "In flight, Y + View shows the flight panel (instruments, places, weather) and Menu pauses: settings, the globe, this list." } else { "In flight, Tab shows the flight panel (instruments, places, weather) and Esc pauses: settings, the globe, this list." };
+                            menu::section(ui, "controls", t!("Controls", "Commandes"), if padui::active() { t!("Gamepad", "Manette") } else { t!("Keyboard", "Clavier") }, true, |ui| {
+                                let t = if padui::active() { t!("In flight, Y + View shows the flight panel (instruments, places, weather) and Menu pauses: settings, the globe, this list.", "En vol, Y + View affiche le panneau de vol (instruments, destinations, météo) et Menu met en pause : réglages, globe, cette liste.") } else { t!("In flight, Tab shows the flight panel (instruments, places, weather) and Esc pauses: settings, the globe, this list.", "En vol, Tab affiche le panneau de vol (instruments, destinations, météo) et Échap met en pause : réglages, globe, cette liste.") };
                                 ui.label(RichText::new(t).size(12.5).color(DIM));
                                 ui.add_space(6.0);
                                 menu::controls_list(ui);
@@ -3039,28 +3150,28 @@ impl Game {
                         ui.spacing_mut().slider_width = 116.0;
                         let ground = self.menu.airport.is_some() && self.menu.start != menu::Start::Overhead;
                         let flight = if ground {
-                            (if self.menu.start == menu::Start::Runway { "On the runway" } else { "Final approach" }).to_string()
+                            (if self.menu.start == menu::Start::Runway { t!("On the runway", "Sur la piste") } else { t!("Final approach", "Approche finale") }).to_string()
                         } else {
                             format!("{:.0} ft · {:03.0}°", (self.menu.start_agl * 3.28084 / 50.0).round() * 50.0, self.heading.to_degrees().rem_euclid(360.0))
                         };
-                        menu::section(ui, "flight", "Flight", &flight, false, |ui| {
+                        menu::section(ui, "flight", t!("Flight", "Vol"), &flight, false, |ui| {
                             if ground {
-                                ui.label(RichText::new(if self.menu.start == menu::Start::Runway { "Starting on the runway, ready for take-off." } else { "Starting on a 3° final approach, gear and flaps down." }).size(12.0).color(DIM));
+                                ui.label(RichText::new(if self.menu.start == menu::Start::Runway { t!("Starting on the runway, ready for take-off.", "Départ sur la piste, prêt au décollage.") } else { t!("Starting on a 3° final approach, gear and flaps down.", "Départ en approche finale à 3°, train et volets sortis.") }).size(12.0).color(DIM));
                             } else {
-                                ui.label(RichText::new("Starting in the air:").size(12.0).color(DIM));
+                                ui.label(RichText::new(t!("Starting in the air:", "Départ en vol :")).size(12.0).color(DIM));
                             }
                             ui.add_enabled_ui(!ground, |ui| {
                                 egui::Grid::new("start_air").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
-                                    ui.label("Height");
+                                    ui.label(t!("Height", "Hauteur"));
                                     let mut ft = self.menu.start_agl * 3.28084;
                                     if ui.add(egui::Slider::new(&mut ft, 100.0..=15000.0).logarithmic(true).step_by(50.0).suffix(" ft").custom_formatter(|v, _| format!("{:.0}", (v / 50.0).round() * 50.0))).changed() {
                                         self.menu.start_agl = ft / 3.28084;
                                     }
                                     ui.end_row();
                                     ui.label("");
-                                    ui.label(RichText::new("above the ground").size(11.5).weak());
+                                    ui.label(RichText::new(t!("above the ground", "au-dessus du sol")).size(11.5).weak());
                                     ui.end_row();
-                                    ui.label("Heading");
+                                    ui.label(t!("Heading", "Cap"));
                                     let mut hd = self.heading.to_degrees().rem_euclid(360.0);
                                     if ui.add(egui::Slider::new(&mut hd, 0.0..=359.0).step_by(1.0).custom_formatter(|v, _| format!("{v:03.0}°"))).changed() {
                                         self.heading = hd.to_radians();
@@ -3070,12 +3181,12 @@ impl Game {
                             });
                         });
                         let wx = self.wx.summary();
-                        menu::section(ui, "weather", "Weather", &wx, false, |ui| {
+                        menu::section(ui, "weather", t!("Weather", "Météo"), &wx, false, |ui| {
                             self.wx.start_weather(ui);
                         });
-                        let when = format!("{} · {}", menu::hhmm(self.menu.hour), weather::month_day(self.doy));
-                        menu::section(ui, "time", "Time", &when, false, |ui| {
-                            weather::Weather::start_time(ui, &mut self.menu.hour, &mut self.doy);
+                        let when = format!("{} · {}", menu::hhmm(self.menu.hour), weather::date_label(self.doy));
+                        menu::section(ui, "time", t!("Time", "Heure"), &when, false, |ui| {
+                            weather::Weather::start_time(ui, &mut self.menu.hour, &mut self.doy, &mut self.wx.real_time);
                         });
                         padui::follow_focus(ui);
                     });
@@ -3091,7 +3202,7 @@ impl Game {
         if let Some((lat, lon, name)) = jump {
             self.menu.look_at(lat, lon, 30_000.0);
             self.menu.pick = Some((lat, lon));
-            self.menu.pick_name = name.to_string();
+            self.menu.pick_name = tr(name).to_string();
             self.menu.airport = None;
             self.menu.runway = None;
         }
@@ -3107,7 +3218,7 @@ impl Game {
             go = None;
         }
         if let Some(q) = go {
-            self.menu.pick_name = format!("Searching for {q}…");
+            self.menu.pick_name = t!("Searching for {}…", "Recherche de {}…", q);
             let (tx, rx) = std::sync::mpsc::channel();
             let src = self.src.clone();
             std::thread::spawn(move || {
@@ -3128,13 +3239,14 @@ impl Game {
         let g = &self.src.google;
         let p = self.world.photo();
         let photo = if p.zone_r > 0.0 && p.stats.0 > 0 { format!("3D: {}  ·  ", if p.credits.is_empty() { "Google" } else { &p.credits }) } else { String::new() };
+        let live = if self.live.enabled() && !self.live.planes.is_empty() { format!("  ·  {}", t!("Traffic: adsb.lol (ODbL)", "Trafic : adsb.lol (ODbL)")) } else { String::new() };
         photo + &if g.enabled() {
             let c = g.attribution.lock();
-            let c = if c.is_empty() { "Imagery © Google".to_string() } else { c.clone() };
-            format!("{c}  ·  {ATTRIBUTION_REST}")
+            let c = if c.is_empty() { t!("Imagery © Google", "Imagerie © Google").to_string() } else { c.clone() };
+            format!("{c}  ·  {}", attribution_rest())
         } else {
-            format!("{ATTRIBUTION}  ·  {ATTRIBUTION_REST}")
-        }
+            format!("{}  ·  {}", attribution_default(), attribution_rest())
+        } + &live
     }
 
     /// The bottom-right credits: Google's logo (its official outlined
@@ -3176,31 +3288,31 @@ impl Game {
         use egui::{Color32, RichText};
         use menu::{DIM, TEXT};
         let g = self.src.google.clone();
-        menu::heading(ui, "MAP IMAGERY");
+        menu::heading(ui, t!("MAP IMAGERY", "IMAGERIE CARTOGRAPHIQUE"));
         let mut on = g.enabled();
         let has_key = !self.gkey.trim().is_empty();
-        if ui.add_enabled(has_key, egui::Checkbox::new(&mut on, "Google Maps satellite imagery")).on_disabled_hover_text("Enter a Google Maps Platform API key first").changed() {
+        if ui.add_enabled(has_key, egui::Checkbox::new(&mut on, t!("Google Maps satellite imagery", "Imagerie satellite Google Maps"))).on_disabled_hover_text(t!("Enter a Google Maps Platform API key first", "Saisissez d'abord une clé API Google Maps Platform")).changed() {
             g.set_key(&self.gkey);
             g.set_enabled(on);
         }
-        ui.label(RichText::new(if on { "Terrain and roofs take Google's tiles (Map Tiles API); what has loaded already is redone. Tiles not yet on disk are billed to your key." } else { "Off: the free default imagery. On: Google's Map Tiles API with your own key, billed per tile request." }).size(11.5).color(DIM));
+        ui.label(RichText::new(if on { t!("Terrain and roofs take Google's tiles (Map Tiles API); what has loaded already is redone. Tiles not yet on disk are billed to your key.", "Le terrain et les toits utilisent les tuiles de Google (Map Tiles API) ; ce qui est déjà chargé est refait. Les tuiles absentes du disque sont facturées sur votre clé.") } else { t!("Off: the free default imagery. On: Google's Map Tiles API with your own key, billed per tile request.", "Désactivé : l'imagerie gratuite par défaut. Activé : la Map Tiles API de Google avec votre propre clé, facturée à la tuile.") }).size(11.5).color(DIM));
         let mut photo = g.photoreal();
-        if ui.add_enabled(has_key, egui::Checkbox::new(&mut photo, "Photorealistic 3D cities (beta)")).on_disabled_hover_text("Enter a Google Maps Platform API key first").changed() {
+        if ui.add_enabled(has_key, egui::Checkbox::new(&mut photo, t!("Photorealistic 3D cities (beta)", "Villes 3D photoréalistes (bêta)"))).on_disabled_hover_text(t!("Enter a Google Maps Platform API key first", "Saisissez d'abord une clé API Google Maps Platform")).changed() {
             g.set_key(&self.gkey);
             g.set_photoreal(photo);
         }
         let detail = g.detail();
         let zone_km = tiles3d::Params::of(detail).zone_r / 1000.0;
-        ui.label(RichText::new(if photo { format!("Google's photogrammetry meshes replace the ground, buildings and trees within about {zone_km:.0} km of the aircraft; at night they light up with our street lamps and windows. Each flight opens one billed 3D session (a root request, good for about 3 hours); the tiles under it are kept on disk only for the 4 hours Google allows.") } else { "Off: our own 3D world everywhere. On: Google's Photorealistic 3D Tiles near the aircraft, one billed session per flight.".to_string() }).size(11.5).color(DIM));
+        ui.label(RichText::new(if photo { t!("Google's photogrammetry meshes replace the ground, buildings and trees within about {zone_km:.0} km of the aircraft; at night they light up with our street lamps and windows. Each flight opens one billed 3D session (a root request, good for about 3 hours); the tiles under it are kept on disk only for the 4 hours Google allows.", "Les maillages photogrammétriques de Google remplacent le sol, les bâtiments et les arbres dans un rayon d'environ {zone_km:.0} km autour de l'avion ; la nuit, nos lampadaires et fenêtres les éclairent. Chaque vol ouvre une session 3D facturée (une requête racine, valable environ 3 heures) ; les tuiles sont gardées sur le disque seulement pendant les 4 heures autorisées par Google.", zone_km = zone_km) } else { t!("Off: our own 3D world everywhere. On: Google's Photorealistic 3D Tiles near the aircraft, one billed session per flight.", "Désactivé : notre propre monde 3D partout. Activé : les Photorealistic 3D Tiles de Google près de l'avion, une session facturée par vol.").to_string() }).size(11.5).color(DIM));
         ui.add_enabled_ui(photo, |ui| {
             ui.horizontal(|ui| {
-                ui.label("3D detail");
+                ui.label(t!("3D detail", "Détail 3D"));
                 let mut d = detail;
                 for c in gmaps::Detail::ALL {
                     let name = match c {
-                        gmaps::Detail::Low => "Low",
-                        gmaps::Detail::Medium => "Medium",
-                        gmaps::Detail::High => "High",
+                        gmaps::Detail::Low => t!("Low", "Faible"),
+                        gmaps::Detail::Medium => t!("Medium", "Moyen"),
+                        gmaps::Detail::High => t!("High", "Élevé"),
                         gmaps::Detail::Ultra => "Ultra",
                     };
                     ui.selectable_value(&mut d, c, name);
@@ -3209,22 +3321,22 @@ impl Game {
                     g.set_detail(d);
                 }
             });
-            ui.label(RichText::new(format!("{} One billed session per flight at every level; the first minute over a city takes up to a third more.", detail_hint(detail))).size(11.5).color(DIM));
+            ui.label(RichText::new(t!("{} One billed session per flight at every level; the first minute over a city takes up to a third more.", "{} Une session facturée par vol à chaque niveau ; la première minute au-dessus d'une ville consomme jusqu'à un tiers de plus.", detail_hint(detail))).size(11.5).color(DIM));
         });
         ui.horizontal(|ui| {
-            ui.label("API key");
-            let r = ui.add(egui::TextEdit::singleline(&mut self.gkey).password(!self.gkey_show).hint_text("Google Maps Platform key").desired_width(ui.available_width() - 52.0));
+            ui.label(t!("API key", "Clé API"));
+            let r = ui.add(egui::TextEdit::singleline(&mut self.gkey).password(!self.gkey_show).hint_text(t!("Google Maps Platform key", "Clé Google Maps Platform")).desired_width(ui.available_width() - 52.0));
             if r.lost_focus() || (r.changed() && self.gkey.trim().is_empty()) {
                 g.set_key(&self.gkey);
             }
-            if ui.small_button(if self.gkey_show { "hide" } else { "show" }).clicked() {
+            if ui.small_button(if self.gkey_show { t!("hide", "masquer") } else { t!("show", "afficher") }).clicked() {
                 self.gkey_show = !self.gkey_show;
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.hyperlink_to(RichText::new("How to get a key").size(12.0), "https://developers.google.com/maps/documentation/tile/get-api-key");
+            ui.hyperlink_to(RichText::new(t!("How to get a key", "Obtenir une clé")).size(12.0), "https://developers.google.com/maps/documentation/tile/get-api-key");
             ui.label(RichText::new("·").size(12.0).color(DIM));
-            ui.hyperlink_to(RichText::new("Cloud console: credentials").size(12.0), "https://console.cloud.google.com/google/maps-apis/credentials");
+            ui.hyperlink_to(RichText::new(t!("Cloud console: credentials", "Console Cloud : identifiants")).size(12.0), "https://console.cloud.google.com/google/maps-apis/credentials");
         });
         let status = g.status.lock().clone();
         if !status.is_empty() {
@@ -3237,21 +3349,23 @@ impl Game {
                 ui.label(RichText::new(v).size(12.0).color(TEXT));
                 ui.end_row();
             };
-            row(ui, "This session", format!("{} request{} · {}", u.session_requests, if u.session_requests == 1 { "" } else { "s" }, gmaps::bytes(u.session_bytes)));
-            row(ui, "   imagery", format!("{} tiles downloaded · {} from disk", u.session_tiles, u.session_cached));
+            let req = |n: u64| i18n::plural(n, "request", "requests", "requête", "requêtes");
+            row(ui, t!("This session", "Cette session"), format!("{} · {}", req(u.session_requests as u64), bytes(u.session_bytes)));
+            row(ui, t!("   imagery", "   imagerie"), t!("{} tiles downloaded · {} from disk", "{} tuiles téléchargées · {} depuis le disque", u.session_tiles, u.session_cached));
             if u.session_roots > 0 || u.total_roots > 0 {
-                row(ui, "   3D", format!("{} session{} (billed) · {} tiles · {} from disk", u.session_roots, if u.session_roots == 1 { "" } else { "s" }, u.session_3d, u.session_3d_cached));
+                let ses = i18n::plural(u.session_roots as u64, "session", "sessions", "session", "sessions");
+                row(ui, "   3D", t!("{} (billed) · {} tiles · {} from disk", "{} (facturées) · {} tuiles · {} depuis le disque", ses, u.session_3d, u.session_3d_cached));
             }
             if u.session_errors > 0 {
-                row(ui, "   failed", format!("{}", u.session_errors));
+                row(ui, t!("   failed", "   échecs"), format!("{}", u.session_errors));
             }
-            row(ui, &format!("Month {}", u.month), format!("{} request{} · {}", u.month_requests, if u.month_requests == 1 { "" } else { "s" }, gmaps::bytes(u.month_bytes)));
-            row(ui, "All time", format!("{} request{} · {}", u.total_requests, if u.total_requests == 1 { "" } else { "s" }, gmaps::bytes(u.total_bytes)));
+            row(ui, &t!("Month {}", "Mois {}", u.month), format!("{} · {}", req(u.month_requests as u64), bytes(u.month_bytes)));
+            row(ui, t!("All time", "Depuis le début"), format!("{} · {}", req(u.total_requests as u64), bytes(u.total_bytes)));
             if u.total_roots > 0 {
-                row(ui, "3D sessions", format!("{} this month · {} all time", u.month_roots, u.total_roots));
+                row(ui, t!("3D sessions", "Sessions 3D"), t!("{} this month · {} all time", "{} ce mois-ci · {} au total", u.month_roots, u.total_roots));
             }
         });
-        ui.label(RichText::new("Counts only calls that reach Google; tiles already on disk are free. Check the Cloud console for billing.").size(11.0).color(DIM));
+        ui.label(RichText::new(t!("Counts only calls that reach Google; tiles already on disk are free. Check the Cloud console for billing.", "Ne compte que les appels qui atteignent Google ; les tuiles déjà sur le disque sont gratuites. Consultez la console Cloud pour la facturation.")).size(11.0).color(DIM));
     }
 
     /// The pause menu (Esc), drawn over the dimmed, stopped game.
@@ -3274,14 +3388,14 @@ impl Game {
                 ui.set_width(w);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("PAUSED").size(28.0).strong().color(Color32::WHITE));
+                        ui.label(RichText::new(t!("PAUSED", "PAUSE")).size(28.0).strong().color(Color32::WHITE));
                         ui.label(RichText::new("FABLE FLIGHT").size(11.5).strong().color(ACCENT));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.vertical(|ui| {
                             ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                                 ui.label(RichText::new(menu::latlon(lat, lon)).size(13.0).color(TEXT));
-                                ui.label(RichText::new(format!("{} local", menu::hhmm(local))).size(12.0).color(DIM));
+                                ui.label(RichText::new(t!("{} local", "{} heure locale", menu::hhmm(local))).size(12.0).color(DIM));
                             });
                         });
                     });
@@ -3294,7 +3408,7 @@ impl Game {
                         padui::glyphs(ui, "LB", 20.0);
                     }
                     for p in Page::PAUSE {
-                        let b = ui.add(egui::Button::selectable(self.pause_page == p, RichText::new(p.name()).size(15.0)).min_size(egui::vec2(0.0, 30.0)));
+                        let b = ui.add(egui::Button::selectable(self.pause_page == p, RichText::new(p.label()).size(15.0)).min_size(egui::vec2(0.0, 30.0)));
                         if b.clicked() {
                             self.pause_page = p;
                         }
@@ -3312,78 +3426,91 @@ impl Game {
                     Page::Settings => egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
                         egui::Grid::new("pause_set").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
                             ui.spacing_mut().slider_width = 200.0;
-                            menu::heading(ui, "SOUND");
+                            menu::heading(ui, t!("LANGUAGE", "LANGUE"));
                             ui.end_row();
-                            ui.label("Sound");
-                            let t = if self.sound_on { "on" } else { "off" };
+                            ui.label(t!("Language", "Langue"));
+                            self.language_picker(ui);
+                            ui.end_row();
+                            menu::heading(ui, t!("SOUND", "SON"));
+                            ui.end_row();
+                            ui.label(t!("Sound", "Son"));
+                            let t = if self.sound_on { t!("on", "activé") } else { t!("off", "coupé") };
                             ui.checkbox(&mut self.sound_on, t);
                             ui.end_row();
                             ui.label("Volume");
                             ui.add_enabled(self.sound_on, egui::Slider::new(&mut self.volume, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                             ui.end_row();
-                            menu::heading(ui, "VIEW");
+                            menu::heading(ui, t!("VIEW", "VUE"));
                             ui.end_row();
-                            ui.label("Camera");
+                            ui.label(t!("Camera", "Caméra"));
                             ui.horizontal(|ui| {
-                                ui.selectable_value(&mut self.cam_mode, 0, "Chase");
+                                ui.selectable_value(&mut self.cam_mode, 0, t!("Chase", "Extérieure"));
                                 ui.selectable_value(&mut self.cam_mode, 1, "Cockpit");
                             });
                             ui.end_row();
-                            ui.label("Cockpit field of view");
+                            ui.label(t!("Cockpit field of view", "Champ de vision cockpit"));
                             ui.add(egui::Slider::new(&mut self.cockpit_fov, 35.0..=85.0).custom_formatter(|v, _| format!("{v:.0}° vertical")));
                             ui.end_row();
-                            ui.label("Mouse look speed");
+                            ui.label(t!("Mouse look speed", "Vitesse du regard (souris)"));
                             ui.add(egui::Slider::new(&mut self.look_sens, 0.25..=3.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.2}×")));
                             ui.end_row();
                             ui.label("HUD");
-                            let t = if self.show_hud { "shown" } else { "hidden" };
+                            let t = if self.show_hud { t!("shown", "affiché") } else { t!("hidden", "masqué") };
                             ui.checkbox(&mut self.show_hud, t);
                             ui.end_row();
-                            menu::heading(ui, "GRAPHICS");
+                            menu::heading(ui, t!("GRAPHICS", "GRAPHISMES"));
                             ui.end_row();
-                            ui.label("Anti-aliasing");
-                            ui.checkbox(&mut self.taa, "temporal (TAA)");
+                            ui.label(t!("Anti-aliasing", "Anticrénelage"));
+                            ui.checkbox(&mut self.taa, t!("temporal (TAA)", "temporel (TAA)"));
+                            ui.end_row();
+                            menu::heading(ui, t!("TRAFFIC", "TRAFIC"));
+                            ui.end_row();
+                            ui.label(t!("Live air traffic", "Trafic aérien réel"));
+                            let mut on = self.live.enabled();
+                            if ui.checkbox(&mut on, t!("real aircraft, from adsb.lol", "vrais avions, via adsb.lol")).changed() {
+                                self.live.set_enabled(on);
+                            }
                             ui.end_row();
                         });
                         ui.add_space(6.0);
                         self.google_settings(ui);
                         ui.add_space(10.0);
                         if pad {
-                            ui.label(RichText::new("In flight, View switches the camera.").size(12.0).color(DIM));
+                            ui.label(RichText::new(t!("In flight, View switches the camera.", "En vol, View change de caméra.")).size(12.0).color(DIM));
                         } else {
-                            ui.label(RichText::new("Shortcuts in flight: U sound, C camera, H HUD, F2 anti-aliasing.").size(12.0).color(DIM));
+                            ui.label(RichText::new(t!("Shortcuts in flight: U sound, C camera, H HUD, F2 anti-aliasing.", "Raccourcis en vol : U son, C caméra, H HUD, F2 anticrénelage.")).size(12.0).color(DIM));
                         }
                         padui::follow_focus(ui);
                     }).inner,
                     Page::Controls => menu::controls_list(ui),
                     _ => {
                         ui.add_space(4.0);
-                        let resume = menu::wide_button(ui, "RESUME", Hint::of("Esc", "B"), true, true);
+                        let resume = menu::wide_button(ui, t!("RESUME", "REPRENDRE"), Hint::of("Esc", "B"), true, true);
                         if resume.clicked() {
                             *act = Some(PauseAct::Resume);
                         }
                         self.pad_home_focus(&resume);
                         ui.add_space(4.0);
-                        if menu::wide_button(ui, "Respawn in the air", Hint::of("R", ""), false, true).clicked() {
+                        if menu::wide_button(ui, t!("Respawn in the air", "Réapparaître en vol"), Hint::of("R", ""), false, true).clicked() {
                             *act = Some(PauseAct::Respawn);
                         }
-                        if menu::wide_button(ui, "Back to the globe", Hint::Text("choose a new start"), false, true).clicked() {
+                        if menu::wide_button(ui, t!("Back to the globe", "Retour au globe"), Hint::Text(t!("choose a new start", "choisir un nouveau départ")), false, true).clicked() {
                             *act = Some(PauseAct::Globe);
                         }
-                        if menu::wide_button(ui, "Quit to desktop", Hint::None, false, true).clicked() {
+                        if menu::wide_button(ui, t!("Quit to desktop", "Quitter vers le bureau"), Hint::None, false, true).clicked() {
                             *act = Some(PauseAct::Quit);
                         }
                         ui.add_space(8.0);
-                        let t = if pad { "Places, airports and the weather are on the flight panel: Y + View, while you fly." } else { "Places, airports and the weather are on the flight panel: Tab, while you fly." };
+                        let t = if pad { t!("Places, airports and the weather are on the flight panel: Y + View, while you fly.", "Lieux, aéroports et météo sont sur le panneau de vol : Y + View, pendant le vol.") } else { t!("Places, airports and the weather are on the flight panel: Tab, while you fly.", "Lieux, aéroports et météo sont sur le panneau de vol : Tab, pendant le vol.") };
                         ui.label(RichText::new(t).size(12.0).color(DIM));
                     }
                 }
                 ui.add_space(6.0);
                 ui.separator();
                 if pad {
-                    padui::prompts(ui, &[("Dpad", "move"), ("A", "press"), ("LB / RB", "page"), ("B", "resume")], 20.0, 12.0, DIM);
+                    padui::prompts(ui, &[("Dpad", tr("move")), ("A", tr("press")), ("LB / RB", tr("page")), ("B", tr("resume"))], 20.0, 12.0, DIM);
                 } else {
-                    ui.label(RichText::new("Esc to resume  ·  Menu or B on a gamepad").size(12.0).color(DIM));
+                    ui.label(RichText::new(t!("Esc to resume  ·  Menu or B on a gamepad", "Échap pour reprendre  ·  Menu ou B à la manette")).size(12.0).color(DIM));
                 }
             });
         });
@@ -3407,7 +3534,7 @@ impl Game {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     for p in Page::INFO {
-                        let b = ui.add(egui::Button::selectable(self.info_page == p, RichText::new(p.name()).size(14.0)).min_size(egui::vec2(0.0, 26.0)));
+                        let b = ui.add(egui::Button::selectable(self.info_page == p, RichText::new(p.label()).size(14.0)).min_size(egui::vec2(0.0, 26.0)));
                         if b.clicked() {
                             self.info_page = p;
                         }
@@ -3417,7 +3544,7 @@ impl Game {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if padui::active() {
-                            ui.label(RichText::new("close").size(11.0).color(DIM));
+                            ui.label(RichText::new(t!("close", "fermer")).size(11.0).color(DIM));
                             padui::glyphs(ui, "B", 17.0);
                             ui.add_space(4.0);
                             padui::glyphs(ui, "LB RB", 17.0);
@@ -3437,20 +3564,20 @@ impl Game {
                         Page::Places => {
                             ui.horizontal(|ui| {
                                 let pad = padui::active();
-                                if ui.button(if pad { "Respawn here" } else { "Respawn here  R" }).clicked() {
+                                if ui.button(if pad { t!("Respawn here", "Réapparaître ici") } else { t!("Respawn here  R", "Réapparaître ici  R") }).clicked() {
                                     *act = Some(PauseAct::Respawn);
                                 }
-                                if ui.button(if pad { "Search a place…" } else { "Search a place…  G" }).clicked() {
+                                if ui.button(if pad { t!("Search a place…", "Chercher un lieu…") } else { t!("Search a place…  G", "Chercher un lieu…  G") }).clicked() {
                                     *act = Some(PauseAct::GoTo);
                                 }
                             });
                             ui.add_space(4.0);
                             let db = airports::Db::get();
                             let (la, lo, _) = geo::pos_to_lla(self.plane.pos);
-                            menu::heading(ui, "NEAREST AIRPORTS");
+                            menu::heading(ui, t!("NEAREST AIRPORTS", "AÉROPORTS LES PLUS PROCHES"));
                             let near: Vec<(u32, f64)> = db.near(la.to_degrees(), lo.to_degrees(), 120_000.0).into_iter().filter(|(i, _)| { let a = &db.apts[*i as usize]; a.any_paved() || a.kind > 0 }).take(6).collect();
                             if near.is_empty() {
-                                ui.label(RichText::new("No airfield within 120 km.").size(12.5).color(DIM));
+                                ui.label(RichText::new(t!("No airfield within 120 km.", "Aucun aérodrome à moins de 120 km.")).size(12.5).color(DIM));
                             }
                             let here = geo::enu(self.plane.pos);
                             for (i, d) in near {
@@ -3462,36 +3589,36 @@ impl Game {
                                     ui.label(RichText::new(format!("{:.0} km {:03.0}°", d / 1000.0, brg)).size(12.0).color(DIM));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.spacing_mut().item_spacing.x = 3.0;
-                                        if ui.small_button("approach").clicked() {
+                                        if ui.small_button(t!("approach", "approche")).clicked() {
                                             *act = Some(PauseAct::Airport(i, true));
                                         }
-                                        if ui.small_button("runway").clicked() {
+                                        if ui.small_button(t!("runway", "piste")).clicked() {
                                             *act = Some(PauseAct::Airport(i, false));
                                         }
                                     });
                                 });
-                                ui.label(RichText::new(format!("{} · {:.0} m runway", a.name.chars().take(38).collect::<String>(), a.longest())).size(11.5).color(DIM));
+                                ui.label(RichText::new(t!("{} · {:.0} m runway", "{} · piste de {:.0} m", a.name.chars().take(38).collect::<String>(), a.longest())).size(11.5).color(DIM));
                             }
                             ui.add_space(8.0);
-                            menu::heading(ui, "AIRPORTS AROUND THE WORLD");
-                            let t = if padui::active() { "Lines up on the runway (\"approach\" above for a final approach)." } else { "Click to line up on the runway; shift-click for a final approach." };
+                            menu::heading(ui, t!("AIRPORTS AROUND THE WORLD", "AÉROPORTS DU MONDE"));
+                            let t = if padui::active() { t!("Lines up on the runway (\"approach\" above for a final approach).", "Aligne sur la piste (« approche » ci-dessus pour une approche finale).") } else { t!("Click to line up on the runway; shift-click for a final approach.", "Clic pour s'aligner sur la piste ; Maj+clic pour une approche finale.") };
                             ui.label(RichText::new(t).size(11.5).color(DIM));
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                                 for (code, name) in menu::AIRPORTS {
                                     if let Some(i) = db.find(code) {
-                                        if ui.button(RichText::new(*code).size(12.0)).on_hover_text(*name).clicked() {
+                                        if ui.button(RichText::new(*code).size(12.0)).on_hover_text(tr(name)).clicked() {
                                             *act = Some(PauseAct::Airport(i, ui.input(|inp| inp.modifiers.shift)));
                                         }
                                     }
                                 }
                             });
                             ui.add_space(8.0);
-                            menu::heading(ui, "FLY TO");
+                            menu::heading(ui, t!("FLY TO", "ALLER À"));
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                                 for (name, la, lo) in menu::QUICK {
-                                    if ui.button(RichText::new(*name).size(12.0)).clicked() {
+                                    if ui.button(RichText::new(tr(name)).size(12.0)).clicked() {
                                         *act = Some(PauseAct::FlyTo(*la, *lo, name));
                                     }
                                 }
@@ -3509,53 +3636,75 @@ impl Game {
                             let rpm = p.prop_rate * 60.0 / std::f64::consts::TAU;
                             let jet = p.spec.is_jet();
                             let trk = { let (e, n, _) = geo::enu(p.pos); p.vel.dot(e).atan2(p.vel.dot(n)).to_degrees().rem_euclid(360.0) };
-                            menu::heading(ui, "FLIGHT");
+                            menu::heading(ui, t!("FLIGHT", "VOL"));
                             egui::Grid::new("info_fl").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
-                                row(ui, "Airspeed", format!("{:.0} kt IAS  ·  {:.0} TAS", speed * 1.94384, p.airspeed().length() * 1.94384), TEXT);
-                                row(ui, "Ground speed", format!("{:.0} kt  ·  track {trk:03.0}°", p.vel.length() * 1.94384), TEXT);
+                                row(ui, t!("Airspeed", "Vitesse air"), format!("{:.0} kt IAS  ·  {:.0} TAS", speed * 1.94384, p.airspeed().length() * 1.94384), TEXT);
+                                row(ui, t!("Ground speed", "Vitesse sol"), t!("{:.0} kt  ·  track {trk:03.0}°", "{:.0} kt  ·  route {trk:03.0}°", p.vel.length() * 1.94384), TEXT);
                                 row(ui, "Altitude", format!("{:.0} ft", alt * 3.28084), TEXT);
-                                row(ui, "Above ground", format!("{:.0} ft", agl.max(0.0) * 3.28084), TEXT);
-                                row(ui, "Vertical speed", format!("{:+.0} fpm", vs * 196.85), TEXT);
-                                row(ui, "Heading", format!("{hdg:03.0}°"), TEXT);
-                                row(ui, "Angle of attack", format!("{:.1}°", p.alpha.to_degrees()), if p.stalled { Color32::from_rgb(255, 90, 60) } else { TEXT });
-                                row(ui, "Load", format!("{:.1} g", p.g_load), if p.g_load.abs() > 3.8 { Color32::from_rgb(255, 180, 50) } else { TEXT });
+                                row(ui, t!("Above ground", "Hauteur sol"), format!("{:.0} ft", agl.max(0.0) * 3.28084), TEXT);
+                                row(ui, t!("Vertical speed", "Vitesse verticale"), t!("{:+.0} fpm", "{:+.0} ft/min", vs * 196.85), TEXT);
+                                row(ui, t!("Heading", "Cap"), format!("{hdg:03.0}°"), TEXT);
+                                row(ui, t!("Angle of attack", "Incidence"), format!("{:.1}°", p.alpha.to_degrees()), if p.stalled { Color32::from_rgb(255, 90, 60) } else { TEXT });
+                                row(ui, t!("Load", "Facteur de charge"), format!("{:.1} g", p.g_load), if p.g_load.abs() > 3.8 { Color32::from_rgb(255, 180, 50) } else { TEXT });
                             });
                             ui.add_space(6.0);
-                            menu::heading(ui, "AIRCRAFT");
+                            menu::heading(ui, t!("AIRCRAFT", "AVION"));
                             egui::Grid::new("info_ac").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
-                                row(ui, "Aircraft", p.spec.name.into(), TEXT);
+                                row(ui, t!("Aircraft", "Avion"), p.spec.name.into(), TEXT);
                                 if jet {
-                                    row(ui, "Thrust", format!("{:.0}%  ·  N1 {:.0}%{}", p.throttle * 100.0, p.n1 * 100.0, if p.reverser > 0.0 { "  · REV" } else { "" }), TEXT);
+                                    row(ui, t!("Thrust", "Poussée"), format!("{:.0}%  ·  N1 {:.0}%{}", p.throttle * 100.0, p.n1 * 100.0, if p.reverser > 0.0 { "  · REV" } else { "" }), TEXT);
                                 } else {
-                                    row(ui, "Throttle", format!("{:.0}%  ·  {:.0} rpm", p.throttle * 100.0, rpm), if rpm > 2710.0 { Color32::from_rgb(255, 180, 50) } else { TEXT });
+                                    row(ui, t!("Throttle", "Gaz"), format!("{:.0}%  ·  {:.0} rpm", p.throttle * 100.0, rpm), if rpm > 2710.0 { Color32::from_rgb(255, 180, 50) } else { TEXT });
                                 }
-                                row(ui, "Flaps", format!("{:.0}°", p.flap_notch_deg()), TEXT);
+                                row(ui, t!("Flaps", "Volets"), format!("{:.0}°", p.flap_notch_deg()), TEXT);
                                 if p.spec.spoiler_cd > 0.0 {
-                                    row(ui, "Speedbrake", if p.spoilers > 0.6 { "ground spoilers".into() } else if p.speedbrake > 0.0 { "flight detent".into() } else { "down".to_string() }, TEXT);
+                                    row(ui, t!("Speedbrake", "Aérofreins"), if p.spoilers > 0.6 { t!("ground spoilers", "spoilers sol").into() } else if p.speedbrake > 0.0 { t!("flight detent", "cran vol").into() } else { t!("down", "rentrés").to_string() }, TEXT);
                                 }
-                                row(ui, "Gear", if p.gear >= 1.0 { "down" } else if p.gear <= 0.0 { "up" } else { "moving" }.into(), TEXT);
+                                row(ui, t!("Gear", "Train"), if p.gear >= 1.0 { t!("down", "sorti") } else if p.gear <= 0.0 { t!("up", "rentré") } else { t!("moving", "en mouvement") }.into(), TEXT);
                             });
                             let report = p.dmg.report();
                             if self.crashed {
-                                ui.label(RichText::new(if padui::active() { "Crashed. Close the panel (B), then A to respawn." } else { "Crashed. R (or A on a gamepad) to respawn." }).color(Color32::from_rgb(255, 90, 60)));
+                                ui.label(RichText::new(if padui::active() { t!("Crashed. Close the panel (B), then A to respawn.", "Crash. Fermez le panneau (B), puis A pour réapparaître.") } else { t!("Crashed. R (or A on a gamepad) to respawn.", "Crash. R (ou A à la manette) pour réapparaître.") }).color(Color32::from_rgb(255, 90, 60)));
                             } else if report.is_empty() {
-                                ui.label(RichText::new("No damage").size(12.5).color(Color32::from_rgb(140, 220, 140)));
+                                ui.label(RichText::new(t!("No damage", "Aucun dégât")).size(12.5).color(Color32::from_rgb(140, 220, 140)));
                             } else {
                                 for l in &report {
-                                    ui.label(RichText::new(l).size(12.5).color(Color32::from_rgb(255, 180, 50)));
+                                    ui.label(RichText::new(i18n::caps(l)).size(12.5).color(Color32::from_rgb(255, 180, 50)));
                                 }
                             }
                             ui.add_space(6.0);
                             menu::heading(ui, "CONDITIONS");
                             egui::Grid::new("info_wx").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
                                 row(ui, "Position", menu::latlon(lat, lon), TEXT);
-                                row(ui, "Local time", menu::hhmm(local), TEXT);
-                                row(ui, "Wind", if wind_kt < 1.0 { "calm".into() } else { format!("{:03.0}° / {:.0} kt", self.wx.wind_from, wind_kt) }, TEXT);
-                                row(ui, "Clouds", if self.wx.clouds < 0.05 { "clear".into() } else { format!("{:.0}%, base {:.0} ft", self.wx.clouds * 100.0, self.wx.cloud_base * 3.28084) }, TEXT);
-                                row(ui, "Visibility", format!("{:.0} km", self.wx.visibility_km()), TEXT);
+                                row(ui, t!("Local time", "Heure locale"), menu::hhmm(local), TEXT);
+                                row(ui, t!("Wind", "Vent"), if wind_kt < 1.0 { t!("calm", "calme").into() } else { format!("{:03.0}° / {:.0} kt", self.wx.wind_from, wind_kt) }, TEXT);
+                                row(ui, t!("Clouds", "Nuages"), if self.wx.clouds < 0.05 { t!("clear", "dégagé").into() } else { format!("{:.0}%, base {:.0} ft", self.wx.clouds * 100.0, self.wx.cloud_base * 3.28084) }, TEXT);
+                                row(ui, t!("Visibility", "Visibilité"), format!("{:.0} km", self.wx.visibility_km()), TEXT);
                             });
+                            ui.add_space(6.0);
+                            menu::heading(ui, t!("LIVE TRAFFIC", "TRAFIC RÉEL"));
+                            if !self.live.enabled() {
+                                ui.label(RichText::new(t!("Off (pause menu, Settings).", "Désactivé (menu pause, Réglages).")).size(12.0).color(DIM));
+                            } else if self.live.planes.is_empty() {
+                                let e = self.live.error();
+                                let msg = if e.is_empty() { t!("Waiting for aircraft…", "En attente d'avions…").to_string() } else { t!("No data: {}", "Pas de données : {}", e.chars().take(60).collect::<String>()) };
+                                ui.label(RichText::new(msg).size(12.0).color(DIM));
+                            } else {
+                                let me = self.plane.pos;
+                                let mut near: Vec<&live::Plane> = self.live.planes.iter().collect();
+                                near.sort_by(|a, b| (a.pos - me).length().total_cmp(&(b.pos - me).length()));
+                                ui.label(RichText::new(t!("{} aircraft within 110 km", "{} avions à moins de 110 km", near.len())).size(12.0).color(DIM));
+                                egui::Grid::new("info_live").num_columns(3).spacing([10.0, 2.0]).show(ui, |ui| {
+                                    for p in near.iter().take(6) {
+                                        ui.label(RichText::new(&p.call).monospace().size(12.5).color(TEXT));
+                                        ui.label(RichText::new(if p.ty.is_empty() { "?" } else { p.ty.as_str() }).monospace().size(12.0).color(DIM));
+                                        ui.label(RichText::new(format!("{:.1} km · {:.0} ft", (p.pos - me).length() / 1000.0, p.alt_ft)).monospace().size(12.0).color(DIM));
+                                        ui.end_row();
+                                    }
+                                });
+                            }
                             ui.add_space(4.0);
-                            ui.label(RichText::new(if padui::active() { "Menu pauses: settings, the globe, quit." } else { "Esc pauses: settings, the globe, quit." }).size(11.5).color(ACCENT.gamma_multiply(0.8)));
+                            ui.label(RichText::new(if padui::active() { t!("Menu pauses: settings, the globe, quit.", "Menu met en pause : réglages, globe, quitter.") } else { t!("Esc pauses: settings, the globe, quit.", "Échap met en pause : réglages, globe, quitter.") }).size(11.5).color(ACCENT.gamma_multiply(0.8)));
                         }
                     }
                     padui::follow_focus(ui);
@@ -3577,10 +3726,10 @@ impl Game {
         let a = g.apt();
         let mut out = vec![(format!("{}  {}", a.code(), a.name), 0u8)];
         let wind_kt = self.wx.wind * 1.94384;
-        let wind = if wind_kt < 1.0 { "calm".to_string() } else { format!("{:03.0}°/{:.0} kt", self.wx.wind_from, wind_kt) };
+        let wind = if wind_kt < 1.0 { t!("calm", "calme").to_string() } else { format!("{:03.0}°/{:.0} kt", self.wx.wind_from, wind_kt) };
         let moving = f.traffic.movers.len();
-        let active = f.traffic.active.map(|(ri, e)| format!("runway {} in use", g.runways[ri].ident[e])).unwrap_or_else(|| "no runway on the map".into());
-        out.push((format!("{active}  ·  wind {wind}  ·  elevation {:.0} ft  ·  {} aircraft moving", g.elev * 3.28084, moving), 0));
+        let active = f.traffic.active.map(|(ri, e)| t!("runway {} in use", "piste {} en service", g.runways[ri].ident[e])).unwrap_or_else(|| t!("no runway on the map", "aucune piste sur la carte").into());
+        out.push((t!("{active}  ·  wind {wind}  ·  elevation {:.0} ft  ·  {} aircraft moving", "{active}  ·  vent {wind}  ·  altitude {:.0} ft  ·  {} avions en mouvement", g.elev * 3.28084, moving), 0));
         let p = g.local(self.plane.pos);
         let alt = geo::pos_to_lla(self.plane.pos).2 as f32;
         let fw = self.plane.forward();
@@ -3591,10 +3740,10 @@ impl Game {
                 let e = if hd.dot(r.dir) >= 0.0 { 0 } else { 1 };
                 let (s, _) = r.local(p);
                 let left = if e == 0 { r.len - s } else { s };
-                out.push((format!("On runway {}  ·  {:.0} m of runway ahead", r.ident[e], left), 1));
+                out.push((t!("On runway {}  ·  {:.0} m of runway ahead", "Sur la piste {}  ·  {:.0} m de piste devant", r.ident[e], left), 1));
             } else if let Some(h) = g.holds.iter().find(|h| (h.p - p).length() < 25.0) {
                 let r = &g.runways[h.rwy as usize];
-                out.push((format!("Holding point, runway {}", r.name()), 2));
+                out.push((t!("Holding point, runway {}", "Point d'attente, piste {}", r.name()), 2));
             }
             return Some(out);
         }
@@ -3618,10 +3767,10 @@ impl Game {
             let aim = (along + traffic::aim_dist(r.len)).max(1.0);
             let gs = h.atan2(aim).to_degrees();
             let dev = gs - 3.0;
-            let side = if x.abs() < 0.01 * along.max(300.0) + 5.0 { "on the centreline".to_string() } else { format!("{:.0} m {} of the centreline", x.abs(), if x > 0.0 { "right" } else { "left" }) };
-            let glide = if dev.abs() < 0.3 { "on glide path".to_string() } else if dev > 0.0 { format!("{:.1}° high", dev) } else { format!("{:.1}° low", -dev) };
+            let side = if x.abs() < 0.01 * along.max(300.0) + 5.0 { t!("on the centreline", "sur l'axe").to_string() } else { t!("{:.0} m {} of the centreline", "{:.0} m à {} de l'axe", x.abs(), if x > 0.0 { t!("right", "droite") } else { t!("left", "gauche") }) };
+            let glide = if dev.abs() < 0.3 { t!("on glide path", "sur le plan de descente").to_string() } else if dev > 0.0 { t!("{:.1}° high", "{:.1}° trop haut", dev) } else { t!("{:.1}° low", "{:.1}° trop bas", -dev) };
             let col = if dev < -0.7 || x.abs() > 0.06 * along + 30.0 { 3 } else if dev.abs() > 0.3 { 2 } else { 1 };
-            out.push((format!("Runway {}  {:.1} nm  ·  {}  ·  {}  ·  {:.0} ft above it", r.ident[e], along.max(0.0) / 1852.0, side, glide, h * 3.28084), col));
+            out.push((t!("Runway {}  {:.1} nm  ·  {}  ·  {}  ·  {:.0} ft above it", "Piste {}  {:.1} NM  ·  {}  ·  {}  ·  {:.0} ft au-dessus", r.ident[e], along.max(0.0) / 1852.0, side, glide, h * 3.28084), col));
         }
         Some(out)
     }
@@ -3719,23 +3868,52 @@ impl Game {
                         if self.real < self.status_until && !self.status.is_empty() {
                             shadow(ui, self.status.chars().take(70).collect(), 13.0, white);
                         }
-                        shadow(ui, format!("{:.4}°{}  {:.4}°{}   {:02}:{:02} local", lat.to_degrees().abs(), if lat >= 0.0 { 'N' } else { 'S' }, lon.to_degrees().abs(), if lon >= 0.0 { 'E' } else { 'W' }, local as u32, (local.fract() * 60.0) as u32), 13.0, dim);
+                        shadow(ui, t!("{:.4}°{}  {:.4}°{}   {:02}:{:02} local", "{:.4}°{}  {:.4}°{}   {:02}:{:02} heure locale", lat.to_degrees().abs(), if lat >= 0.0 { 'N' } else { 'S' }, lon.to_degrees().abs(), if lon >= 0.0 { 'E' } else { 'W' }, local as u32, (local.fract() * 60.0) as u32), 13.0, dim);
                         if pad {
                             ui.horizontal(|ui| {
-                                shadow(ui, format!("{:.0} fps   {} tiles   {} loading   {} cars", self.fps, stats.0, stats.1, self.n_cars), 12.0, dim);
+                                shadow(ui, t!("{:.0} fps   {} tiles   {} loading   {} cars", "{:.0} fps   {} tuiles   {} en chargement   {} voitures", self.fps, stats.0, stats.1, self.n_cars), 12.0, dim);
                                 ui.add_space(6.0);
-                                padui::prompts(ui, &[("Y + View", "panel"), ("Menu", "menu")], 16.0, 12.0, dim);
+                                padui::prompts(ui, &[("Y + View", tr("panel")), ("Menu", tr("menu"))], 16.0, 12.0, dim);
                             });
                         } else {
-                            shadow(ui, format!("{:.0} fps   {} tiles   {} loading   {} cars   Tab panel   Esc menu", self.fps, stats.0, stats.1, self.n_cars), 12.0, dim);
+                            shadow(ui, t!("{:.0} fps   {} tiles   {} loading   {} cars   Tab panel   Esc menu", "{:.0} fps   {} tuiles   {} en chargement   {} voitures   Tab panneau   Échap menu", self.fps, stats.0, stats.1, self.n_cars), 12.0, dim);
                         }
                         let p = self.world.photo();
                         if p.active {
-                            let datum = p.datum.map(|d| format!("{d:+.1} m")).unwrap_or_else(|| "measuring".into());
-                            shadow(ui, format!("3D tiles: {} drawn   {} in memory ({})   {} loading   datum {datum}", p.stats.0, p.stats.1, gmaps::bytes(p.gpu_bytes_shown as u64), p.stats.2), 12.0, dim);
+                            let datum = p.datum.map(|d| format!("{d:+.1} m")).unwrap_or_else(|| t!("measuring", "mesure en cours").into());
+                            shadow(ui, t!("3D tiles: {} drawn   {} in memory ({})   {} loading   datum {datum}", "Tuiles 3D : {} affichées   {} en mémoire ({})   {} en chargement   référence {datum}", p.stats.0, p.stats.1, bytes(p.gpu_bytes_shown as u64), p.stats.2), 12.0, dim);
                         }
                     });
                 });
+            }
+            // Real traffic: a tag beside each aircraft within range.
+            if let (true, Some((vp, cam))) = (self.show_hud && self.live.enabled(), self.live_view) {
+                let screen = ctx.content_rect();
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                for p in &self.live.planes {
+                    let rel = p.pos - cam;
+                    let d = rel.length();
+                    if d > 40_000.0 || d < 30.0 {
+                        continue;
+                    }
+                    let c = vp * rel.as_vec3().extend(1.0);
+                    if c.w <= 0.0 {
+                        continue;
+                    }
+                    let at = egui::pos2(screen.left() + (c.x / c.w * 0.5 + 0.5) * screen.width(), screen.top() + (0.5 - c.y / c.w * 0.5) * screen.height());
+                    if !screen.expand(40.0).contains(at) {
+                        continue;
+                    }
+                    let a = (255.0 * (1.0 - d / 40_000.0).clamp(0.35, 1.0)) as u8;
+                    let col = Color32::from_rgba_unmultiplied(150, 225, 255, a);
+                    painter.circle_stroke(at, 5.0, egui::Stroke::new(1.3, col));
+                    let line2 = format!("{}  {:.0} ft  {:.0} kt  {:.1} km", if p.ty.is_empty() { "?" } else { p.ty.as_str() }, p.alt_ft, p.gs_kt, d / 1000.0);
+                    for (k, (s, size)) in [(p.call.as_str(), 12.5), (line2.as_str(), 11.0)].into_iter().enumerate() {
+                        let pos = at + egui::vec2(9.0, -10.0 + 14.0 * k as f32);
+                        painter.text(pos + egui::vec2(1.0, 1.0), Align2::LEFT_TOP, s, FontId::proportional(size), Color32::from_black_alpha(a / 2));
+                        painter.text(pos, Align2::LEFT_TOP, s, FontId::proportional(size), col);
+                    }
+                }
             }
             // Google's imagery has to carry its credit, HUD or not.
             if self.show_hud || self.google_shown() {
@@ -3780,9 +3958,9 @@ impl Game {
                             shadow(ui, (*w).into(), 18.0, *col);
                         }
                         if !report.is_empty() {
-                            shadow(ui, "DAMAGE".into(), 12.0, dim);
+                            shadow(ui, t!("DAMAGE", "DÉGÂTS").into(), 12.0, dim);
                             for l in &report {
-                                shadow(ui, l.clone(), 14.0, amber);
+                                shadow(ui, i18n::caps(l), 14.0, amber);
                             }
                         }
                     });
@@ -3793,7 +3971,7 @@ impl Game {
                     ui.vertical_centered(|ui| {
                         for (s, t0) in &self.flash {
                             let a = (1.0 - ((self.real - t0 - 2.5) / 1.5).max(0.0)).clamp(0.0, 1.0);
-                            shadow(ui, s.clone(), 24.0, Color32::from_rgba_unmultiplied(255, 70, 40, (a * 255.0) as u8));
+                            shadow(ui, i18n::caps(s), 24.0, Color32::from_rgba_unmultiplied(255, 70, 40, (a * 255.0) as u8));
                         }
                     });
                 });
@@ -3809,11 +3987,11 @@ impl Game {
                 egui::Area::new(egui::Id::unique("wreck")).anchor(Align2::CENTER_BOTTOM, [0.0, -70.0]).show(ctx, |ui| {
                     panel.show(ui, |ui| {
                         ui.vertical_centered(|ui| {
-                            shadow(ui, "AIRCRAFT WRECKED".into(), 22.0, Color32::from_rgb(255, 150, 60));
+                            shadow(ui, t!("AIRCRAFT WRECKED", "AVION DÉTRUIT").into(), 22.0, Color32::from_rgb(255, 150, 60));
                             if pad {
-                                padui::prompts(ui, &[("Y + View", "go somewhere else"), ("Menu", "menu: respawn, globe")], 24.0, 18.0, white);
+                                padui::prompts(ui, &[("Y + View", tr("go somewhere else")), ("Menu", tr("menu: respawn, globe"))], 24.0, 18.0, white);
                             } else {
-                                shadow(ui, "R  respawn      G  go somewhere else      Esc  menu".into(), 18.0, white);
+                                shadow(ui, t!("R  respawn      G  go somewhere else      Esc  menu", "R  réapparaître      G  aller ailleurs      Échap  menu").into(), 18.0, white);
                             }
                         });
                     });
@@ -3823,9 +4001,9 @@ impl Game {
                 egui::Area::new(egui::Id::unique("crash")).anchor(Align2::CENTER_BOTTOM, [0.0, -70.0]).show(ctx, |ui| {
                     panel.show(ui, |ui| {
                         if pad {
-                            padui::prompts(ui, &[("A", "respawn"), ("Y + View", "go somewhere else"), ("Menu", "menu")], 24.0, 18.0, white);
+                            padui::prompts(ui, &[("A", tr("respawn")), ("Y + View", tr("go somewhere else")), ("Menu", tr("menu"))], 24.0, 18.0, white);
                         } else {
-                            shadow(ui, "R  respawn      G  go somewhere else      Esc  menu".into(), 18.0, white);
+                            shadow(ui, t!("R  respawn      G  go somewhere else      Esc  menu", "R  réapparaître      G  aller ailleurs      Échap  menu").into(), 18.0, white);
                         }
                     });
                 });
@@ -3835,9 +4013,9 @@ impl Game {
                     menu::panel().show(ui, |ui| {
                         ui.set_width(600.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Controls").size(22.0).strong().color(Color32::WHITE));
+                            ui.label(RichText::new(t!("Controls", "Commandes")).size(22.0).strong().color(Color32::WHITE));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new("F1 / Esc  close").size(12.0).color(menu::DIM));
+                                ui.label(RichText::new(t!("F1 / Esc  close", "F1 / Échap  fermer")).size(12.0).color(menu::DIM));
                             });
                         });
                         ui.add_space(4.0);
@@ -3849,8 +4027,8 @@ impl Game {
                 self.wx.panel(ctx, &mut self.utc, &mut self.doy, lon.to_degrees());
             }
             if self.goto_open {
-                egui::Window::new("Go to").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, -80.0]).show(ctx, |ui| {
-                    ui.label("City, landmark, street address, or an airport code (KSFO, LHR):");
+                egui::Window::new(t!("Go to", "Aller à")).id(egui::Id::unique("goto_window")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, -80.0]).show(ctx, |ui| {
+                    ui.label(t!("City, landmark, street address, or an airport code (KSFO, LHR):", "Ville, site, adresse ou code d'aéroport (KSFO, LHR) :"));
                     let resp = ui.add(egui::TextEdit::singleline(&mut self.goto_text).desired_width(360.0));
                     resp.request_focus();
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.goto_text.trim().is_empty() {
@@ -3881,7 +4059,7 @@ impl Game {
         }
         if let Some(q) = go {
             self.goto_open = false;
-            self.status = format!("Searching for {q}…");
+            self.status = t!("Searching for {}…", "Recherche de {}…", q);
             self.status_until = self.real + 30.0;
             let (tx, rx) = std::sync::mpsc::channel();
             let src = self.src.clone();
@@ -3950,6 +4128,7 @@ impl ApplicationHandler for App {
         let consumed = g.egui_state.on_window_event(&g.window, &event).consumed;
         match event {
             WindowEvent::CloseRequested => {
+                g.keep_settings(true);
                 g.src.google.save();
                 el.exit()
             }
@@ -3957,6 +4136,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 g.frame();
                 if g.quit {
+                    g.keep_settings(true);
                     g.src.google.save();
                     // Worker threads may be mid-download, so the process just
                     // exits; but the GPU device is torn down first: exiting
@@ -4141,9 +4321,11 @@ fn ortho(l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) -> Mat4 {
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,fablegame=info")).init();
+    let args = parse_args();
+    i18n::set_lang(args.lang.or(settings::Settings::load().lang).unwrap_or_else(i18n::Lang::detect));
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    el.run_app(&mut App { args: parse_args(), game: None })?;
+    el.run_app(&mut App { args, game: None })?;
     Ok(())
 }
 
