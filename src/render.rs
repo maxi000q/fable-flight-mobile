@@ -888,6 +888,55 @@ fn upload_mips(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, size: u3
     view(&t)
 }
 
+/// The Hornet's paint (assets/fa18_paint.jpg, baked by assets/blender/fa18_paint.py):
+/// three pictures side by side (the aircraft from above, from below and from
+/// the left), each a layer of the array with its own mip chain. plane.wgsl
+/// projects them onto the skin (`hornet_paint`).
+fn paint_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let img = image::load_from_memory_with_format(include_bytes!("../assets/fa18_paint.jpg"), image::ImageFormat::Jpeg).expect("the Hornet's paint").to_rgba8();
+    let (w, h) = (img.width() / 3, img.height());
+    let mips = 32 - w.max(h).leading_zeros();
+    let t = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hornet paint"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 3 },
+        mip_level_count: mips,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for layer in 0..3u32 {
+        let mut cur: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let row = ((y * img.width() + layer * w) * 4) as usize;
+            cur.extend_from_slice(&img.as_raw()[row..row + (w * 4) as usize]);
+        }
+        let (mut cw, mut ch) = (w, h);
+        for level in 0..mips {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &t, mip_level: level, origin: wgpu::Origin3d { x: 0, y: 0, z: layer }, aspect: wgpu::TextureAspect::All },
+                &cur,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(cw * 4), rows_per_image: Some(ch) },
+                wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 },
+            );
+            // The next level: each texel the mean of the four under it.
+            let (nw, nh) = ((cw / 2).max(1), (ch / 2).max(1));
+            let mut next = vec![0u8; (nw * nh * 4) as usize];
+            for y in 0..nh {
+                for x in 0..nw {
+                    for c in 0..4 {
+                        let s = |dx: u32, dy: u32| cur[(((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) * 4 + c) as usize] as u32;
+                        next[((y * nw + x) * 4 + c) as usize] = ((s(0, 0) + s(1, 0) + s(0, 1) + s(1, 1) + 2) / 4) as u8;
+                    }
+                }
+            }
+            (cur, cw, ch) = (next, nw, nh);
+        }
+    }
+    t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
+}
+
 /// Small allocator blocks (host-visible ones are half these sizes). Every
 /// upload goes through staging memory that wgpu takes from the 246 MiB
 /// CPU-visible VRAM window (BAR1) on cards without resizable BAR. With the
@@ -1313,7 +1362,7 @@ impl Renderer {
             "depth resolve",
             &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: d2, multisampled: true }, count: None }],
         );
-        let l_obj = layout("obj", &[ub_entry(0, true, std::mem::size_of::<ObjU>() as u64)]);
+        let l_obj = layout("obj", &[ub_entry(0, true, std::mem::size_of::<ObjU>() as u64), tex_entry(1, wgpu::TextureViewDimension::D2Array, false)]);
         let l_glass = layout("glass", &[tex_entry(1, d2, false), tex_entry(2, d2, true)]);
         let ms_entry = |binding, depth| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1690,7 +1739,8 @@ impl Renderer {
         let (inst_buf, fall_buf) = (dynbuf("instances", MAX_INST as u64 * 80), dynbuf("loose trees", MAX_FALL as u64 * 36));
         let near_buf = dynbuf("near trees", MAX_NEAR as u64 * 36);
         let dyn_lights = dynbuf("aircraft lights", MAX_DYN_LIGHTS as u64 * 40);
-        let bg_obj = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_obj, entries: &[buf_res(0, &obj_ub, std::mem::size_of::<ObjU>() as u64)] });
+        let paint = paint_texture(d, &queue);
+        let bg_obj = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_obj, entries: &[buf_res(0, &obj_ub, std::mem::size_of::<ObjU>() as u64), tex_res(1, &paint)] });
         let ix = crate::sources::tile_indices();
         let tile_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tile idx"), contents: bytemuck::cast_slice(&ix), usage: wgpu::BufferUsages::INDEX });
         let patch = |n: u16| {

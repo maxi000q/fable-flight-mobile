@@ -65,6 +65,7 @@ pub mod lamp {
     pub const GEAR_DOWN: f32 = 6.0;
     pub const GEAR_UP: f32 = 7.0;
     pub const ANNUNC: f32 = 8.0;
+    pub const FORMATION: f32 = 9.0; // electroluminescent formation light strip (a fighter's)
 }
 
 #[derive(Clone, Copy)]
@@ -794,9 +795,9 @@ impl Model {
         }
         Model { pieces, groups }
     }
-    /// Centre and half size of everything in it (body frame, at rest).
+    /// Centre and half size of everything solid in it (body frame, at rest).
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        let (lo, hi) = self.pieces.iter().flat_map(|p| p.mesh.v.iter()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
+        let (lo, hi) = self.pieces.iter().filter(|p| !p.glass).flat_map(|p| p.mesh.v.iter()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
         ((lo + hi) * 0.5, (hi - lo) * 0.5)
     }
 }

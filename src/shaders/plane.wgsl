@@ -24,14 +24,23 @@ struct Obj { model: mat4x4f, tint: vec4f, glow: vec4f, params: array<vec4f, 6>, 
 const M_PAINT = 0u; const M_LIVERY = 1u; const M_ALU = 2u; const M_STEEL = 3u; const M_RUBBER = 4u;
 const M_PLASTIC = 5u; const M_FABRIC = 6u; const M_GLASS = 7u; const M_LAMP = 8u; const M_GAUGE = 9u;
 const M_BLACK = 10u; const M_EXHAUST = 11u; const M_SCREW = 12u; const M_PROP = 13u; const M_DISPLAY = 14u;
-const M_SATIN = 15u; const M_PROPDISC = 16u;
+const M_SATIN = 15u; const M_PROPDISC = 16u; const M_PLUME = 17u;
 const P_FUSE = 1u; const P_WING = 2u; const P_CTRL = 3u; const P_COWL = 4u; const P_TAIL = 5u; const P_TREAD = 6u;
 const P_LINING = 7u; const P_SEAT = 8u; const P_CARPET = 9u; const P_PANEL = 10u; const P_PLACARD = 11u; const P_KNURL = 12u;
-const P_NACELLE = 13u; const P_LEGEND = 14u; const P_FLEECE = 15u; const P_SPINNER = 16u;
+const P_NACELLE = 13u; const P_LEGEND = 14u; const P_FLEECE = 15u; const P_SPINNER = 16u; const P_HORNET = 17u;
+
+// The Hornet's paint (assets/fa18_paint.jpg): it seen from above, from below
+// and from the left, one layer each.
+@group(1) @binding(1) var t_paint: texture_2d_array<f32>;
 
 // Which aircraft is being drawn (aircraft::Spec::id, carried in glow.y): 0 the
-// light single, 1 the 747. Its windows, wells, paint and panel lines differ.
+// light single, 1 the 747, 2 the Hornet. Its windows, wells, paint and panel
+// lines differ. tint.y and tint.z carry the engines: how far the afterburners
+// are lit, and how hard they are running dry (0 idle .. 1).
 fn kind() -> u32 { return u32(O.glow.y + 0.5); }
+// The engines, of the aircraft being flown only (wreckage and parts that have come off carry a glow.x).
+fn burner() -> f32 { return O.tint.y * step(O.glow.x, 0.001); }
+fn dry_power() -> f32 { return O.tint.z * step(O.glow.x, 0.001); }
 
 const WHITE_PAINT = vec3f(0.80, 0.80, 0.78);
 const NAVY = vec3f(0.010, 0.024, 0.075);
@@ -62,7 +71,7 @@ struct SOut { @builtin(position) clip: vec4f, @location(0) L: vec3f, @location(1
 @fragment fn fs_shadow(in: SOut) {
   // Sunlight comes in through the windows, the gear wells stay open, and
   // nothing is cast by what has been torn off.
-  if (cut_here(in.L, u32(in.mat.y + 0.5)) || u32(in.mat.x + 0.5) == M_GLASS || u32(in.mat.x + 0.5) == M_PROPDISC || tear_d(in.L) > 0.0) { discard; }
+  if (cut_here(in.L, u32(in.mat.y + 0.5)) || u32(in.mat.x + 0.5) == M_GLASS || u32(in.mat.x + 0.5) == M_PROPDISC || u32(in.mat.x + 0.5) == M_PLUME || tear_d(in.L) > 0.0) { discard; }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -107,6 +116,8 @@ fn quad(a: vec2f, b: vec2f, c: vec2f, d: vec2f) -> array<vec2f, 5> { return arra
 // Window openings (negative inside); matches c172::window / b747::window.
 fn window(p: vec3f) -> f32 {
   if (kind() == 1u) { return window747(p); }
+  // The Hornet's canopy is one blown piece: all of it is window.
+  if (kind() == 2u) { return -1.0; }
   let zy = vec2f(p.z, p.y);
   var d = sd_poly(zy, array<vec2f, 5>(vec2f(-1.72, 0.31), vec2f(-1.52, 0.07), vec2f(-1.03, 0.64), vec2f(-1.0, 0.80), vec2f(-1.75, 0.80)), 5) + 0.01;
   if (abs(p.x) > 0.3 && p.y < 0.6) {
@@ -1039,6 +1050,101 @@ fn vis(ndv: f32, ndl: f32, a: f32) -> f32 {
   return 0.25 / ((ndv * (1.0 - k) + k) * (ndl * (1.0 - k) + k));
 }
 
+// ---------------------------------------------------------------- the Hornet (aircraft/fa18)
+
+// Its paint: three pictures of it (from above, from below and from the left
+// side, the layers of t_paint) projected back onto the skin, each where the
+// surface faces that way. The rectangles they cover are GUIDE_* in
+// assets/blender/fa18.py. rgb the paint; a 0 where no picture faces the
+// surface (the lips of the intakes, the ends of things).
+fn hornet_paint(L: vec3f, Nl: vec3f, dLx: vec3f, dLy: vec3f) -> vec4f {
+  let n = Nl * inverseSqrt(max(dot(Nl, Nl), 1e-12));
+  var w = vec3f(pow(max(n.y, 0.0), 4.0), pow(max(-n.y, 0.0), 4.0), pow(abs(n.x), 4.0));
+  let sum = w.x + w.y + w.z;
+  if (sum < 0.02) { return vec4f(0.0); }
+  w /= sum;
+  let v = (L.z + 10.3) / 19.8;
+  let dv = vec2f(dLx.z, dLy.z) / 19.8;
+  var c = vec3f(0.0);
+  if (w.x > 0.004) { c += w.x * textureSampleGrad(t_paint, s_aniso, vec2f((L.x + 6.6) / 13.2, v), 0, vec2f(dLx.x / 13.2, dv.x), vec2f(dLy.x / 13.2, dv.y)).rgb; }
+  if (w.y > 0.004) { c += w.y * textureSampleGrad(t_paint, s_aniso, vec2f((6.6 - L.x) / 13.2, v), 1, vec2f(-dLx.x / 13.2, dv.x), vec2f(-dLy.x / 13.2, dv.y)).rgb; }
+  if (w.z > 0.004) { c += w.z * textureSampleGrad(t_paint, s_aniso, vec2f((L.y + 5.6) / 13.2, v), 2, vec2f(dLx.y / 13.2, dv.x), vec2f(dLy.y / 13.2, dv.y)).rgb; }
+  return vec4f(c, 1.0);
+}
+
+// Where the engines' exhaust leaves: the nozzle exits are at z = 8.0, the
+// engines' centrelines 0.52 m either side and 0.05 m below the datum.
+const NOZZLE_Z = 8.0;
+fn plume_r(L: vec3f) -> f32 { return length(vec2f(abs(L.x) - 0.52, L.y + 0.05)); }
+
+// The exhaust plume (material 17, drawn in the transparent pass): shells and
+// discs round each engine's jet that glow by how squarely they are looked
+// through, so the whole reads as a volume. in.mat.w: 0 the heat haze, 1 the
+// flame's sheath, 2 its core, 3 discs across it (what is seen looking up the
+// jet). Dry, the jet only makes the air shimmer; with the afterburners lit
+// it is a flame five metres long with shock diamonds standing in it.
+fn plume(in: VOut) -> vec4f {
+  let layer = u32(in.mat.w + 0.5);
+  let ab = burner();
+  let dry = dry_power();
+  let L = in.L;
+  let z = L.z - NOZZLE_Z;
+  let V = normalize(in.P);
+  let ndv = abs(dot(normalize(in.N), V));
+  let t = G.time.x;
+  let side = sign(L.x);
+  // Turbulence streaming aft with the jet.
+  let n1 = nz(vec3f(L.x * 1.7 + side * 3.1, L.y * 1.7, z * 0.30 - t * 9.0));
+  let n2 = nz(vec3f(L.x * 5.0 + side, L.y * 5.0, z * 0.9 - t * 21.0));
+  if (layer == 0u) {
+    // Heat haze: what lies behind the jet shimmers through it.
+    let k = (0.10 + 0.55 * dry + 0.6 * ab) * (0.3 + 0.7 * smoothstep(0.0, 0.6, ndv)) * smoothstep(-0.05, 0.8, z) * (1.0 - smoothstep(5.0, 11.5, z));
+    if (k < 0.01) { discard; }
+    let off = (vec2f(n1.g, n1.b) - 0.5 + (vec2f(n2.r, n2.a) - 0.5) * 0.6) * k * 0.05 / max(length(in.P), 2.0);
+    let uv = in.clip.xy * G.screen.zw + off;
+    var seen = textureLoad(t_scene, vec2i(in.clip.xy), 0).rgb;
+    let q = vec2i(clamp(uv * G.screen.xy, vec2f(0.0), G.screen.xy - 1.0));
+    if (textureLoad(t_gdepth, q, 0) <= in.clip.z) { seen = textureSampleLevel(t_scene, s_clamp, uv, 0.0).rgb; }
+    let a = sat(k * 1.6);
+    return vec4f(seen * a, a);
+  }
+  let l = light_at_nv(in.P);
+  let night = 1.0 - smoothstep(-0.08, 0.1, dot(l.upn, G.sun_dir.xyz));
+  // Shock diamonds: bright knots where the pressure waves in the jet cross,
+  // closer together and fainter aft; and the cone of flame off the nozzle.
+  let zd = z * (1.0 + 0.035 * z);
+  let dia = pow(0.5 + 0.5 * cos((zd - 0.62) * 6.2832 / 0.88), 3.0) * exp(-max(z, 0.0) / 2.6) * smoothstep(0.15, 0.5, z);
+  let cone = exp(-max(z, 0.0) / 0.45);
+  let flick = 0.72 + 0.56 * n1.r;
+  var col = vec3f(0.0);
+  var glow = 0.0;
+  if (layer == 2u) {
+    // The core: blue-white off the nozzle, the diamonds yellow-white, orange further back.
+    let s = z / 4.5;
+    col = mix(vec3f(0.55, 0.70, 1.0), vec3f(1.0, 0.72, 0.36), smoothstep(0.0, 0.6, s));
+    col = mix(col, vec3f(1.0, 0.90, 0.70), sat(dia * 1.4));
+    glow = ab * (0.10 + 1.1 * cone + 2.3 * dia) * pow(ndv, 1.4) * (1.0 - smoothstep(0.5, 1.0, s)) * flick;
+  } else if (layer == 1u) {
+    // The sheath: a thin orange going to red, with a violet edge near the nozzle.
+    let s = z / 6.9;
+    col = mix(vec3f(1.0, 0.46, 0.14), vec3f(0.85, 0.18, 0.04), smoothstep(0.1, 0.9, s));
+    col = mix(col, vec3f(0.50, 0.40, 1.0), 0.45 * (1.0 - ndv) * (1.0 - smoothstep(0.0, 0.45, s)));
+    glow = ab * (0.20 + 0.25 * cone + 0.40 * dia) * pow(ndv, 2.0) * (1.0 - smoothstep(0.25, 1.0, s)) * (0.5 + 1.0 * n2.g);
+    // Dry, at full power: a faint glow off the nozzle, only seen at dusk.
+    glow += dry * dry * 0.012 * pow(ndv, 2.0) * (1.0 - smoothstep(0.0, 0.3, s));
+  } else {
+    // Discs across the jet: its glow seen from behind, down its length.
+    let s = z / 5.6;
+    let r = plume_r(L) / max(0.36 * (1.0 - 0.75 * s), 0.05);
+    col = mix(vec3f(0.75, 0.80, 1.0), vec3f(1.0, 0.55, 0.20), sat(smoothstep(0.0, 0.7, s) * 0.6 + 0.6 * r));
+    glow = ab * 0.20 * pow(ndv, 3.0) * pow(sat(1.0 - r * r), 1.5) * (1.0 - smoothstep(0.4, 1.0, s)) * (0.6 + 1.2 * dia + 0.6 * cone) * flick;
+  }
+  glow *= smoothstep(-0.14, 0.06, z);
+  if (glow < 0.0005) { discard; }
+  // (Turned down at night, when the eye has opened up; it still blooms.)
+  return vec4f(col * glow * G.sun_dir.w * mix(0.06, 0.007, night), 0.0);
+}
+
 // Lit colour, normal and SSR weight, and whether the fragment lies in an opening.
 struct Shaded { c: vec4f, n: vec4f, kill: f32, amb: f32 };
 
@@ -1062,7 +1168,16 @@ fn surface(in: VOut) -> Shaded {
   let dPy = dpdy(in.P);
   let px = max(length(dPx), length(dPy));
   let duv = max(length(dpdx(in.uv)), length(dpdy(in.uv)));
-  let rel = relief(pt, in.uv, in.L, in.Nl, px);
+  let dLx = dpdx(in.L);
+  let dLy = dpdy(in.L);
+  var rel = relief(pt, in.uv, in.L, in.Nl, px);
+  // The Hornet's paint; its panel lines and rivets, darker than the skin
+  // round them, are taken to lie a little below it.
+  var paint = vec4f(0.0);
+  if (kind() == 2u && pt == P_HORNET) {
+    paint = hornet_paint(in.L, in.Nl, dLx, dLy);
+    rel.x += luma(paint.rgb) * 0.004 * paint.a * (1.0 - smoothstep(0.003, 0.012, px));
+  }
   let hx = dpdx(rel.x);
   let hy = dpdy(rel.x);
   let cuts = pt == P_FUSE || pt == P_COWL || pt == P_LINING;
@@ -1080,7 +1195,7 @@ fn surface(in: VOut) -> Shaded {
   // belly that stretches distances along the skin, so measure the edge there.
   let wl_s = wl * px / max(length(vec2f(dpdx(wl), dpdy(wl))), 1e-7);
   let td = tear_d(in.L);
-  let kill = (cuts && (wd < 0.0 || wl < 0.0)) || id == M_GLASS || id == M_PROPDISC || td > 0.0;
+  let kill = (cuts && (wd < 0.0 || wl < 0.0)) || id == M_GLASS || id == M_PROPDISC || id == M_PLUME || td > 0.0;
 
   var n0 = in.N;
   if (dot(n0, n0) < 1e-10) { n0 = -in.P; }
@@ -1113,6 +1228,11 @@ fn surface(in: VOut) -> Shaded {
     case 0u, 1u, 15u: {
       if (id == 1u) { albedo = livery(L, px * 1.2, pt); }
       rough = select(0.13 + 0.08 * ns.g, 0.5 + 0.15 * ns.g, id == 15u);
+      if (pt == P_HORNET && paint.a > 0.5) {
+        // The Hornet's matte tactical greys, as painted; fluid stains (darker and browner) are a little glossier.
+        albedo = paint.rgb * 0.85;
+        rough = 0.48 + 0.14 * ns.g - 0.12 * smoothstep(0.02, 0.10, paint.r - paint.b);
+      }
       // Each skin panel's paint aged a little differently.
       albedo *= 0.985 + 0.03 * fine.a * select(0.4, 1.0, id == 1u);
       if (id == 1u || pt == P_FUSE) {
@@ -1241,11 +1361,23 @@ fn surface(in: VOut) -> Shaded {
         case 5u: { on = P5.w; k = mix(0.3, 0.8, night); }
         case 6u: { on = step(0.999, P4.z); k = mix(0.05, 0.01, night); }
         case 7u: { on = step(P4.z, 0.001); k = mix(0.05, 0.01, night); }
+        // Formation light strips: pale panels by day, a soft green glow with the navigation lights at night.
+        case 9u: { on = step(999.0, P5.x); k = 0.012 * night; }
         default: { on = 1.0; k = 0.004; }
       }
       emit = in.col.rgb * on * k * G.sun_dir.w;
       if (ch == 5u) { emit *= 0.6 + 0.4 * smoothstep(1.0, 0.0, length(in.uv)); }
       albedo = in.col.rgb * 0.15;
+      if (ch == 9u) { albedo = vec3f(0.40, 0.43, 0.27); rough = 0.4; }
+      if (ch == 8u && kind() == 2u) {
+        // The Hornet's displays: rows of green symbology on a dark screen, a frame round each.
+        let cell = vec2f(L.x * 105.0, L.y * 62.0);
+        let row = step(0.22, fract(cell.y)) * step(fract(cell.y), 0.62);
+        let word = step(0.52, hash2(floor(cell) + 7.0)) * step(hash2(floor(cell * vec2f(0.25, 1.0)) + 3.0), 0.8);
+        let fade = 1.0 - smoothstep(0.0015, 0.006, px);
+        emit *= mix(0.30, 0.05 + 1.5 * row * word, fade);
+        albedo = vec3f(0.006, 0.010, 0.008);
+      }
       ssr = 0.5;
     }
     case 9u: { // instrument face under glass
@@ -1262,6 +1394,36 @@ fn surface(in: VOut) -> Shaded {
     }
     case 11u: { // exhaust: heat-tinted, sooted at the outlet
       metal = 0.75;
+      if (kind() == 2u) {
+        // The Hornet's nozzles. in.mat.w: 0 the petals outside, 1 inside the
+        // nozzle, 2 the flame holder at the bottom of it.
+        let part = u32(in.mat.w + 0.5);
+        let s = sat((L.z - 7.15) / 0.85);  // 0 at the shroud .. 1 at the lip
+        if (part == 0u) {
+          // Titanium petals: straw and blue heat tints toward the lip, soot streaked along them.
+          rough = 0.38 + 0.2 * fine.g;
+          metal = 0.9;
+          let streak = nz(vec3f(atan2(L.y + 0.05, abs(L.x) - 0.52) * 2.4, 0.3, L.z * 0.6)).r;
+          albedo = mix(vec3f(0.36, 0.34, 0.32), vec3f(0.30, 0.23, 0.16), smoothstep(0.05, 0.55, s));
+          albedo = mix(albedo, vec3f(0.17, 0.165, 0.20), smoothstep(0.5, 0.9, s) * 0.7);
+          albedo *= (0.55 + 0.6 * streak) * (0.8 + 0.3 * fine.r);
+          albedo = mix(albedo, vec3f(0.03), smoothstep(0.93, 1.0, s) * 0.7);
+        } else {
+          // Sooted black inside; glowing when the burners are lit, and a dull
+          // red from the turbine at full dry power, deep in.
+          rough = 0.85;
+          metal = 0.2;
+          albedo = vec3f(0.035, 0.032, 0.03) * (0.6 + 0.8 * fine.g);
+          let deep = sat((NOZZLE_Z - L.z) / 0.58);
+          let fl = 0.8 + 0.4 * nz(vec3f(L.xy * 4.0, G.time.x * 7.0)).r;
+          let dry = dry_power();
+          var heat = burner() * fl * mix(0.35, 1.3, deep) + dry * dry * 0.03 * deep;
+          if (part == 2u) { heat = burner() * fl * 2.4 + dry * dry * 0.07; }
+          emit = mix(vec3f(1.0, 0.30, 0.06), vec3f(1.0, 0.72, 0.38), sat(heat * 0.6)) * heat * G.sun_dir.w * mix(0.08, 0.014, night);
+          ao = max(ao, 0.3);
+        }
+        break;
+      }
       if (kind() == 1u) {
         // A turbofan's nozzle and plug: heat-blued steel, darker toward the outlet.
         rough = 0.4;
@@ -1392,6 +1554,8 @@ fn surface(in: VOut) -> Shaded {
   // occlusion term alone would miss.
   var inside = step(abs(L.x), 0.58) * step(-1.42, L.z) * step(L.z, 1.5) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL);
   if (kind() == 1u) { inside = step(abs(L.x), 2.2) * step(-29.0, L.z) * step(L.z, -22.4) * step(1.9, L.y) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE); }
+  // The Hornet's cockpit tub, under its canopy.
+  if (kind() == 2u) { inside = step(abs(L.x), 0.5) * step(-6.1, L.z) * step(L.z, -3.1) * step(0.1, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   // (The baked occlusion already counts only the sky seen through the
   // windows; the eye adapts to the dimmer cabin, main.rs / cockpit.rs.)
   let amb_ao = mix(ao * ao * (3.0 - 2.0 * ao), 0.06 + 0.94 * ao, inside);
@@ -1458,6 +1622,7 @@ const GS_Z = -1.30; // cabin::PANEL_Z
 @fragment fn fs_glass(in: VOut) -> @location(0) vec4f {
   let px = max(length(dpdx(in.P)), length(dpdy(in.P)));
   let id = u32(in.mat.x + 0.5);
+  if (id == M_PLUME) { return plume(in); }
   let V = normalize(in.P);
   var N = normalize(in.N);
   let from_inside = dot(N, V) > 0.0;

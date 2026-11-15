@@ -1569,6 +1569,7 @@ pub static SPEC: Spec = Spec {
     stall_slat: 0.035,
     alpha_trim: 0.20,
     mcrit: 0.78,
+    cd_wave: 0.0,
     spoiler_cd: 0.06,
     spoiler_cl: 0.45,
     flaps: &[0.0, 1.0, 5.0, 10.0, 20.0, 25.0, 30.0],
@@ -1583,10 +1584,11 @@ pub static SPEC: Spec = Spec {
     // Limit load 2.5 g, ultimate 3.75 g.
     g_limit: 2.6,
     g_break: 3.8,
+    fbw_g: 0.0,
     steer_max: 1.0,
     steer_fade: 12.0,
     // Four PW4056s, 252 kN (56,750 lbf) each.
-    engine: Engine::Fan(Fan { n: 4, thrust: 252_000.0, idle: 0.25, idle_thrust: 0.035, n1_rpm: 3600.0, spool_up: 0.6, spool_down: 0.5, reverse: 0.35, reverser_time: 2.0 }),
+    engine: Engine::Fan(Fan { n: 4, thrust: 252_000.0, idle: 0.25, idle_thrust: 0.035, n1_rpm: 3600.0, spool_up: 0.6, spool_down: 0.5, reverse: 0.35, reverser_time: 2.0, boost: 1.08, mach_lapse: [0.78, 0.38] }),
     handling: Handling {
         q_ref: 11_000.0,
         a_max: 1.6,

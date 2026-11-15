@@ -111,6 +111,7 @@ pub static SPEC: Spec = Spec {
     stall_slat: 0.0,
     alpha_trim: 0.24,
     mcrit: 0.0,
+    cd_wave: 0.0,
     spoiler_cd: 0.0,
     spoiler_cl: 0.0,
     flaps: &[0.0, 10.0, 20.0, 30.0],
@@ -126,6 +127,7 @@ pub static SPEC: Spec = Spec {
     // Limit load is 4.4 g; hold more than that and the spar fatigues, 6.6 g snaps it outright.
     g_limit: 4.6,
     g_break: 6.6,
+    fbw_g: 0.0,
     steer_max: 0.45,
     steer_fade: 0.0,
     // 180 hp at 2700 rpm turning a 76 in fixed-pitch propeller.

@@ -9,12 +9,13 @@
 //! the centre of gravity.
 pub mod b747;
 pub mod c172;
+pub mod fa18;
 
 use crate::airframe::{Model, Sect};
 use glam::{DVec3, Vec3};
 
 /// Every type, in the order the menu lists them.
-pub static ALL: [&Spec; 2] = [&c172::SPEC, &b747::SPEC];
+pub static ALL: [&Spec; 3] = [&c172::SPEC, &b747::SPEC, &fa18::SPEC];
 
 /// A type by its short name (`c172`, `747`, ...), as typed on the command line.
 pub fn by_key(key: &str) -> Option<&'static Spec> {
@@ -143,6 +144,11 @@ pub struct Fan {
     /// reverse thrust as a fraction of forward, and how long the reversers take to deploy (s)
     pub reverse: f64,
     pub reverser_time: f64,
+    /// thrust with the boost key held, as a multiple of full dry thrust (an afterburner)
+    pub boost: f64,
+    /// thrust lapse with Mach number m: 1 - a m + b m² (a high-bypass fan loses thrust
+    /// as it speeds up; a low-bypass afterburning engine gains it from the ram air)
+    pub mach_lapse: [f64; 2],
 }
 
 pub enum Engine {
@@ -203,6 +209,8 @@ pub struct Hole {
 pub enum Sound {
     Piston,
     Jet,
+    /// a pair of afterburning engines, from recordings (audio.rs `Fighter`)
+    Fighter,
 }
 
 pub struct Spec {
@@ -268,6 +276,8 @@ pub struct Spec {
     pub alpha_trim: f64,
     /// Mach number where wave drag starts (0: never flies fast enough to care)
     pub mcrit: f64,
+    /// supersonic wave drag it levels off at by `mcrit` + 0.25 (0: Lock's fourth-power rise, for subsonic types)
+    pub cd_wave: f64,
     /// spoilers fully up: the drag they add and the lift they dump
     pub spoiler_cd: f64,
     pub spoiler_cl: f64,
@@ -286,6 +296,8 @@ pub struct Spec {
     /// load where the spar starts to fatigue, and where it snaps
     pub g_limit: f32,
     pub g_break: f32,
+    /// fly-by-wire: the most load (g) the stick can ask for (0: none, the stick moves the elevator)
+    pub fbw_g: f64,
     /// nose wheel steering: largest angle, and the speed it fades down to a fifth by (0: it does not)
     pub steer_max: f64,
     pub steer_fade: f64,
