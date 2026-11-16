@@ -376,6 +376,112 @@ fn signal(cx: &Ctx, mesh: &mut Mesh, m: Vec2, toward: Vec2, tan: Vec2, z: f32, m
     }
 }
 
+fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let d = b - a;
+    let t = ((p - a).dot(d) / d.length_squared().max(1e-9)).clamp(0.0, 1.0);
+    (a + d * t - p).length()
+}
+
+/// Is `p` within `r` of the polyline (all in tile units)?
+fn near_line(pts: &[[f32; 2]], p: Vec2, r: f32) -> bool {
+    pts.windows(2).any(|w| seg_dist(p, Vec2::from(w[0]), Vec2::from(w[1])) < r)
+}
+
+/// Roads that only repeat another road: the map often carries the same street
+/// twice (two overlapping ways, a service road traced along a main road, both
+/// halves of a road drawn on one line). Each would be laid as its own ribbon on
+/// top of the other, doubling markings and fighting over the surface. A ground
+/// road whose centreline lies inside a more important (or earlier, if equal)
+/// road's carriageway for most of its length is dropped. Crossings and side
+/// streets are not affected: only a few of their samples fall inside the other.
+fn redundant(vt: &VecTile, urban: bool, um: f32) -> Vec<bool> {
+    let n = vt.roads.len();
+    let mut skip = vec![false; n];
+    let ground = |l: &RoadLine| l.brunnel == 0 && l.class <= RC_SERVICE && l.pts.len() >= 2;
+    // half width of each carriageway, in tile units
+    let hw: Vec<f32> = vt.roads.iter().map(|l| cfg(l, urban).drive * 0.5 / um).collect();
+    let bb: Vec<[f32; 4]> = vt.roads.iter().map(|l| l.pts.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])])).collect();
+    let step = 3.0 / um;
+    for i in 0..n {
+        let li = &vt.roads[i];
+        if !ground(li) {
+            continue;
+        }
+        let rivals: Vec<usize> = (0..n)
+            .filter(|&j| {
+                let lj = &vt.roads[j];
+                j != i
+                    && ground(lj)
+                    && lj.layer == li.layer
+                    && (lj.class < li.class || (lj.class == li.class && j < i))
+                    && !(bb[i][0] > bb[j][2] + hw[j] || bb[j][0] - hw[j] > bb[i][2] || bb[i][1] > bb[j][3] + hw[j] || bb[j][1] - hw[j] > bb[i][3])
+            })
+            .collect();
+        if rivals.is_empty() {
+            continue;
+        }
+        let (mut total, mut covered) = (0u32, 0u32);
+        for w in li.pts.windows(2) {
+            let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+            let m = (((b - a).length() / step).ceil().max(1.0)) as u32;
+            for s in 0..m {
+                let p = a + (b - a) * ((s as f32 + 0.5) / m as f32);
+                total += 1;
+                if rivals.iter().any(|&j| near_line(&vt.roads[j].pts, p, hw[j] * 0.6)) {
+                    covered += 1;
+                }
+            }
+        }
+        if total >= 3 && covered as f32 >= 0.8 * total as f32 {
+            skip[i] = true;
+        }
+    }
+    skip
+}
+
+/// Stamp the pixels within `hw` pixels of the segment a-b into a RASTER x RASTER mask.
+fn stamp_segment(mask: &mut [u8], a: Vec2, b: Vec2, hw: f32) {
+    let r = RASTER as i64;
+    let (x0, x1) = ((a.x.min(b.x) - hw).floor().max(0.0) as i64, ((a.x.max(b.x) + hw).ceil() as i64).min(r));
+    let (y0, y1) = ((a.y.min(b.y) - hw).floor().max(0.0) as i64, ((a.y.max(b.y) + hw).ceil() as i64).min(r));
+    let d = b - a;
+    let dd = d.length_squared().max(1e-6);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - a;
+            let t = (p.dot(d) / dd).clamp(0.0, 1.0);
+            if (p - d * t).length_squared() < hw * hw {
+                mask[y as usize * RASTER + x as usize] = 1;
+            }
+        }
+    }
+}
+
+/// RASTER x RASTER mask, non-zero on the carriageway of every road that lies on
+/// the ground (no bridges, tunnels, paths, tracks, rail or alleys), a little
+/// narrower than the drawn ribbon. Used to keep buildings off the street: it
+/// has to exist before the buildings are placed, unlike `Roads::mask`.
+pub fn surface_mask(vt: &VecTile, ext: f32, um: f32) -> Vec<u8> {
+    let urban = vt.buildings.len() > 150;
+    let k = RASTER as f32 / ext;
+    let skip = redundant(vt, urban, um);
+    let mut mask = vec![0u8; RASTER * RASTER];
+    for (li, line) in vt.roads.iter().enumerate() {
+        if skip[li] || line.brunnel != 0 || line.class > RC_SERVICE || (line.class == RC_SERVICE && line.sub == 1) || line.pts.len() < 2 {
+            continue;
+        }
+        let cf = cfg(line, urban);
+        // (metres -> tile units -> raster pixels)
+        let hw = ((cf.drive * 0.5 - 0.5).max(1.0) / um) * k;
+        for piece in clip(&line.pts, ext) {
+            for w in piece.windows(2) {
+                stamp_segment(&mut mask, Vec2::new(w[0][0] * k, w[0][1] * k), Vec2::new(w[1][0] * k, w[1][1] * k), hw);
+            }
+        }
+    }
+    mask
+}
+
 pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut Mesh, footprints: &mut Vec<Footprint>, built: &[u8]) -> Roads {
     let ext = cx.ext;
     let um = cx.unit_m;
@@ -383,6 +489,8 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
     let yellow = cx.lon < -30.0;
     let mut out = Roads { verts: Vec::new(), idx: Vec::new(), net: RoadNet { left: drives_left(cx.lat, cx.lon), ..Default::default() }, mask: vec![0u8; RASTER * RASTER], radius: 0.0 };
     let own_bridges = bridge_pieces(vt);
+    // Roads that only repeat another one are not laid a second time.
+    let dup = redundant(vt, urban, um);
     let mut mids: Vec<(u64, u32, f32)> = Vec::new();
     let mut order: Vec<usize> = (0..vt.roads.len()).collect();
     let prio = |c: u8| match c {
@@ -401,6 +509,9 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
     let mut n_lamps = 0usize;
 
     for li in order {
+        if dup[li] {
+            continue;
+        }
         let line = &vt.roads[li];
         let cf = cfg(line, urban);
         let half = cf.drive * 0.5 + if cf.walk { 1.9 } else { 0.0 };
@@ -724,4 +835,49 @@ pub fn park_cars(cx: &Ctx, net: &RoadNet, hoods: &Hoods, built: &[u8]) -> Vec<Pa
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(pts: Vec<[f32; 2]>, class: u8) -> RoadLine {
+        RoadLine { pts, class, brunnel: 0, oneway: false, ramp: false, layer: 0, sub: 0 }
+    }
+    fn tile(roads: Vec<RoadLine>) -> VecTile {
+        VecTile { extent: 1024.0, water: vec![], buildings: vec![], roads, landcover: vec![], landuse: vec![], aero_lines: vec![], aero_polys: vec![], gates: vec![] }
+    }
+
+    #[test]
+    fn a_repeated_road_is_laid_once() {
+        let a = vec![[100.0, 500.0], [400.0, 500.0]];
+        let t = tile(vec![line(a.clone(), RC_MINOR), line(a, RC_MINOR)]);
+        let dup = redundant(&t, false, 1.0);
+        assert_eq!(dup.iter().filter(|d| **d).count(), 1);
+    }
+
+    #[test]
+    fn crossing_roads_both_stay() {
+        let t = tile(vec![line(vec![[100.0, 500.0], [400.0, 500.0]], RC_MINOR), line(vec![[250.0, 300.0], [250.0, 700.0]], RC_MINOR)]);
+        assert!(redundant(&t, false, 1.0).iter().all(|d| !*d));
+    }
+
+    #[test]
+    fn a_road_beside_another_stays() {
+        let t = tile(vec![line(vec![[100.0, 500.0], [400.0, 500.0]], RC_MINOR), line(vec![[100.0, 520.0], [400.0, 520.0]], RC_MINOR)]);
+        assert!(redundant(&t, false, 1.0).iter().all(|d| !*d));
+    }
+
+    #[test]
+    fn buildings_on_the_street_are_found() {
+        let t = tile(vec![line(vec![[100.0, 500.0], [400.0, 500.0]], RC_MINOR)]);
+        let mask = surface_mask(&t, 1024.0, 1.0);
+        let k = RASTER as f32 / 1024.0;
+        assert!(mask[(500.0 * k) as usize * RASTER + (250.0 * k) as usize] != 0);
+        assert!(mask[(560.0 * k) as usize * RASTER + (250.0 * k) as usize] == 0);
+        let on = [[240.0, 497.0], [260.0, 497.0], [260.0, 503.0], [240.0, 503.0]];
+        let off = [[240.0, 600.0], [260.0, 600.0], [260.0, 610.0], [240.0, 610.0]];
+        assert!(crate::buildings::on_road(&mask, &on, 1024.0));
+        assert!(!crate::buildings::on_road(&mask, &off, 1024.0));
+    }
 }
