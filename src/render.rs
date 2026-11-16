@@ -37,6 +37,12 @@ const MAX_BUILDS: u64 = 512; // detail tiles; one extra slot is kept for loose t
 const MAX_OBJS: u64 = 256;
 /// airfields drawn at once, and lights on moving things (aircraft)
 pub const MAX_FIELDS: usize = 8;
+/// Lights on moving things (aircraft). Phones (4 GB of RAM, an integrated
+/// GPU) get by with a quarter of the desktop cap: the buffer is allocated
+/// however large the constant is, whether or not any light fills it.
+#[cfg(target_os = "android")]
+pub const MAX_DYN_LIGHTS: usize = 2048;
+#[cfg(not(target_os = "android"))]
 pub const MAX_DYN_LIGHTS: usize = 8192;
 /// Shadow map layer that only the aircraft casts into, a few metres across.
 pub const PLANE_LAYER: usize = CASCADES;
@@ -1314,8 +1320,15 @@ impl Renderer {
         let info = adapter.get_info();
         log::info!("GPU: {} ({:?})", info.name, info.device_type);
         let integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
+        // Requiring an 8192 texture limit locks out GPUs that top out at
+        // 4096 (plenty of phones of the 4 GB-RAM era: Mali-G52 and the
+        // like): request_device would fail and the app die on a black
+        // screen. Nothing actually needs more than 4096 outside Ultra's
+        // 6144 shadow atlas, so ask for what this adapter has, capped as
+        // before.
+        let tex_limit = adapter.limits().max_texture_dimension_2d.min(8192);
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor { label: None, required_limits: wgpu::Limits { max_texture_dimension_2d: 8192, max_sampled_textures_per_shader_stage: adapter.limits().max_sampled_textures_per_shader_stage.clamp(16, 32), ..Default::default() }, memory_hints: MEMORY_HINTS, ..Default::default() })
+            .request_device(&wgpu::DeviceDescriptor { label: None, required_limits: wgpu::Limits { max_texture_dimension_2d: tex_limit, max_sampled_textures_per_shader_stage: adapter.limits().max_sampled_textures_per_shader_stage.clamp(16, 32), ..Default::default() }, memory_hints: MEMORY_HINTS, ..Default::default() })
             .await?;
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).ok_or_else(|| anyhow::anyhow!("surface unsupported"))?;

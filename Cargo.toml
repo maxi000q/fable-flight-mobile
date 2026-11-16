@@ -32,6 +32,11 @@ roxmltree = "0.20"
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
 
+# Android: link the system's liblog for the hand-written logcat binding
+# (lib.rs `android_logging`) — the Rust linker does not pull it in alone.
+[target.'cfg(target_os = "android")'.dependencies]
+android-link-args = { path = "android-link-args" }
+
 # Android: a dynamic library the app package loads, with winit's glue built
 # on NativeActivity (no Java to compile). Everywhere else it is a plain
 # binary as before; the feature is harmless off Android.

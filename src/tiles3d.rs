@@ -46,9 +46,16 @@ pub const ZONE_R: f64 = 9000.0;
 /// Half the width of the coverage mask (it is re-centred when the aircraft
 /// has moved this margin past where it was laid).
 pub const MASK_HALF: f64 = ZONE_R + 2500.0;
-/// Fetch threads; `Params::fetches` of them work at a time.
+/// Fetch threads; `Params::fetches` of them work at a time. Fewer on a
+/// phone: each holds a decoded mesh in RAM while it lands.
+#[cfg(target_os = "android")]
+const WORKERS: usize = 4;
+#[cfg(not(target_os = "android"))]
 const WORKERS: usize = 12;
 /// Requests waiting at most (the closest first); the rest wait a frame.
+#[cfg(target_os = "android")]
+const MAX_QUEUE: usize = 24;
+#[cfg(not(target_os = "android"))]
 const MAX_QUEUE: usize = 64;
 /// Bytes copied to the GPU per frame at most.
 const UPLOAD_BUDGET: usize = 12 << 20;
@@ -87,12 +94,17 @@ pub struct Params {
 impl Params {
     pub fn of(d: Detail) -> Self {
         let (sse_px, zone_r, mb, fetches) = match d {
+            // fetches is capped by WORKERS at runtime; on a phone fewer
+            // threads exist than the busiest detail level asks for, and
+            // the rest of the queue simply waits a turn. The GPU budget
+            // (the photo tiles' share of memory) is halved there too.
             Detail::Low => (32.0, 4000.0, 256, 3),
             Detail::Medium => (24.0, 6000.0, 400, 5),
             Detail::High => (16.0, ZONE_R, 640, 8),
             Detail::Ultra => (11.0, ZONE_R, 1024, 12),
         };
-        Self { sse_px, zone_r, gpu_budget: mb << 20, fetches }
+        let mb = if cfg!(target_os = "android") { mb / 2 } else { mb };
+        Self { sse_px, zone_r, gpu_budget: mb << 20, fetches: fetches.min(WORKERS) }
     }
 
     /// The band at the zone's edge over which the mesh dissolves into our

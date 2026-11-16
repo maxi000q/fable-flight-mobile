@@ -103,6 +103,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-link-args"
+version = "0.1.0"
+
+[[package]]
 name = "android-properties"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,6 +838,7 @@ name = "fablegame"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "android-link-args",
  "anyhow",
  "bytemuck",
  "crossbeam-channel",

@@ -1,0 +1,8 @@
+[package]
+name = "android-link-args"
+version = "0.1.0"
+edition = "2021"
+
+# Links liblog on Android only; on other targets the crate is empty and
+# harmless, but it is only ever built from fablegame's android target.
+[target.'cfg(target_os = "android")'.link]

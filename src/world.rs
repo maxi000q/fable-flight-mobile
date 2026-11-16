@@ -180,6 +180,10 @@ pub struct World {
     builds: HashMap<TileId, BSlot>,
     frame: u64,
     in_flight: usize,
+    /// Cap on tiles being built at once. Each holds a mesh, buildings and
+    /// imagery in memory while it loads, so a phone (4 GB, shared with the
+    /// GPU) keeps a tighter queue than a desktop.
+    max_in_flight: usize,
     pub max_zoom: u8,
     pub lod_k: f64,
     /// multiplies how far out building (and tree) tiles are loaded (graphics settings)
@@ -233,7 +237,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_in_flight: if cfg!(target_os = "android") { 12 } else { 28 }, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -970,7 +974,7 @@ impl World {
                 match self.fields.get_mut(&i) {
                     Some(FSlot::Ready(f)) => f.last_used = self.frame,
                     Some(_) => {}
-                    None if self.in_flight < 28 => {
+                    None if self.in_flight < self.max_in_flight => {
                         self.fields.insert(i, FSlot::Loading);
                         self.in_flight += 1;
                         self.loader.submit(1.0 + (d / 9000.0) as f32, Job::Airfield(i));
@@ -983,7 +987,7 @@ impl World {
         // Dispatch the most urgent requests.
         self.wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (prio, id) in self.wanted.drain(..) {
-            if self.in_flight >= 28 {
+            if self.in_flight >= self.max_in_flight {
                 break;
             }
             self.in_flight += 1;
@@ -1007,14 +1011,20 @@ impl World {
             }
         }
 
-        // Evict what has not been needed for a while.
+        // Evict what has not been needed for a while. The tile cache keeps
+        // fewer tiles on a phone: each is a GPU mesh plus imagery, and the
+        // GPU's memory is the system's there.
         if self.frame % 120 == 0 {
             let f = self.frame;
-            if self.tiles.len() > 700 {
+            let tile_cap = if cfg!(target_os = "android") { 350 } else { 700 };
+            if self.tiles.len() > tile_cap {
                 self.tiles.retain(|id, s| id.z <= 3 || !matches!(s, Slot::Ready(t) if f - t.last_used > 600));
             }
             self.tiles.retain(|_, s| !matches!(s, Slot::Failed) || f % 3600 != 0);
-            self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if f - b.last_used > 900));
+            // Buildings are the heavier half of a tile; on a phone they go
+            // sooner too.
+            let build_keep = if cfg!(target_os = "android") { 450 } else { 900 };
+            self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if f - b.last_used > build_keep));
             self.fields.retain(|_, s| match s {
                 FSlot::Ready(fl) => f - fl.last_used < 1200,
                 FSlot::Failed => f % 3600 != 0,

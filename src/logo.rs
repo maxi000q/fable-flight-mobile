@@ -10,7 +10,9 @@ pub const TEXT: &str = "FABLE FLIGHT";
 pub fn find_font() -> Option<Vec<u8>> {
     let fc = std::process::Command::new("fc-match").args(["-f", "%{file}", "sans:weight=bold"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok());
     let fallbacks = ["/usr/share/fonts/google-noto/NotoSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf", "C:/Windows/Fonts/segoeuib.ttf"];
-    fc.iter().map(|s| s.trim().to_string()).chain(fallbacks.iter().map(|s| s.to_string())).filter(|p| p.ends_with(".ttf") || p.ends_with(".otf")).find_map(|p| std::fs::read(p).ok())
+    // The embedded bold face (assets/fonts): Android has none of the paths
+    // above and no fontconfig, and without it the title renders empty.
+    fc.iter().map(|s| s.trim().to_string()).chain(fallbacks.iter().map(|s| s.to_string())).filter(|p| p.ends_with(".ttf") || p.ends_with(".otf")).find_map(|p| std::fs::read(p).ok()).or_else(|| Some(include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf").to_vec()))
 }
 
 /// The title's coverage (0..255) on a `w` x `h` screen with UI scale

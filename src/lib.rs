@@ -108,8 +108,10 @@ const MOON_E: f32 = SUN_E * 0.0035;
 /// it shares memory bandwidth and power with the CPU, and the full-resolution
 /// scene is too much for it. The temporal AA and its sharpening hide most of it.
 const INTEGRATED_SCALE: f32 = 0.75;
-/// Render resolution phones start at (before any saved settings).
-const MOBILE_SCALE: f32 = 0.8;
+/// Render resolution phones start at (before any saved settings). Low on
+/// purpose: a 4 GB phone shares its RAM between the app, the GPU and the
+/// system, and the temporal AA's sharpening hides most of the softness.
+const MOBILE_SCALE: f32 = 0.65;
 /// What a 3D tiles detail level costs, as measured over San Francisco (see
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
@@ -784,10 +786,22 @@ impl Game {
         let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync))?;
         if let Some(sc) = args.render_scale {
             gfx.scale = sc;
+        } else if touchui::active() && !graphics::Graphics::saved() {
+            // Re-asserted here: Renderer::new may have read the window's
+            // size before the fullscreen mode settled, and the mobile
+            // scale is a memory decision, not an aesthetic one.
+            gfx.scale = MOBILE_SCALE;
         } else if r.integrated && !graphics::Graphics::saved() {
             gfx.scale = INTEGRATED_SCALE;
         }
-        let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
+        // The app's own files, not a desktop cache dir Android does not
+        // have; dirs::cache_dir() is None there and would fall back to
+        // "." — a read-only APK directory — silently losing every tile.
+        let cache = if cfg!(target_os = "android") {
+            std::env::var("EXTERNAL_STORAGE").ok().map(PathBuf::from).filter(|p| p.join("fablegame").exists()).unwrap_or_else(|| PathBuf::from("/sdcard"))
+        } else {
+            dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."))
+        }.join("fablegame");
         let mut r = r;
         r.headless = args.headless;
         // Cached scans load offline too; missing ones keep the procedural layer.
@@ -822,7 +836,12 @@ impl Game {
         if let Some(spec) = &args.damage {
             plane.dmg.apply_spec(spec);
         }
-        let mut world = world::World::new(sources::Loader::new(src.clone(), 14), args.max_zoom);
+        // A phone spawns a third of the loader threads a desktop does: each
+        // one holds a tile under construction (terrain mesh, buildings,
+        // imagery) in memory at once, and on a 4 GB device that competes
+        // with the GPU's share of the same RAM.
+        let loader_threads = if cfg!(target_os = "android") { 4 } else { 14 };
+        let mut world = world::World::new(sources::Loader::new(src.clone(), loader_threads), args.max_zoom);
         let mut r = r;
         r.set_paint(spec.paint.as_ref());
         let Loaded { spec: _, model, piece_mesh, group_mesh, piece_cut, group_pivots, plane_box, lamps } = Loaded::build(spec, &mut r);
@@ -5456,10 +5475,15 @@ impl ApplicationHandler for App {
 }
 
 /// The UI library ships no fonts of its own here, so borrow the system's.
+/// DejaVu is embedded as a last resort (see assets/fonts): a phone has none
+/// of the paths below and no fontconfig, and without any font egui can
+/// neither lay out nor draw the menu — the app would sit on a black screen.
+/// A system font is still preferred where one exists, as it covers the
+/// locale's own script.
 fn load_fonts(ctx: &egui::Context) {
-    let find = |kind: &str, fallbacks: &[&str]| -> Option<Vec<u8>> {
+    let find = |kind: &str, fallbacks: &[&str], embedded: &[u8]| -> Option<Vec<u8>> {
         let fc = std::process::Command::new("fc-match").args(["-f", "%{file}", kind]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok());
-        fc.iter().map(|s| s.trim().to_string()).chain(fallbacks.iter().map(|s| s.to_string())).filter(|p| p.ends_with(".ttf") || p.ends_with(".otf")).find_map(|p| std::fs::read(p).ok())
+        fc.iter().map(|s| s.trim().to_string()).chain(fallbacks.iter().map(|s| s.to_string())).filter(|p| p.ends_with(".ttf") || p.ends_with(".otf")).find_map(|p| std::fs::read(p).ok()).or_else(|| Some(embedded.to_vec()))
     };
     let mut fonts = egui::FontDefinitions::empty();
     // fontconfig's answer where there is one (Linux), then each system's own fonts.
@@ -5485,8 +5509,9 @@ fn load_fonts(ctx: &egui::Context) {
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/arial.ttf",
     ];
-    for (name, family, kind, fb) in [("mono", egui::FontFamily::Monospace, "monospace", mono), ("sans", egui::FontFamily::Proportional, "sans", sans)] {
-        if let Some(data) = find(kind, fb) {
+    let (emb_mono, emb_sans): (&[u8], &[u8]) = (include_bytes!("../assets/fonts/DejaVuSansMono.ttf"), include_bytes!("../assets/fonts/DejaVuSans.ttf"));
+    for (name, family, kind, fb, embedded) in [("mono", egui::FontFamily::Monospace, "monospace", mono, emb_mono as &[u8]), ("sans", egui::FontFamily::Proportional, "sans", sans, emb_sans as &[u8])] {
+        if let Some(data) = find(kind, fb, embedded) {
             fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
             fonts.families.entry(family).or_default().push(name.into());
         } else {
@@ -5587,6 +5612,22 @@ pub fn main() -> anyhow::Result<()> {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    // env_logger writes to a terminal a phone does not have: send logs to
+    // logcat instead (read with `adb logcat -s fablegame`), and mirror them
+    // to last_run.log in the app's external files dir, which a file
+    // manager can reach without root (Android/data/<pkg>/files/).
+    let log_path = app.external_data_path().map(|mut p| {
+        p.push("last_run.log");
+        p
+    });
+    android_logging(&log_path);
+    // Panics on the game thread abort the process by default; with a hook,
+    // the message and place land in the log before the crash.
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("PANIC: {info}");
+        log::error!("{msg}");
+        eprintln!("{msg}");
+    }));
     touchui::set_active(true);
     let args = parse_args();
     let el = EventLoop::builder()
@@ -5595,6 +5636,60 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         .expect("event loop");
     el.set_control_flow(ControlFlow::Poll);
     let _ = el.run_app(&mut App { args, game: None });
+}
+
+/// Logcat plus a plain file: a logger that copies each record to both.
+#[cfg(target_os = "android")]
+fn android_logging(log_path: &Option<std::path::PathBuf>) {
+    use log::Log;
+    /// liblog's __android_log_write, linked straight from the system: no
+    /// extra crate for four lines of FFI. The tag is what logcat filters on.
+    struct Logcat;
+    unsafe extern "C" {
+        fn __android_log_write(prio: i32, tag: *const u8, text: *const u8);
+    }
+    impl Logcat {
+        fn write(&self, level: log::Level, msg: &str) {
+            let prio = match level {
+                log::Level::Error => 6, // ANDROID_LOG_ERROR
+                log::Level::Warn => 5,
+                log::Level::Info => 4,
+                log::Level::Debug => 3,
+                log::Level::Trace => 2,
+            };
+            let mut line = msg.as_bytes().to_vec();
+            line.push(0);
+            let tag = b"fablegame\0";
+            unsafe { __android_log_write(prio, tag.as_ptr(), line.as_ptr()) };
+        }
+    }
+    struct Both {
+        cat: Logcat,
+        file: Option<std::sync::Mutex<std::fs::File>>,
+    }
+    impl Log for Both {
+        fn enabled(&self, m: &log::Metadata) -> bool {
+            m.level() <= log::Level::Info
+        }
+        fn log(&self, r: &log::Record) {
+            if !self.enabled(r.metadata()) {
+                return;
+            }
+            self.cat.write(r.level(), &r.args().to_string());
+            if let Some(f) = &self.file {
+                use std::io::Write;
+                let _ = writeln!(f.lock().unwrap_or_else(|e| e.into_inner()), "[{:?}] {}", r.level(), r.args());
+            }
+        }
+        fn flush(&self) {}
+    }
+    let file = log_path.as_ref().and_then(|p| {
+        let _ = std::fs::create_dir_all(p.parent()?);
+        std::fs::File::create(p).ok().map(std::sync::Mutex::new)
+    });
+    let _ = log::set_boxed_logger(Box::new(Both { cat: Logcat, file }));
+    log::set_max_level(log::LevelFilter::Info);
+    log::info!("fablegame starting, log mirrored to {:?}", log_path);
 }
 
 
