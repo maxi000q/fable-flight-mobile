@@ -832,6 +832,8 @@ pub struct Renderer {
     build_ub: wgpu::Buffer,
     obj_ub: wgpu::Buffer,
     bg_obj: wgpu::BindGroup,
+    l_obj: wgpu::BindGroupLayout,
+    paint_ub: wgpu::Buffer,
     tile_ibuf: wgpu::Buffer,
     tile_nidx: u32,
     p_sky: wgpu::RenderPipeline,
@@ -1055,17 +1057,31 @@ fn upload_mips(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, size: u3
     view(&t)
 }
 
-/// The Hornet's paint (assets/fa18_paint.jpg, baked by assets/blender/fa18_paint.py):
-/// three pictures side by side (the aircraft from above, from below and from
-/// the left), each a layer of the array with its own mip chain. plane.wgsl
-/// projects them onto the skin (`hornet_paint`).
-fn paint_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
-    let img = image::load_from_memory_with_format(include_bytes!("../assets/fa18_paint.jpg"), image::ImageFormat::Jpeg).expect("the Hornet's paint").to_rgba8();
-    let (w, h) = (img.width() / 3, img.height());
+/// What plane.wgsl's `hornet_paint` needs to know of a paint (its `PT`): the
+/// rectangle each picture covers, across and fore and aft; how far ahead of
+/// the datum the pictures' top edge is and how far below it the side views'
+/// lower edge; how many pictures (0: none).
+fn paint_box(paint: Option<&crate::aircraft::Paint>) -> [f32; 8] {
+    let Some(p) = paint else { return [0.0; 8] };
+    [p.span as f32, p.length as f32, (p.centre[0] + p.length * 0.5) as f32, (p.span * 0.5 - p.centre[1]) as f32, p.views as f32, p.relief, p.sheen, 0.0]
+}
+
+/// An aircraft's paint (`aircraft::Paint`, e.g. the Hornet's
+/// assets/fa18_paint.jpg, baked by assets/blender/fa18_paint.py): its pictures
+/// side by side (the aircraft from above, from below, from the left and
+/// perhaps the right), each a layer of the array with its own mip chain.
+/// plane.wgsl projects them onto the skin (`hornet_paint`). A type without
+/// paint gets a single texel.
+fn paint_texture(device: &wgpu::Device, queue: &wgpu::Queue, paint: Option<&crate::aircraft::Paint>) -> wgpu::TextureView {
+    let (img, layers) = match paint {
+        Some(p) => (image::load_from_memory_with_format(p.jpg, image::ImageFormat::Jpeg).expect("an aircraft's paint").to_rgba8(), p.views),
+        None => (image::RgbaImage::new(1, 1), 1),
+    };
+    let (w, h) = (img.width() / layers, img.height());
     let mips = 32 - w.max(h).leading_zeros();
     let t = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("hornet paint"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 3 },
+        label: Some("aircraft paint"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: layers },
         mip_level_count: mips,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1073,7 +1089,7 @@ fn paint_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureVie
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for layer in 0..3u32 {
+    for layer in 0..layers {
         let mut cur: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             let row = ((y * img.width() + layer * w) * 4) as usize;
@@ -1537,7 +1553,7 @@ impl Renderer {
             "depth resolve",
             &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: d2, multisampled: true }, count: None }],
         );
-        let l_obj = layout("obj", &[ub_entry(0, true, std::mem::size_of::<ObjU>() as u64), tex_entry(1, wgpu::TextureViewDimension::D2Array, false)]);
+        let l_obj = layout("obj", &[ub_entry(0, true, std::mem::size_of::<ObjU>() as u64), tex_entry(1, wgpu::TextureViewDimension::D2Array, false), ub_entry(2, false, 32)]);
         let l_glass = layout("glass", &[tex_entry(1, d2, false), tex_entry(2, d2, true)]);
         let ms_entry = |binding, depth| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1918,8 +1934,10 @@ impl Renderer {
         let (inst_buf, fall_buf) = (dynbuf("instances", MAX_INST as u64 * 80), dynbuf("loose trees", MAX_FALL as u64 * 36));
         let near_buf = dynbuf("near trees", MAX_NEAR as u64 * 36);
         let dyn_lights = dynbuf("aircraft lights", MAX_DYN_LIGHTS as u64 * 40);
-        let paint = paint_texture(d, &queue);
-        let bg_obj = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_obj, entries: &[buf_res(0, &obj_ub, std::mem::size_of::<ObjU>() as u64), tex_res(1, &paint)] });
+        // (No paint until the aircraft is known: `set_paint`.)
+        let paint = paint_texture(d, &queue, None);
+        let paint_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("paint"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let bg_obj = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_obj, entries: &[buf_res(0, &obj_ub, std::mem::size_of::<ObjU>() as u64), tex_res(1, &paint), buf_res(2, &paint_ub, 32)] });
         let ix = crate::sources::tile_indices();
         let tile_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tile idx"), contents: bytemuck::cast_slice(&ix), usage: wgpu::BufferUsages::INDEX });
         let patch = |n: u16| {
@@ -1969,7 +1987,7 @@ impl Renderer {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
-            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
+            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
         })
@@ -2215,6 +2233,13 @@ impl Renderer {
     /// Models for instanced solids (cars, rubble, rocks).
     pub fn set_inst_meshes(&mut self, meshes: &[(Vec<MeshVertex>, Vec<u32>)]) {
         self.inst_lib = Some(self.mesh_lib(meshes));
+    }
+
+    /// The paint of the aircraft being flown (none: `None`): only its pictures are on the GPU.
+    pub fn set_paint(&mut self, paint: Option<&crate::aircraft::Paint>) {
+        let view = paint_texture(&self.device, &self.queue, paint);
+        self.queue.write_buffer(&self.paint_ub, 0, bytemuck::cast_slice(&paint_box(paint)));
+        self.bg_obj = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_obj, entries: &[buf_res(0, &self.obj_ub, std::mem::size_of::<ObjU>() as u64), tex_res(1, &view), buf_res(2, &self.paint_ub, 32)] });
     }
 
     pub fn add_mesh(&mut self, verts: &[PartVertex], idx: &[u32]) -> usize {

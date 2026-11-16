@@ -210,6 +210,10 @@ impl Damage {
             G_LWING | G_RWING => {
                 let s = if p.group == G_RWING { 1 } else { 0 };
                 t[0] = self.stump(s).grow(stick);
+                // (a fin that stands on a wing and is all rudder: the Blackbird's)
+                if p.role == Role::Rudder && self.rudder < 1.0 {
+                    t[1] = Tear::new(Vec3::Y, tl.rudder_y0 + tl.rudder_h * self.rudder, 1.0);
+                }
             }
             G_TAIL if self.tail.is_some() => {
                 if p.role == Role::TailCone {
@@ -296,7 +300,10 @@ impl Damage {
                 r.push(format!("{lr} AILERON HANGING"));
             }
             if self.flap[s] <= 0.0 {
-                r.push(format!("{lr} FLAP GONE"));
+                match &self.spec.lever {
+                    Some(l) => r.push(format!("{} GONE", l.parts[s])),
+                    None => r.push(format!("{lr} FLAP GONE")),
+                }
             }
             if self.stab[s] < 0.5 {
                 r.push(format!("{lr} STABILISER GONE"));
@@ -305,7 +312,7 @@ impl Damage {
             }
         }
         if self.tail.is_some() {
-            r.push("TAIL BROKEN OFF".into());
+            r.push(if self.spec.rocket().is_some() { "BOOSTER SEPARATED" } else { "TAIL BROKEN OFF" }.into());
         } else if self.fin < 1.0 {
             r.push(format!("FIN {:.0}%", self.fin * 100.0));
         }
@@ -478,11 +485,13 @@ pub struct ShedReq {
     pub pre: Mat4,
     /// `tear2` is given; otherwise each piece keeps the first break it already had
     pub own2: bool,
+    /// let go rather than torn off (a rocket's spent stage): it keeps all its speed
+    pub clean: bool,
 }
 
 impl ShedReq {
     pub fn new(sel: Sel, tear: Tear, kick: Vec3, spin: f32) -> Self {
-        Self { sel, tear, tear2: Tear::NONE, kick, spin, rigid: false, pre: Mat4::IDENTITY, own2: false }
+        Self { sel, tear, tear2: Tear::NONE, kick, spin, rigid: false, pre: Mat4::IDENTITY, own2: false, clean: false }
     }
 }
 
@@ -584,7 +593,7 @@ impl Sheds {
                 local,
                 origin,
                 pos: wpos,
-                vel: vel * 0.97 + kick,
+                vel: vel * if req.clean { 1.0 } else { 0.97 } + kick,
                 rot,
                 omega,
                 tear: tears,
@@ -630,7 +639,9 @@ impl Sheds {
             // Torn panels tumble: a lot of drag, more when they turn flat to the
             // airflow, and a sideways skitter as they do.
             let flat = 0.5 + 0.5 * (s.age as f64 * s.omega.length() * 0.7 + s.seed as f64 * 6.0).sin();
-            let drag = (0.12 + 0.9 * flat) * (s.span as f64).sqrt() * 0.7;
+            // (Above 20 km, where only a rocket drops anything, less of it the
+            // thinner the air: a spent stage falls away on its own arc.)
+            let drag = (0.12 + 0.9 * flat) * (s.span as f64).sqrt() * 0.7 * (crate::plane::density(s.pos.length() - geo::R) / crate::plane::density(20_000.0)).min(1.0);
             s.vel -= upw * 9.81 * dtf;
             s.vel *= (-dtf * drag).exp();
             let skitter = s.rot * DVec3::new((s.age as f64 * 3.1 + s.seed as f64 * 9.0).sin(), 0.0, (s.age as f64 * 2.3).cos()) * (flat * 2.5 * dtf);
@@ -674,6 +685,13 @@ impl Sheds {
             }
         }
         self.items.retain(|s| !s.sunk && s.age < 300.0);
+    }
+
+    /// The newest part made of this mesh that is still falling: the frame it
+    /// is drawn in (as `draw`, before its own pose) and how long it has been gone (s).
+    pub fn find(&self, mesh: usize, cam: DVec3) -> Option<(Mat4, f32)> {
+        let s = self.items.iter().rev().find(|s| s.mesh == mesh && !s.resting)?;
+        Some((Mat4::from_translation((s.pos - cam).as_vec3()) * Mat4::from_quat(s.rot.as_quat()) * Mat4::from_translation(-s.origin), s.age))
     }
 
     pub fn draw(&self, cam: DVec3, params: [[f32; 4]; 6], objs: &mut Vec<DrawObj>) {

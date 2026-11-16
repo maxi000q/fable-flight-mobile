@@ -34,6 +34,7 @@ pub static SPEC: Spec = Spec {
     keys: &["c172", "172", "cessna"],
     blurb: "Four-seat single, 180 hp, retractable gear. Forgiving and slow: 125 kt flat out.",
     still: include_bytes!("../../../assets/aircraft/c172.png"),
+    paint: None,
     build,
     groups: [("fuselage", 420.0), ("tail", 150.0), ("left wing", 170.0), ("right wing", 170.0), ("engine", 260.0), ("propeller", 30.0), ("gear", 60.0)],
     span: SPAN,
@@ -57,6 +58,7 @@ pub static SPEC: Spec = Spec {
         stab_tip: DVec3::new(1.65, 0.11, 4.15),
     },
     eye: EYE,
+    eye2: None,
     sees_inside: cabin::sees_inside,
     contacts: &[
         ([0.0, -0.035, -3.17], Part::Nose),
@@ -123,16 +125,20 @@ pub static SPEC: Spec = Spec {
     cd_wave: 0.0,
     spoiler_cd: 0.0,
     spoiler_cl: 0.0,
+    chute: None,
     flaps: &[0.0, 10.0, 20.0, 30.0],
     // 110 kt for the first notch, 85 kt beyond.
     vfe: &[V_NONE, 110.0 * KT, 85.0 * KT, 85.0 * KT],
     flap_rate: 1.0 / 7.0,
     slats_at: 0,
+    lever: None,
     gear_rate: 1.0 / 6.0,
     // 163 kt indicated; flutter sets in past 185.
     vne: 83.9,
     mmo: 0.0,
     flutter_v: 95.0,
+    inlet_mach: 0.0,
+    dry_mach: 0.0,
     // Limit load is 4.4 g; hold more than that and the spar fatigues, 6.6 g snaps it outright.
     g_limit: 4.6,
     g_break: 6.6,

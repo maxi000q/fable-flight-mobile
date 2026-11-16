@@ -240,6 +240,11 @@ fn fr(en: &str) -> Option<&'static str> {
 
         // ---- aircraft
         "Twin-engine carrier fighter, 15.5 t. Fly-by-wire holds it to 7.5 g; Space for afterburner, / speedbrake. 135 kt approach." => "Chasseur embarqué biréacteur, 15,5 t. Les commandes de vol électriques le limitent à 7,5 g ; Espace pour la postcombustion, / aérofreins. Approche à 135 kt.",
+        "Twin-engine two-seat fighter, 17 t. No fly-by-wire: mind the g and the angle of attack; Space for afterburner, / speedbrakes. 150 kt approach." => "Chasseur biplace biréacteur, 17 t. Pas de commandes de vol électriques : attention aux g et à l'incidence ; Espace pour la postcombustion, / aérofreins. Approche à 150 kt.",
+        "Twin-engine stealth fighter, 25 t. Fly-by-wire holds it to 9 g; supersonic without afterburner up high. Space for afterburner, / to brake. 145 kt approach." => "Chasseur furtif biréacteur, 25 t. Les commandes de vol électriques le limitent à 9 g ; supersonique sans postcombustion en altitude. Espace pour la postcombustion, / pour freiner. Approche à 145 kt.",
+        "Two-seat Mach 3 reconnaissance aircraft, 50 t. Hold Space: it cruises in afterburner, Mach 3.2 at 80,000 ft. Keep under 450 kt indicated on the way up and 3 g always. No flaps; / streams the drag chute once it is down. 175 kt approach." => "Biplace de reconnaissance à Mach 3, 50 t. Maintenez Espace : il croise en postcombustion, Mach 3,2 à 80 000 ft. Restez sous 450 kt indiqués en montée et sous 3 g en permanence. Pas de volets ; / sort le parachute-frein une fois posé. Approche à 175 kt.",
+        "Two-stage rocket, 121 m and 5,000 t on the pad. Throttle up to lift off on 33 engines, then hold W a few seconds to tip it over. 1 picks which engines burn, Backspace lights the ship and drops the booster, 2 has the ship land itself." => "Fusée à deux étages, 121 m et 5 000 t sur le pas de tir. Mettez les gaz pour décoller sur 33 moteurs, puis tenez W quelques secondes pour l'incliner. 1 choisit les moteurs allumés, Retour arrière allume le vaisseau et largue le booster, 2 laisse le vaisseau se poser seul.",
+        "Four-engine supersonic airliner, 137 t. Mach 2 at 55,000 ft without reheat; Space for reheat to take off. No flaps: F droops the nose (5° to take off, 12.5° to land). Rotate at 200 kt to 10° and no more until it is off (the tail touches at 11.5°); 160 kt approach, 10° nose up. Z reversers." => "Quadriréacteur de ligne supersonique, 137 t. Mach 2 à 55 000 ft sans réchauffe ; Espace pour la réchauffe au décollage. Pas de volets : F abaisse le nez (5° au décollage, 12,5° à l'atterrissage). Rotation à 200 kt jusqu'à 10°, pas plus avant l'envol (la queue touche à 11,5°) ; approche à 160 kt, 10° à cabrer. Z inverseurs.",
         "Four-seat single, 180 hp, retractable gear. Forgiving and slow: 125 kt flat out." => "Monomoteur quatre places, 180 ch, train rentrant. Indulgent et lent : 125 kt à fond.",
         "Four-engine wide-body airliner, 290 t. Heavy and slow to answer the controls; Mach 0.85 cruise, 150 kt approach. / speedbrake, Z reversers." => "Quadriréacteur gros-porteur, 290 t. Lourd et lent à répondre aux commandes ; croisière à Mach 0,85, approche à 150 kt. / aérofreins, Z inverseurs.",
 
@@ -328,12 +333,25 @@ const CAPS: &[(&str, &str, bool)] = &[
     ("AILERON HANGING", "AILERON {s} PENDANT", false),
     ("FLAP TORN OFF", "VOLET {s} ARRACHÉ", false),
     ("FLAP GONE", "VOLET {s} PERDU", false),
+    ("NOSE TORN OFF", "NEZ ARRACHÉ", false),
+    ("NOSE GONE", "NEZ PERDU", false),
+    ("VISOR TORN OFF", "VISIÈRE ARRACHÉE", true),
+    ("VISOR GONE", "VISIÈRE PERDUE", true),
+    ("DRAG CHUTE TORN AWAY", "PARACHUTE-FREIN ARRACHÉ", false),
     ("STABILISER TORN OFF", "STABILISATEUR {s} ARRACHÉ", false),
     ("STABILISER GONE", "STABILISATEUR {s} PERDU", false),
     ("ELEVATOR TORN OFF", "PROFONDEUR {s} ARRACHÉE", true),
     ("ELEVATOR GONE", "PROFONDEUR {s} PERDUE", true),
     ("ENGINE POD STRUCK", "NACELLE MOTEUR {s} TOUCHÉE", true),
     ("TAIL BROKEN OFF", "QUEUE ARRACHÉE", true),
+    ("BOOSTER SEPARATED", "BOOSTER LARGUÉ", true),
+    ("HOT STAGING", "ALLUMAGE À CHAUD DU VAISSEAU", true),
+    ("AUTOMATIC LANDING ARMED", "ATTERRISSAGE AUTOMATIQUE ARMÉ", true),
+    ("AUTOMATIC LANDING OFF", "ATTERRISSAGE AUTOMATIQUE COUPÉ", true),
+    ("LANDED", "POSÉ", true),
+    ("STAGE SEPARATION", "SÉPARATION DES ÉTAGES", true),
+    ("NO STAGING ON THE GROUND", "PAS DE SÉPARATION AU SOL", true),
+    ("BROKEN UP BY THE AIRSTREAM", "DISLOQUÉ PAR L'ÉCOULEMENT", true),
     ("RUDDER TORN OFF", "GOUVERNE DE DIRECTION ARRACHÉE", true),
     ("RUDDER DAMAGED", "GOUVERNE DE DIRECTION ENDOMMAGÉE", true),
     ("RUDDER GONE", "GOUVERNE DE DIRECTION PERDUE", true),
@@ -398,6 +416,11 @@ mod tests {
         assert_eq!(caps("ENGINE 40%  OIL LEAK"), "MOTEUR 40%  FUITE D'HUILE");
         assert_eq!(caps("LEFT MAIN GEAR GONE"), "TRAIN PRINCIPAL GAUCHE PERDU");
         assert_eq!(caps("NOSE GEAR TORN OFF (HARD IMPACT)"), "TRAIN AVANT ARRACHÉ (CHOC VIOLENT)");
+        // (Concorde's nose and visor, which its flap lever works)
+        assert_eq!(caps("NOSE TORN OFF (OVERSPEED)"), "NEZ ARRACHÉ (SURVITESSE)");
+        assert_eq!(caps("VISOR GONE"), "VISIÈRE PERDUE");
+        // (the Blackbird's braking parachute)
+        assert_eq!(caps("DRAG CHUTE TORN AWAY (OVERSPEED)"), "PARACHUTE-FREIN ARRACHÉ (SURVITESSE)");
         assert_eq!(caps("TAIL BROKEN OFF (OVER G)"), "QUEUE ARRACHÉE (FACTEUR DE CHARGE)");
         assert_eq!(caps("SOMETHING NEW"), "SOMETHING NEW");
         assert_eq!(tr("London"), "Londres");
