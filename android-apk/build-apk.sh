@@ -1,39 +1,93 @@
 #!/usr/bin/env bash
-# Assemble and sign Fable Flight Mobile's APK from this folder.
-# Needs: the Rust library built for Android (see the README), the Android
-# SDK's build-tools (aapt2, zipalign, apksigner) and platform android-35.
+# Build Fable Flight Mobile's APKs from this folder — a debug one and a
+# release one. Needs: the Rust library built for Android (see the README),
+# the Android SDK's build-tools (aapt2, zipalign, apksigner) and platform
+# android-35.
+#
+# The packaging details that matter for a pure-native (no Java) app:
+#   * hasCode=false and extractNativeLibs=false in the manifest, otherwise
+#     the installer rejects the package ("appears to be invalid") for
+#     lacking a classes.dex,
+#   * the .so is stored UNCOMPRESSED and 16 KB page-aligned, so the loader
+#     maps it in place — required for 16 KB-page devices (Android 15+),
+#   * signed with v1+v2+v3 so anything from Android 8 to 15 installs it.
 set -euo pipefail
 
-# Adjust these two if your SDK lives elsewhere.
+# Adjust these if your SDK lives elsewhere.
 BT=${BT:-/home/z/android-sdk/build-tools/35.0.0}
 PLATFORM=${PLATFORM:-/home/z/android-sdk/platforms/android-35/android.jar}
 
 cd "$(dirname "$0")"
-OUT=${OUT:-.}
+OUT=${OUT:-..}
+mkdir -p "$OUT"
 
+# ---------------------------------------------------------------------------
+# One variant: manifest-in, signed APK out.
+#   $1 debug|release   $2 package suffix ("" for release)
+# ---------------------------------------------------------------------------
+build_variant() {
+    local variant=$1 suffix=$2
+    local pkg="com.maxi.fableflightmobile${suffix}"
+    local vcode vname ks kspass label
+    if [ "$variant" = debug ]; then
+        vcode=101; vname="1.0.0-debug"
+        ks=debug.keystore; kspass=android
+        label="Fable Flight Dbg"
+    else
+        vcode=1; vname="1.0.0"
+        ks=fableflight.keystore; kspass=fableflight2026
+        label="Fable Flight Mobile"
+    fi
+    local apk="FableFlightMobile-$variant.apk"
+
+    # 1. Link the base APK with this variant's package, version and label
+    #    (the debug one is labelled apart so both sit side by side on the
+    #    launcher without confusing anyone).
+    sed "s/android:label=\"Fable Flight Mobile\"/android:label=\"$label\"/" AndroidManifest.xml > "manifest-$variant.xml"
+    "$BT/aapt2" link -o "base-$variant.apk" \
+        -I "$PLATFORM" \
+        --manifest "manifest-$variant.xml" \
+        --rename-manifest-package "$pkg" \
+        --min-sdk-version 26 --target-sdk-version 35 \
+        --version-code "$vcode" --version-name "$vname" \
+        -R resources.zip \
+        --auto-add-overlay
+
+    # 2. Add the native library UNCOMPRESSED and 16 KB page-aligned (the
+    #    packer below does what zipalign -P 16 would; this build-tools'
+    #    zipalign rejects -P). With extractNativeLibs=false the loader
+    #    maps the .so straight from the APK, which 16 KB-page devices
+    #    (Android 15+) require.
+    python3 scripts/pack_apk.py "base-$variant.apk" \
+        jniLibs/arm64-v8a/libfablegame.so "packed-$variant.apk"
+
+    # 3. Sign.
+    "$BT/apksigner" sign \
+        --ks "$ks" --ks-pass "pass:$kspass" --key-pass "pass:$kspass" \
+        --ks-key-alias fableflight \
+        --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+        --min-sdk-version 26 \
+        --out "$apk" "packed-$variant.apk"
+
+    # 4. Verify: signature schemes and install-relevant badging.
+    "$BT/apksigner" verify --verbose "$apk" | grep -E "Verifies|scheme"
+    "$BT/aapt2" dump badging "$apk" | grep -E "^package|sdkVersion|native-code"
+    unzip -lv "$apk" | grep "\.so" || true
+    [ "$(realpath "$apk")" != "$(realpath "$OUT/$apk")" ] && mv "$apk" "$OUT/" || true
+    rm -f "base-$variant.apk" "packed-$variant.apk" "manifest-$variant.xml"
+}
+
+# The icon resources, compiled once.
 "$BT/aapt2" compile --dir res -o resources.zip
-"$BT/aapt2" link -o base.apk \
-    -I "$PLATFORM" \
-    --manifest AndroidManifest.xml \
-    --min-sdk-version 26 --target-sdk-version 35 \
-    --version-code 1 --version-name "1.0.0" \
-    -R resources.zip \
-    --auto-add-overlay
 
-# The native library goes under lib/<abi>/ (NativeActivity loads
-# libfablegame.so from there).
-mkdir -p staged/lib/arm64-v8a
-cp jniLibs/arm64-v8a/libfablegame.so staged/lib/arm64-v8a/
-(cd staged && zip -q ../base.apk lib/arm64-v8a/libfablegame.so)
+# The debug keystore (android/android), the usual debug one.
+if [ ! -f debug.keystore ]; then
+    keytool -genkeypair -keystore debug.keystore -alias fableflight \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -storepass android -keypass android \
+        -dname "CN=Android Debug, OU=Mobile, O=maxi000q, C=US" >/dev/null 2>&1
+fi
 
-"$BT/zipalign" -f 4 base.apk aligned.apk
-
-# Sign (a debug-style self-signed keystore; make your own for releases):
-#   keytool -genkeypair -keystore fableflight.keystore -alias fableflight \
-#     -keyalg RSA -keysize 2048 -validity 10000
-"$BT/apksigner" sign --ks fableflight.keystore \
-    --ks-pass pass:fableflight2026 --key-pass pass:fableflight2026 \
-    --ks-key-alias fableflight --out "$OUT/FableFlightMobile.apk" aligned.apk
-
-"$BT/apksigner" verify "$OUT/FableFlightMobile.apk"
-echo "APK built: $OUT/FableFlightMobile.apk"
+build_variant debug .debug
+build_variant release ""
+echo "Done: $OUT/FableFlightMobile-debug.apk, $OUT/FableFlightMobile-release.apk"
