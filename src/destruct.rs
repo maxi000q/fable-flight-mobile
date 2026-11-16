@@ -1956,6 +1956,8 @@ mod tests {
     #[test]
     fn resistance_grows_with_size() {
         assert!(resistance(20.0, 30_000.0) > resistance(20.0, 3_000.0));
-        assert!(resistance(40.0, 30_000.0) > resistance(20.0, 30_000.0));
+        // Height changes resistance between tiers; within a tier only volume matters.
+        assert!(resistance(20.0, 30_000.0) > resistance(7.0, 30_000.0));
+        assert_eq!(resistance(40.0, 30_000.0), resistance(20.0, 30_000.0));
     }
 }

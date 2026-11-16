@@ -24,7 +24,7 @@ use crate::render::PartVertex;
 use std::collections::HashMap;
 use std::io::Read;
 
-mod pit;
+pub(crate) mod pit;
 
 const KT: f64 = 1.0 / 1.94384;
 
@@ -102,12 +102,12 @@ const EYE: Vec3 = Vec3::new(0.0, 1.0, -4.55);
 
 // ---------------------------------------------------------------- the model
 
-struct Obj {
-    pivot: Vec3,
-    axis: Vec3,
+pub(crate) struct Obj {
+    pub(crate) pivot: Vec3,
+    pub(crate) axis: Vec3,
     /// the gear legs: how far they turn to stow (rad)
-    angle: f32,
-    mesh: Mesh,
+    pub(crate) angle: f32,
+    pub(crate) mesh: Mesh,
 }
 
 struct Reader<'a> {
@@ -131,13 +131,13 @@ impl Reader<'_> {
     }
 }
 
-/// The pieces exported from Blender, by name.
-fn load() -> HashMap<String, Obj> {
+/// The pieces exported from Blender (a gzipped model file of `what`), by name.
+pub(crate) fn load(gz: &[u8], what: &str) -> HashMap<String, Obj> {
     let mut raw = Vec::new();
-    flate2::read::GzDecoder::new(&include_bytes!("../../../assets/fa18.bin.gz")[..]).read_to_end(&mut raw).expect("fa18 model");
+    flate2::read::GzDecoder::new(gz).read_to_end(&mut raw).unwrap_or_else(|_| panic!("{what} model"));
     let mut r = Reader { b: &raw, at: 0 };
-    assert_eq!(r.take(4), b"FFAC", "fa18 model: not a model file");
-    assert_eq!(r.u32(), 1, "fa18 model: unknown version");
+    assert_eq!(r.take(4), b"FFAC", "{what} model: not a model file");
+    assert_eq!(r.u32(), 1, "{what} model: unknown version");
     let n = r.u32();
     let mut out = HashMap::new();
     for _ in 0..n {
@@ -260,7 +260,7 @@ fn anim(name: &str, stow: f32) -> Anim {
 }
 
 pub fn build() -> Model {
-    let objs = load();
+    let objs = load(include_bytes!("../../../assets/fa18.bin.gz"), "fa18");
     let mut b = Builder::default();
     let mut at: HashMap<&str, usize> = HashMap::new();
     for &(name, group, role, parent) in PIECES {
@@ -325,6 +325,7 @@ pub static SPEC: Spec = Spec {
     keys: &["fa18", "f18", "fa-18", "f/a-18", "hornet"],
     blurb: "Twin-engine carrier fighter, 15.5 t. Fly-by-wire holds it to 7.5 g; Space for afterburner, / speedbrake. 135 kt approach.",
     still: include_bytes!("../../../assets/aircraft/fa18.png"),
+    paint: Some(Paint { jpg: include_bytes!("../../../assets/fa18_paint.jpg"), views: 3, span: 13.2, length: 19.8, centre: [0.4, 1.0], relief: 1.0, sheen: 0.0 }),
     build,
     groups: [("fuselage", 6_500.0), ("tail", 900.0), ("left wing", 1_200.0), ("right wing", 1_200.0), ("nose section", 900.0), ("radome", 60.0), ("gear", 500.0)],
     span: W_X1,
@@ -345,6 +346,7 @@ pub static SPEC: Spec = Spec {
         stab_tip: DVec3::new(3.25, -0.2, 7.6),
     },
     eye: EYE,
+    eye2: None,
     sees_inside: pit::sees_inside,
     contacts: &[
         ([0.0, -0.03, -8.9], Part::Nose),
@@ -432,16 +434,20 @@ pub static SPEC: Spec = Spec {
     cd_wave: 0.032,
     spoiler_cd: 0.045,
     spoiler_cl: 0.0,
+    chute: None,
     // Flaps: up, half, full.
     flaps: &[0.0, 30.0, 45.0],
     vfe: &[1e9, 250.0 * KT, 230.0 * KT],
     flap_rate: 0.3,
     slats_at: 1,
+    lever: None,
     gear_rate: 1.0 / 5.0,
     // 750 kt, Mach 1.8.
     vne: 750.0 * KT,
     mmo: 1.8,
     flutter_v: 820.0 * KT,
+    inlet_mach: 0.0,
+    dry_mach: 0.0,
     g_limit: 9.0,
     g_break: 12.5,
     fbw_g: 7.5,
@@ -449,7 +455,7 @@ pub static SPEC: Spec = Spec {
     steer_fade: 15.0,
     // Two F404-GE-402s: 79.2 kN each in afterburner (Space); the dry figure is a
     // little under the book 48.9 kN so it does not supercruise down low.
-    engine: Engine::Fan(Fan { n: 2, thrust: 44_000.0, idle: 0.62, idle_thrust: 0.06, n1_rpm: 13_200.0, spool_up: 1.0, spool_down: 0.8, reverse: 0.0, reverser_time: 1.0, boost: 1.8, mach_lapse: [0.25, 0.45] }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 44_000.0, idle: 0.62, idle_thrust: 0.06, n1_rpm: 13_200.0, spool_up: 1.0, spool_down: 0.8, reverse: 0.0, reverser_time: 1.0, boost: 1.8, mach_lapse: [0.25, 0.45], nozzle_z: 8.0 }),
     handling: Handling {
         q_ref: 8_000.0,
         a_max: 3.5,

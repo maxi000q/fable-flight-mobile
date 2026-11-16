@@ -31,6 +31,18 @@ pub mod gauge {
     pub const CHT: f32 = 18.0;
     pub const FUEL_SEL: f32 = 19.0;
     pub const OAT: f32 = 20.0;
+    /// (21 is the Hornet's brake accumulator pressure.) A jet fighter's engine
+    /// instruments (the Phantom's): engine speed in percent, exhaust gas
+    /// temperature, fuel flow, nozzle position, fuel on board, Mach number.
+    pub const JET_RPM: f32 = 22.0;
+    pub const JET_EGT: f32 = 23.0;
+    pub const JET_FF: f32 = 24.0;
+    pub const NOZZLE: f32 = 25.0;
+    pub const JET_FUEL: f32 = 26.0;
+    pub const MACH: f32 = 27.0;
+    /// The Blackbird's: an inlet spike's position, the compressor inlet temperature.
+    pub const SPIKE: f32 = 28.0;
+    pub const CIT: f32 = 29.0;
 }
 
 const PANEL_COL: Mat = mt(mat::PLASTIC, 0.035, 0.036, 0.038);

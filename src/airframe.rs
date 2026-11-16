@@ -602,6 +602,8 @@ pub enum Input {
     Trim,
     /// thrust reversers, 0 stowed .. 1 deployed
     Reverser,
+    /// the Mach number (inlet spikes follow it)
+    Mach,
 }
 
 /// How an input is shaped before it moves a piece.
@@ -726,6 +728,8 @@ pub enum Vis {
     SlowProp,
     /// the blur of a propeller turning too fast to see
     FastProp,
+    /// a braking parachute, while it is out (no part of the airframe's bounds or wreckage)
+    Chute,
 }
 
 pub struct Piece {
@@ -830,7 +834,7 @@ impl Model {
         split_cut(&mut pieces);
         let mut groups = vec![Mesh::default(); N_GROUPS];
         for p in &pieces {
-            if !p.glass {
+            if !p.glass && p.vis != Vis::Chute {
                 groups[p.group].append(&p.mesh);
             }
         }
@@ -838,7 +842,7 @@ impl Model {
     }
     /// Centre and half size of everything solid in it (body frame, at rest).
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        let (lo, hi) = self.pieces.iter().filter(|p| !p.glass).flat_map(|p| p.mesh.v.iter()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
+        let (lo, hi) = self.pieces.iter().filter(|p| !p.glass && p.vis != Vis::Chute).flat_map(|p| p.mesh.v.iter()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
         ((lo + hi) * 0.5, (hi - lo) * 0.5)
     }
 }

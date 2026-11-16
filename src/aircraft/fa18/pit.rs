@@ -20,31 +20,31 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 // ---------------------------------------------------------------- materials
 
-const GREY: Mat = mt(mat::SATIN, 0.20, 0.205, 0.215).pat(pat::PIT);
-const GREY_DK: Mat = mt(mat::SATIN, 0.10, 0.104, 0.11).pat(pat::PIT);
-const BLK: Mat = mt(mat::PLASTIC, 0.028, 0.028, 0.030).pat(pat::PANEL);
-const BEZEL: Mat = mt(mat::PLASTIC, 0.036, 0.037, 0.039).pat(pat::PANEL);
-const KNOB: Mat = mt(mat::PLASTIC, 0.013, 0.013, 0.014);
+pub(crate) const GREY: Mat = mt(mat::SATIN, 0.20, 0.205, 0.215).pat(pat::PIT);
+pub(crate) const GREY_DK: Mat = mt(mat::SATIN, 0.10, 0.104, 0.11).pat(pat::PIT);
+pub(crate) const BLK: Mat = mt(mat::PLASTIC, 0.028, 0.028, 0.030).pat(pat::PANEL);
+pub(crate) const BEZEL: Mat = mt(mat::PLASTIC, 0.036, 0.037, 0.039).pat(pat::PANEL);
+pub(crate) const KNOB: Mat = mt(mat::PLASTIC, 0.013, 0.013, 0.014);
 const KNOB_ALU: Mat = mt(mat::ALU, 0.40, 0.41, 0.43);
 const BTN: Mat = mt(mat::RUBBER, 0.045, 0.045, 0.047);
-const GLARE: Mat = mt(mat::BLACK, 0.028, 0.028, 0.030);
-const INK: Mat = mt(mat::PLASTIC, 0.72, 0.72, 0.69);
+pub(crate) const GLARE: Mat = mt(mat::BLACK, 0.028, 0.028, 0.030);
+pub(crate) const INK: Mat = mt(mat::PLASTIC, 0.72, 0.72, 0.69);
 const OLIVE: Mat = mt(mat::FABRIC, 0.115, 0.135, 0.052).pat(pat::MESH);
 const OLIVE_DK: Mat = mt(mat::FABRIC, 0.050, 0.060, 0.030).pat(pat::MESH);
 const WEB: Mat = mt(mat::FABRIC, 0.040, 0.050, 0.032).pat(pat::WEBBING);
 const WEB_RED: Mat = mt(mat::FABRIC, 0.30, 0.028, 0.022).pat(pat::WEBBING);
-const SEAT_GREY: Mat = mt(mat::SATIN, 0.055, 0.057, 0.06).pat(pat::PIT);
-const FLOOR_M: Mat = mt(mat::SATIN, 0.032, 0.033, 0.035).pat(pat::NONSLIP);
+pub(crate) const SEAT_GREY: Mat = mt(mat::SATIN, 0.055, 0.057, 0.06).pat(pat::PIT);
+pub(crate) const FLOOR_M: Mat = mt(mat::SATIN, 0.032, 0.033, 0.035).pat(pat::NONSLIP);
 const HOSE: Mat = mt(mat::RUBBER, 0.055, 0.065, 0.040).pat(pat::HOSE);
-const DZUS: Mat = mt(mat::STEEL, 0.30, 0.30, 0.31);
-const COMBINER_FRAME: Mat = mt(mat::PLASTIC, 0.022, 0.022, 0.024);
-const MIRROR: Mat = mt(mat::STEEL, 0.55, 0.56, 0.57).x(1.0);
-const RED_LENS: Mat = mt(mat::LAMP, 1.0, 0.08, 0.04).x(lamp::ANNUNC);
-const GREEN_LENS: Mat = mt(mat::LAMP, 0.2, 1.0, 0.25).x(lamp::GEAR_DOWN);
+pub(crate) const DZUS: Mat = mt(mat::STEEL, 0.30, 0.30, 0.31);
+pub(crate) const COMBINER_FRAME: Mat = mt(mat::PLASTIC, 0.022, 0.022, 0.024);
+pub(crate) const MIRROR: Mat = mt(mat::STEEL, 0.55, 0.56, 0.57).x(1.0);
+pub(crate) const RED_LENS: Mat = mt(mat::LAMP, 1.0, 0.08, 0.04).x(lamp::ANNUNC);
+pub(crate) const GREEN_LENS: Mat = mt(mat::LAMP, 0.2, 1.0, 0.25).x(lamp::GEAR_DOWN);
 
 /// Yellow and black hazard stripes, `pitch` m apart: diagonal across a flat
 /// face, or rings along a tube or a strap (`rings`).
-const fn stripes(pitch: f32, rings: bool) -> Mat {
+pub(crate) const fn stripes(pitch: f32, rings: bool) -> Mat {
     mt(mat::PAINT, 0.56, 0.42, 0.02).pat(pat::STRIPE).x(if rings { -pitch } else { pitch })
 }
 
@@ -56,14 +56,14 @@ fn blk_col() -> Vec3 {
 
 pub const FLOOR: f32 = 0.16;
 /// Side consoles: height of their tops, inner edge, front and back.
-const CON_Y: f32 = 0.415;
-const CON_X: f32 = 0.235;
+pub(crate) const CON_Y: f32 = 0.415;
+pub(crate) const CON_X: f32 = 0.235;
 const CON_Z0: f32 = -5.38;
 const CON_Z1: f32 = -3.80;
 /// The seat reference point: where the back and pan cushions meet.
-const SRP: Vec3 = Vec3::new(0.0, 0.27, -4.42);
+pub(crate) const SRP: Vec3 = Vec3::new(0.0, 0.27, -4.42);
 /// The stick's pivot in the floor.
-const STICK: Vec3 = Vec3::new(0.0, FLOOR + 0.02, -4.99);
+pub(crate) const STICK: Vec3 = Vec3::new(0.0, FLOOR + 0.02, -4.99);
 
 /// The canopy (fa18.py CANOPY): Blender station, half width at the sill, height of the top.
 const CANOPY: [[f32; 3]; 10] = [
@@ -120,7 +120,7 @@ fn glass_y(z: f32, x: f32) -> f32 {
 // ---------------------------------------------------------------- outlines
 
 /// Rectangle with rounded corners, clockwise (so slab walls face out).
-fn rrect(hx: f32, hy: f32, r: f32) -> Vec<Vec2> {
+pub(crate) fn rrect(hx: f32, hy: f32, r: f32) -> Vec<Vec2> {
     let mut out = Vec::new();
     for (q, (sx, sy)) in [(1.0f32, -1.0f32), (-1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].iter().enumerate() {
         let c = Vec2::new(sx * (hx - r), sy * (hy - r));
@@ -132,7 +132,7 @@ fn rrect(hx: f32, hy: f32, r: f32) -> Vec<Vec2> {
     out
 }
 /// An outline turned clockwise (slab walls then face out); `hole` turns it the other way.
-fn wind(mut v: Vec<Vec2>, hole: bool) -> Vec<Vec2> {
+pub(crate) fn wind(mut v: Vec<Vec2>, hole: bool) -> Vec<Vec2> {
     let n = v.len();
     let area: f32 = (0..n).map(|i| v[i].perp_dot(v[(i + 1) % n])).sum();
     if (area > 0.0) != hole {
@@ -141,7 +141,7 @@ fn wind(mut v: Vec<Vec2>, hole: bool) -> Vec<Vec2> {
     v
 }
 /// A quad facing `toward`.
-fn quad_to(m: &mut Mesh, mm: &Mat, mut p: [Vec3; 4], toward: Vec3) {
+pub(crate) fn quad_to(m: &mut Mesh, mm: &Mat, mut p: [Vec3; 4], toward: Vec3) {
     let n = (p[1] - p[0]).cross(p[2] - p[0]);
     let c = (p[0] + p[1] + p[2] + p[3]) * 0.25;
     if n.dot(toward - c) < 0.0 {
@@ -149,19 +149,19 @@ fn quad_to(m: &mut Mesh, mm: &Mat, mut p: [Vec3; 4], toward: Vec3) {
     }
     m.quad(mm, p);
 }
-fn ccw(mut v: Vec<Vec2>) -> Vec<Vec2> {
+pub(crate) fn ccw(mut v: Vec<Vec2>) -> Vec<Vec2> {
     v.reverse();
     v
 }
 /// Octagon (a box with its corners cut by `c`), clockwise.
-fn octagon(hx: f32, hy: f32, c: f32) -> Vec<Vec2> {
+pub(crate) fn octagon(hx: f32, hy: f32, c: f32) -> Vec<Vec2> {
     vec![
         Vec2::new(hx - c, -hy), Vec2::new(-hx + c, -hy), Vec2::new(-hx, -hy + c), Vec2::new(-hx, hy - c),
         Vec2::new(-hx + c, hy), Vec2::new(hx - c, hy), Vec2::new(hx, hy - c), Vec2::new(hx, -hy + c),
     ]
 }
 
-fn catmull(p: &[Vec3], sub: usize) -> Vec<Vec3> {
+pub(crate) fn catmull(p: &[Vec3], sub: usize) -> Vec<Vec3> {
     let n = p.len();
     let mut out = Vec::new();
     for i in 0..n - 1 {
@@ -178,22 +178,22 @@ fn catmull(p: &[Vec3], sub: usize) -> Vec<Vec3> {
 
 // ---------------------------------------------------------------- what sits on a panel
 
-fn word(m: &mut Mesh, f: &Face, u: f32, v: f32, h: f32, s: &str) {
+pub(crate) fn word(m: &mut Mesh, f: &Face, u: f32, v: f32, h: f32, s: &str) {
     let n = s.chars().count().max(1) as f32;
     let hw = (n * 1.45 - 0.45) * h * 0.25 + h * 0.3;
     rect(m, &legend_mat(style::TEXT, sid(s), blk_col()), f.at_h(u, v, 0.0004), f.ax, f.ay, hw, h * 0.72);
 }
 /// Made-up lettering filling `hw` x `hh`.
-fn fake(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32) {
+pub(crate) fn fake(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32) {
     rect(m, &legend_mat(style::TEXT, 0, blk_col()), f.at_h(u, v, 0.0004), f.ax, f.ay, hw, hh);
 }
-fn dzus(m: &mut Mesh, f: &Face, u: f32, v: f32, seed: f32) {
+pub(crate) fn dzus(m: &mut Mesh, f: &Face, u: f32, v: f32, seed: f32) {
     let c = f.at(u, v);
     m.lathe(&DZUS, c, f.n(), &[[0.0036, 0.0], [0.0036, 0.0006], [0.0029, 0.0013], [0.0, 0.0014]], 10, true);
     m.rbox(&KNOB, c + f.n() * 0.0013, Vec3::new(0.0028, 0.00045, 0.00025), 0.0001, f.rot() * Quat::from_rotation_z(hash(seed) * PI));
 }
 /// A console panel: a black plate standing proud with a Dzus fastener in each corner.
-fn plate(m: &mut Mesh, f: &Face, u0: f32, v0: f32, u1: f32, v1: f32, seed: f32) {
+pub(crate) fn plate(m: &mut Mesh, f: &Face, u0: f32, v0: f32, u1: f32, v1: f32, seed: f32) {
     let (cu, cv) = ((u0 + u1) * 0.5, (v0 + v1) * 0.5);
     let (hu, hv) = ((u1 - u0) * 0.5 - 0.0007, (v1 - v0) * 0.5 - 0.0007);
     m.rbox(&BLK, f.at_h(cu, cv, 0.0015), Vec3::new(hu, hv, 0.0028), 0.0012, f.rot());
@@ -203,7 +203,7 @@ fn plate(m: &mut Mesh, f: &Face, u0: f32, v0: f32, u1: f32, v1: f32, seed: f32) 
     }
 }
 /// A black knob with a white pointer line, and its scale printed round it.
-fn knob(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32, seed: f32, scale: bool) {
+pub(crate) fn knob(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32, seed: f32, scale: bool) {
     let c = f.at(u, v);
     let n = f.n();
     m.lathe(&KNOB, c, n, &[[r * 1.35, 0.0], [r * 1.35, r * 0.32], [r * 1.12, r * 0.45], [r * 0.92, r * 0.5], [r * 0.92, r * 1.45], [r * 0.82, r * 1.62], [0.0, r * 1.65]], 16, false);
@@ -222,7 +222,7 @@ fn knob_alu(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32) {
     m.disc(&KNOB, c + f.n() * (r * 1.285), f.n(), f.ay, r * 0.55, 14);
 }
 /// Lever-lock toggle switch.
-fn toggle(m: &mut Mesh, f: &Face, u: f32, v: f32, up: bool) {
+pub(crate) fn toggle(m: &mut Mesh, f: &Face, u: f32, v: f32, up: bool) {
     let c = f.at(u, v);
     let n = f.n();
     m.lathe(&CHROME, c, n, &[[0.0048, 0.0], [0.0048, 0.0016], [0.0036, 0.0020], [0.0036, 0.0040], [0.0, 0.0042]], 8, false);
@@ -231,23 +231,23 @@ fn toggle(m: &mut Mesh, f: &Face, u: f32, v: f32, up: bool) {
     m.dome(&CHROME, tip, (tip - c).normalize(), 0.0023, 0.0018, 8, 0.0);
 }
 /// A switch under a hinged guard: red, or striped yellow and black.
-fn guarded(m: &mut Mesh, f: &Face, u: f32, v: f32, hazard: bool) {
+pub(crate) fn guarded(m: &mut Mesh, f: &Face, u: f32, v: f32, hazard: bool) {
     toggle(m, f, u, v, false);
     let col = if hazard { stripes(0.005, false) } else { mt(mat::PAINT, 0.34, 0.03, 0.02) };
     let rot = f.rot() * Quat::from_rotation_x(-0.12);
     m.rbox(&col, f.at_h(u, v - 0.002, 0.011), Vec3::new(0.0085, 0.015, 0.0085), 0.0022, rot);
 }
 /// Square push button with its legend.
-fn pbutton(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32, st: u32, s: u32) {
+pub(crate) fn pbutton(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32, st: u32, s: u32) {
     m.rbox(&BEZEL, f.at_h(u, v, 0.0035), Vec3::new(hw + 0.0014, hh + 0.0014, 0.0035), 0.0011, f.rot());
     rect(m, &legend_mat(st, s, Vec3::new(0.02, 0.02, 0.021)), f.at_h(u, v, 0.0072), f.ax, f.ay, hw, hh);
 }
 /// A round push button.
-fn rbutton(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32) {
+pub(crate) fn rbutton(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32) {
     m.lathe(&BEZEL, f.at(u, v), f.n(), &[[r * 1.4, 0.0], [r * 1.4, r * 0.3], [r, r * 0.35], [r, r * 1.0], [r * 0.85, r * 1.15], [0.0, r * 1.18]], 12, false);
 }
 /// A warning light: a lens with its legend, dark until lit.
-fn light(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32, s: u32, lens: &Mat) {
+pub(crate) fn light(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32, s: u32, lens: &Mat) {
     m.rbox(&BEZEL, f.at_h(u, v, 0.003), Vec3::new(hw + 0.002, hh + 0.002, 0.003), 0.0012, f.rot());
     m.rbox(lens, f.at_h(u, v, 0.0062), Vec3::new(hw, hh, 0.0006), 0.0004, f.rot());
     rect(m, &legend_mat(style::BUTTON, s, Vec3::new(0.03, 0.02, 0.02)), f.at_h(u, v, 0.0070), f.ax, f.ay, hw, hh);
@@ -255,7 +255,7 @@ fn light(m: &mut Mesh, f: &Face, u: f32, v: f32, hw: f32, hh: f32, s: u32, lens:
 
 /// Fill a console panel with rows of knobs, toggles and buttons and their
 /// legends, made up from `seed` the way the Hornet's panels look.
-fn populate(m: &mut Mesh, f: &Face, u0: f32, v0: f32, u1: f32, v1: f32, seed: f32, title: Option<&str>) {
+pub(crate) fn populate(m: &mut Mesh, f: &Face, u0: f32, v0: f32, u1: f32, v1: f32, seed: f32, title: Option<&str>) {
     let g = f.sub(0.0, 0.0, 0.0043);
     let w = u1 - u0;
     let mut top = v1;
@@ -820,7 +820,7 @@ fn lower_panel(m: &mut Mesh) {
 }
 
 /// A standby instrument in its black case.
-fn instrument(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32, id: f32, seed: f32) {
+pub(crate) fn instrument(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32, id: f32, seed: f32) {
     let rot = f.rot();
     m.rbox(&BLK, f.at_h(u, v, 0.006), Vec3::new(r + 0.008, r + 0.008, 0.006), 0.004, rot);
     // (The face sits just proud of its case, whose top is 0.012 up.)
@@ -899,7 +899,7 @@ fn consoles(m: &mut Mesh) {
 }
 
 /// The throttle quadrant's housing: slots, detent markings, the friction lever.
-fn quadrant(m: &mut Mesh, f: &Face, u0: f32, u1: f32, v0: f32, v1: f32) {
+pub(crate) fn quadrant(m: &mut Mesh, f: &Face, u0: f32, u1: f32, v0: f32, v1: f32) {
     let (cu, cv) = ((u0 + u1) * 0.5, (v0 + v1) * 0.5);
     m.rbox(&BLK, f.at_h(cu, cv, 0.012), Vec3::new((u1 - u0) * 0.5, (v1 - v0) * 0.5, 0.012), 0.008, f.rot());
     let g = f.sub(0.0, 0.0, 0.024);
@@ -929,7 +929,7 @@ fn back(x: f32, b: f32, h: f32) -> Vec3 {
     SRP + Vec3::X * x + up * b + fwd * h
 }
 
-fn seat(m: &mut Mesh) {
+pub(crate) fn seat(m: &mut Mesh) {
     let up = back_dir();
     let tilt = Quat::from_rotation_arc(Vec3::Y, up);
     let pan_rot = Quat::from_rotation_x(0.10);
@@ -997,7 +997,7 @@ fn seat(m: &mut Mesh) {
 
 /// A strap lying on a surface: a thin ribbon along `pts`, `w` wide, lying
 /// on the surface whose normal `up(p)` gives.
-fn strap(m: &mut Mesh, mm: &Mat, pts: &[Vec3], w: f32, up: &dyn Fn(Vec3) -> Vec3) {
+pub(crate) fn strap(m: &mut Mesh, mm: &Mat, pts: &[Vec3], w: f32, up: &dyn Fn(Vec3) -> Vec3) {
     let n = pts.len();
     let mut along = 0.0;
     let mut top: Vec<Vec<SP>> = Vec::new();
@@ -1028,10 +1028,10 @@ fn strap(m: &mut Mesh, mm: &Mat, pts: &[Vec3], w: f32, up: &dyn Fn(Vec3) -> Vec3
 // ---------------------------------------------------------------- what moves
 
 /// The throttles' slots (x, body frame) and their pivot under the console.
-const THR_X: [f32; 2] = [-0.352, -0.318];
+pub(crate) const THR_X: [f32; 2] = [-0.352, -0.318];
 const THR_PIVOT: Vec3 = Vec3::new(0.0, CON_Y - 0.17, -4.70);
 
-fn controls(b: &mut Builder) {
+pub(crate) fn controls(b: &mut Builder) {
     // The stick: a gimbal ring at its foot turns fore and aft, the stick in it from side to side.
     let mut boot = Mesh::default();
     let prof: Vec<[f32; 2]> = (0..=12).map(|i| {

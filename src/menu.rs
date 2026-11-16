@@ -510,14 +510,15 @@ pub fn key_row(ui: &mut egui::Ui, keys: &'static str, what: &'static str) {
     egui::Frame::new().fill(Color32::from_rgb(38, 45, 56)).corner_radius(4.0).inner_margin(egui::Margin::symmetric(6, 0)).show(ui, |ui| {
         ui.label(RichText::new(tr(keys)).monospace().size(12.0).color(Color32::WHITE));
     });
-    ui.label(RichText::new(tr(what)).size(13.0).color(TEXT));
+    // Truncate the description so a long one can't spill into the next column.
+    ui.add(egui::Label::new(RichText::new(tr(what)).size(13.0).color(TEXT)).truncate());
     ui.end_row();
 }
 
 /// One `buttons … action` row of the gamepad controls list.
 pub fn pad_row(ui: &mut egui::Ui, spec: &str, what: &'static str) {
     padui::glyphs(ui, spec, 20.0);
-    ui.label(RichText::new(tr(what)).size(13.0).color(TEXT));
+    ui.add(egui::Label::new(RichText::new(tr(what)).size(13.0).color(TEXT)).truncate());
     ui.end_row();
 }
 
@@ -581,17 +582,23 @@ pub fn controls_list(ui: &mut egui::Ui) {
         });
         return;
     }
-    let half = (CONTROLS.len() + 1) / 2;
+    let count = (CONTROLS.len() + 1) / 2;
+    let col_w = (ui.available_width() - 8.0) / 2.0;
     ui.columns(2, |cols| {
         for (c, ui) in cols.iter_mut().enumerate() {
-            let range = if c == 0 { 0..half } else { half..CONTROLS.len() };
+            ui.set_max_width(col_w);
+            let range = if c == 0 { 0..count } else { count..CONTROLS.len() };
             for (title, rows) in &CONTROLS[range] {
                 heading(ui, tr(title));
-                egui::Grid::new(("keys", *title)).num_columns(2).min_row_height(19.0).spacing([10.0, 3.0]).show(ui, |ui| {
-                    for (k, w) in rows.iter() {
-                        key_row(ui, k, w);
-                    }
-                });
+                egui::Grid::new(("keys", *title))
+                    .num_columns(2)
+                    .min_row_height(19.0)
+                    .spacing([10.0, 3.0])
+                    .show(ui, |ui| {
+                        for (k, w) in rows.iter() {
+                            key_row(ui, k, w);
+                        }
+                    });
                 ui.add_space(4.0);
             }
         }
