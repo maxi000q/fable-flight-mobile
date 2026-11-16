@@ -2205,7 +2205,11 @@ mod tests {
 
     #[test]
     fn plane_shader_validates() {
-        let src = format!("{}\n{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"), include_str!("../../shaders/pit18.wgsl"));
+        // The renderer injects SAMPLES/CS_RES before common.wgsl (render.rs
+        // `overrides`); the assembly here must match it or CS_RES is unknown.
+        let (samples, cs_res) = if cfg!(target_os = "android") { (1, 512) } else { (4, 1024) };
+        let ov = format!("const SAMPLES = {samples}u;\nconst CS_RES = {cs_res}.0;\n");
+        let src = format!("{ov}{}\n{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"), include_str!("../../shaders/pit18.wgsl"));
         let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         if let Err(e) = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m) {
             panic!("{}", e.emit_to_string(&src));
