@@ -823,7 +823,8 @@ fn lower_panel(m: &mut Mesh) {
 fn instrument(m: &mut Mesh, f: &Face, u: f32, v: f32, r: f32, id: f32, seed: f32) {
     let rot = f.rot();
     m.rbox(&BLK, f.at_h(u, v, 0.006), Vec3::new(r + 0.008, r + 0.008, 0.006), 0.004, rot);
-    let c = f.at_h(u, v, 0.0105);
+    // (The face sits just proud of its case, whose top is 0.012 up.)
+    let c = f.at_h(u, v, 0.0125);
     m.disc(&mt(mat::GAUGE, 0.02, 0.02, 0.02).x(id), c, f.n(), f.ay, r, 36);
     m.lathe(&BLK, c, f.n(), &[[r, 0.0], [r, 0.005], [r + 0.003, 0.0065], [r + 0.006, 0.006]], 36, false);
     for (k, (du, dv)) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().enumerate() {
