@@ -5634,6 +5634,24 @@ pub fn main() -> anyhow::Result<()> {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    // winit allows exactly ONE EventLoop per process, ever: its internal
+    // "created" flag is never reset, not even when the loop is dropped.
+    // NativeActivity can call android_main again in a process that is still
+    // alive (the activity was destroyed and recreated: relaunch from the
+    // launcher or recents, "don't keep activities", an unhandled config
+    // change). A second EventLoop::build() then fails with "EventLoop can't
+    // be recreated", and every later launch fails the same way because the
+    // worker threads keep the process alive. Exit instead: Android starts a
+    // fresh process for the new activity, where a first loop can be built.
+    // This must run before the logger is re-initialised: truncating
+    // last_run.log under the first logger's open handle is what filled the
+    // log with NUL bytes.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ENTERED: AtomicBool = AtomicBool::new(false);
+    if ENTERED.swap(true, Ordering::SeqCst) {
+        log::error!("android_main re-entered in a live process; exiting so Android restarts us with a fresh event loop");
+        std::process::exit(0);
+    }
     // env_logger writes to a terminal a phone does not have: send logs to
     // logcat instead (read with `adb logcat -s fablegame`), and mirror them
     // to last_run.log in the app's external files dir, which a file
@@ -5669,7 +5687,9 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
                 }
             };
             el.set_control_flow(ControlFlow::Poll);
-            let _ = el.run_app(&mut App { args, game: None });
+            if let Err(e) = el.run_app(&mut App { args, game: None }) {
+                log::error!("event loop run: {e}");
+            }
         });
     if let Err(e) = t {
         log::error!("spawning the game thread: {e}");
@@ -5680,6 +5700,11 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     // glue tears everything down, and it must not do that mid-game.
     let _ = t.unwrap().join();
     log::info!("android_main: game thread finished");
+    // Never return into a half-dead process: the loader, audio and network
+    // threads would keep it alive, and the next launch would re-enter
+    // android_main and hit winit's one-EventLoop-per-process guard. Exit so
+    // every launch starts from a clean process.
+    std::process::exit(0);
 }
 
 /// The one lawful way to move an `AndroidApp` between threads: it is not

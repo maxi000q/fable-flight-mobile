@@ -1,0 +1,69 @@
+name: Android APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  apk:
+    name: Build signed APKs (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-apk
+      - name: Locate Android SDK, NDK and build-tools
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMAN="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if ! ls -d "$SDK"/ndk/* >/dev/null 2>&1; then yes | "$SDKMAN" "ndk;27.2.12479018" >/dev/null; fi
+          if ! ls -d "$SDK"/build-tools/* >/dev/null 2>&1; then yes | "$SDKMAN" "build-tools;35.0.0" >/dev/null; fi
+          if [ ! -f "$SDK/platforms/android-35/android.jar" ]; then yes | "$SDKMAN" "platforms;android-35" >/dev/null; fi
+          NDK="$(ls -d "$SDK"/ndk/* | sort -V | tail -1)"
+          BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "ANDROID_NDK_HOME=$NDK"
+            echo "ANDROID_NDK_ROOT=$NDK"
+            echo "BT=$BT"
+            echo "PLATFORM=$SDK/platforms/android-35/android.jar"
+            echo "CC_aarch64_linux_android=$TC/aarch64-linux-android26-clang"
+            echo "CXX_aarch64_linux_android=$TC/aarch64-linux-android26-clang++"
+            echo "AR_aarch64_linux_android=$TC/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/aarch64-linux-android26-clang"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
+          } >> "$GITHUB_ENV"
+          echo "NDK: $NDK"; echo "build-tools: $BT"
+      - name: Build Rust library (aarch64-linux-android)
+        run: cargo build --release --lib --target aarch64-linux-android --locked
+      - name: Package and sign APKs
+        run: |
+          set -euo pipefail
+          mkdir -p android-apk/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/libfablegame.so android-apk/jniLibs/arm64-v8a/
+          cd android-apk
+          OUT="$GITHUB_WORKSPACE" ./build-apk.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FableFlightMobile-1.0.4-apks
+          path: |
+            FableFlightMobile-debug.apk
+            FableFlightMobile-release.apk
+          if-no-files-found: error
+      - name: Publish release with the APKs
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.4
+          name: "Fable Flight Mobile v1.0.4 - fix EventLoop recreation on relaunch"
+          files: |
+            FableFlightMobile-debug.apk
+            FableFlightMobile-release.apk
+          fail_on_unmatched_files: true

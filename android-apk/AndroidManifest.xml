@@ -29,7 +29,7 @@
             android:name="android.app.NativeActivity"
             android:label="Fable Flight Mobile"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode|keyboard|navigation|fontScale|locale|layoutDirection|smallestScreenSize"
             android:launchMode="singleTask"
             android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="fablegame" />
