@@ -1328,6 +1328,29 @@ fn surface(in: VOut) -> Shaded {
         albedo = fn_.c;
         rough = fn_.rough;
         metal = fn_.metal;
+        // At night the cabin shows through its windows (not the wreck's):
+        // warm, each a little different, a few dimmer and some shades down.
+        if (id == 1u && night > 0.001 && O.glow.x < 0.001) {
+          let sd = cabin_win_sd747(L);
+          if (sd < 0.01) {
+            let d = L.z + 31.6;
+            let upper = step(2.5, L.y);
+            let iw = floor((d - select(2.4, 9.6, upper > 0.5)) / 0.508);
+            let h = hash2(vec2f(iw + sign(L.x) * 131.0, upper * 17.0 + 3.0));
+            let h2 = hash2(vec2f(iw * 0.37 + sign(L.x) * 7.0, upper * 5.0 + 11.0));
+            // Shades down on about one in seven; a block of rows dimmed now and then.
+            let blind = step(0.86, h);
+            let zone = 0.55 + 0.45 * step(0.25, hash1(floor(d / 7.5) + sign(L.x) * 3.0));
+            let tint = mix(vec3f(1.0, 0.80, 0.56), vec3f(1.0, 0.90, 0.78), h2);
+            // Brightest in the middle of the pane, the reveal round it darker;
+            // dimmer looked at slantwise (the far wall seen instead of the lamps).
+            let inner = smoothstep(0.012, -0.05, sd);
+            let ndv = abs(dot(normalize(in.N), V));
+            let k = inner * (0.35 + 0.65 * ndv) * zone * mix(1.0, 0.12, blind) * (0.75 + 0.5 * h2);
+            emit += tint * k * night * G.sun_dir.w * 0.006;
+            albedo *= 1.0 - 0.6 * inner * night;
+          }
+        }
       }
       // Window sealant and the edges of the gear wells.
       if (pt == P_FUSE || pt == P_COWL) {
@@ -1446,10 +1469,10 @@ fn surface(in: VOut) -> Shaded {
       var on = 0.0;
       var k = 0.0;
       switch ch {
-        case 0u, 1u, 2u: { on = step(999.0, P5.x); k = mix(0.08, 0.6, night); }
-        case 3u: { on = P5.y; k = 3.0; }
-        case 4u: { on = P5.z; k = mix(0.5, 0.6, night); }
-        case 5u: { on = P5.w; k = mix(0.3, 0.8, night); }
+        case 0u, 1u, 2u: { on = step(999.0, P5.x); k = mix(0.08, 0.9, night); }
+        case 3u: { on = P5.y; k = mix(3.0, 3.5, night); }
+        case 4u: { on = P5.z; k = mix(0.5, 1.2, night); }
+        case 5u: { on = P5.w; k = mix(0.3, 2.0, night); }
         case 6u: { on = step(0.999, P4.z); k = mix(0.05, 0.01, night); }
         case 7u: { on = step(P4.z, 0.001); k = mix(0.05, 0.01, night); }
         // Formation light strips: pale panels by day, a soft green glow with the navigation lights at night.
@@ -1457,7 +1480,19 @@ fn surface(in: VOut) -> Shaded {
         default: { on = 1.0; k = 0.004; }
       }
       emit = in.col.rgb * on * k * G.sun_dir.w;
-      if (ch == 5u) { emit *= 0.6 + 0.4 * smoothstep(1.0, 0.0, length(in.uv)); }
+      // Not a flat glowing block: the bulb sits behind a moulded lens, so
+      // the light is hottest (and burns towards white) where the glass faces
+      // the eye, falls off towards its edges, and the lens's prisms break
+      // it into fine bright and dark ribs.
+      if (ch <= 5u) {
+        let fv = abs(dot(normalize(in.N), V));
+        let ribs = 0.6 + 0.8 * nz(L * 140.0).r * (0.5 + 0.5 * sin(dot(L, vec3f(310.0, 0.0, 190.0))));
+        let core = pow(fv, 6.0);
+        emit *= (0.12 + 0.88 * pow(fv, 2.0)) * ribs;
+        emit = mix(emit, vec3f(luma(emit)) * 1.2, core * 0.6);
+      }
+      // (A landing light's lens is dark seen from behind, from the cabin.)
+      if (ch == 5u) { emit *= (0.6 + 0.4 * smoothstep(1.0, 0.0, length(in.uv))) * select(1.0, 0.0, back); }
       albedo = in.col.rgb * 0.15;
       if (ch == 9u) { albedo = vec3f(0.40, 0.43, 0.27); rough = 0.4; }
       ssr = 0.5;
@@ -1650,7 +1685,7 @@ fn surface(in: VOut) -> Shaded {
   let fill = (l.amb * 0.2 + l.sun * max(dot(l.upn, Ls), 0.0) * 0.03) * (0.25 + 0.75 * ao) * inside;
   let bounce = l.sun * max(dot(l.upn, Ls), 0.0) * 0.05 * sat(0.5 - 0.5 * dot(N, l.upn)) + l.sun * max(dot(l.upn, Ls), 0.0) * 0.025;
   let moon = moon_light(l.upn, l.h) * max(dot(N, G.moon.xyz), 0.0);
-  let diffuse = albedo * (1.0 - metal) * ((l.sun * ndl * sh + moon) / PI + (l.amb * (0.55 + 0.45 * dot(N, l.upn)) + bounce) * amb_ao + fill + point_light(in.P, N));
+  let diffuse = albedo * (1.0 - metal) * ((l.sun * ndl * sh + moon) / PI + (l.amb * (0.55 + 0.45 * dot(N, l.upn)) + bounce) * amb_ao + fill + fire_light(in.P, N));
   let R = reflect(V, N);
   let env_sharp = env_reflect(in.P, R, l.upn, false);
   let env_soft = sky_lut(normalize(mix(R, l.upn, 0.5))) * 0.9;
@@ -1660,8 +1695,10 @@ fn surface(in: VOut) -> Shaded {
   var c = diffuse + spec + mix(env_sharp, env_soft, sat(rough * 1.6)) * envw;
   // The cabin has its own occlusion baked in; only the outside takes the screen-space kind.
   g_amb = albedo * (1.0 - metal) * (l.amb * (0.55 + 0.45 * dot(N, l.upn)) + bounce) * amb_ao * (1.0 - inside);
-  // Instrument flood lighting at night, warm and dim, inside the cabin.
-  c += albedo * vec3f(1.0, 0.62, 0.38) * G.sun_dir.w * 0.0025 * night * inside * ao;
+  // Instrument flood lighting at night, warm and dim, inside the cabin:
+  // enough to make out the panel and glareshield (from outside too, through
+  // the windows), still well under the displays.
+  c += albedo * vec3f(1.0, 0.62, 0.38) * G.sun_dir.w * 0.0045 * night * inside * ao;
   c += emit;
   // Embers along the charred edges while it burns.
   let ember = smoothstep(0.45, 0.7, cn.b) * smoothstep(0.2, 0.6, char) * O.glow.x;

@@ -41,8 +41,13 @@ const CORNERS = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 
   I *= exp(-d * 2.5e-5 * max(G.weather.w, 0.2));
   // A light is a point: as it gets further off its sprite stops shrinking
   // below a pixel or so, and its brightness is spread over that.
-  let theta = max(0.2 / d, 1.3 * G.misc.w);
+  // (Kind 3, the flown aircraft's own lights, are seen close to: a lens a
+  // few centimetres across, and no brighter than from 40 m, so the glare
+  // round them stays a glint rather than swallowing the wing.)
+  let own = kind == 3u;
+  let theta = max(select(0.2, 0.035, own) / d, 1.3 * G.misc.w);
   var E = I * 0.07 / (d * d) * pow(max(d / 300.0, 1.0), 0.9);
+  if (own) { E = I * 0.07 / max(d * d, 1600.0) * pow(max(d / 300.0, 1.0), 0.9); }
   let L = E / (PI * theta * theta);
   if (I <= 1e-4 || L < 1e-4) {
     return VOut(vec4f(2.0, 2.0, 2.0, 1.0), vec2f(0.0), vec3f(0.0));
@@ -54,13 +59,18 @@ const CORNERS = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 
   let W = P + (side * c.x + up * c.y) * R;
   var clip = G.view_proj * vec4f(W, 1.0);
   // Depth: a little in front of the light, so the ground it stands on does not hide it.
-  let pd = G.view_proj * vec4f(P + V * min(R + 0.4, d * 0.5), 1.0);
+  let pd = G.view_proj * vec4f(P + V * min(R + select(0.4, 0.03, own), d * 0.5), 1.0);
   clip.z = pd.z / pd.w * clip.w;
   return VOut(clip, c * 2.5, col * L);
 }
 
 @fragment fn fs(in: VOut) -> @location(0) vec4f {
+  // A tight hot core with a faint, short halo (the lens of the eye/camera
+  // scatters a little) and four faint diffraction spikes, instead of a big
+  // soft ball.
   let r2 = dot(in.uv, in.uv);
-  let p = exp(-r2) + 0.04 * exp(-r2 * 0.25);
+  let a = abs(in.uv);
+  let spikes = exp(-a.x * 18.0) * exp(-a.y * 1.6) + exp(-a.y * 18.0) * exp(-a.x * 1.6);
+  let p = exp(-r2 * 2.0) + 0.012 * exp(-r2 * 0.4) + 0.03 * spikes * exp(-r2 * 0.3);
   return vec4f(in.col * p, 0.0);
 }

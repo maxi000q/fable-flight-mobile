@@ -62,7 +62,7 @@ fn finish(scene: vec3f, in: FsIn) -> vec4f {
   var c = scene;
   let bloom = textureSampleLevel(t_bloom, s_clamp, uv, 0.0).rgb;
   // Lights bloom more at night, when the eye is dark-adapted.
-  c = mix(c, bloom, mix(0.055, 0.13, smoothstep(1.0, 9.0, G.time.z)));
+  c = mix(c, bloom, mix(0.035, 0.06, smoothstep(1.0, 9.0, G.time.z)));
   c *= G.time.z;
   // Gentle vignette.
   let q = in.uv - 0.5;
