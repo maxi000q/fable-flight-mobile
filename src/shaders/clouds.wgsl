@@ -77,6 +77,14 @@ fn alto_range(oc: vec3f, rd: vec3f) -> vec2f {
 }
 // Premultiplied colour and transmittance of the layer between t0 and t1, lit as the
 // cumulus are (same phase function and multiple-scattering octaves).
+// The towns' light on a cloud at p (planet-relative), from below: the clouds
+// over a city glow orange, brightest underneath.
+fn city_amb(p: vec3f) -> vec3f {
+  if (!glow_on()) { return vec3f(0.0); }
+  // Light scattered many times inside the cloud comes out paler than it went in.
+  let c = city_up(p + G.planet.xyz, length(p) - G.planet.w - G.glow_e.w);
+  return mix(c, vec3f(luma(c)), 0.3) * (0.75 / PI);
+}
 fn alto_march(oc: vec3f, rd: vec3f, t0: f32, t1: f32, a: f32, jit: f32, cs: f32, sky_amb: vec3f, gnd_amb: vec3f) -> vec4f {
   var T = 1.0;
   var L = vec3f(0.0);
@@ -177,8 +185,6 @@ fn depth_match(a: f32, b: f32) -> f32 {
   let sky_raw = sky_up * 0.55 + sky_side * 0.45;
   let sky_amb = mix(sky_raw, vec3f(luma(sky_raw)), 0.45);
   var gnd_amb = vec3f(0.11, 0.11, 0.1) * sun_trans(0.0, mu0) * max(mu0, 0.0) * G.sun_dir.w / PI * mix(1.0, 0.45, G.cloud.x);
-  // At night the cloud bases catch the city's glow from below.
-  gnd_amb += SKYGLOW * 0.0045 * G.misc.y * (1.0 - smoothstep(-0.2, 0.05, mu0));
 
   // Only rays that pass near a storm cell march up to the storm ceiling and look the
   // storms up; the rest keep to the ordinary layer.
@@ -225,7 +231,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
       t += dt;
       if (alto_on && ts > atm_) {
         alto_on = false;
-        let la = alto_march(oc, rd, ar.x, ar.y, aamt, jit, cs, sky_amb, gnd_amb);
+        let la = alto_march(oc, rd, ar.x, ar.y, aamt, jit, cs, sky_amb, gnd_amb + city_amb(oc + rd * atm_));
         L += T * la.rgb;
         let wa = T * (1.0 - la.a);
         tw += atm_ * wa;
@@ -287,7 +293,9 @@ fn depth_match(a: f32, b: f32) -> f32 {
       let powder = mix(1.0, clamp(dprob * vprob * 1.25, 0.0, 1.0), 0.55 * (1.0 - smoothstep(0.0, 0.6, cs)));
       let mu = dot(upn, sun);
       let sunc = sun_trans(h, mu) * G.sun_dir.w;
-      let amb = (sky_amb * mix(0.25, 0.95, hn) * occ + gnd_amb * mix(1.0, 0.25, hn)) * mix(0.5, 1.0, powder);
+      var gamb = gnd_amb;
+      if (glow_on()) { gamb += city_amb(p); }
+      let amb = (sky_amb * mix(0.25, 0.95, hn) * occ + gamb * mix(1.0, 0.25, hn) + (gamb - gnd_amb) * (1.0 - hn) * 0.5) * mix(0.5, 1.0, powder);
       let moonc = moon_light(upn, h);
       let S = ((sunc + moonc) * ms * MS_GAIN * powder + amb) * d * SIGMA;
       let e = d * SIGMA;
@@ -315,7 +323,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
     }
   }
   if (alto_on && T > 0.004) {
-    let la = alto_march(oc, rd, ar.x, ar.y, aamt, jit, cs, sky_amb, gnd_amb);
+    let la = alto_march(oc, rd, ar.x, ar.y, aamt, jit, cs, sky_amb, gnd_amb + city_amb(oc + rd * atm_));
     L += T * la.rgb;
     let wa = T * (1.0 - la.a);
     tw += atm_ * wa;

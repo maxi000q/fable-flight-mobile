@@ -44,6 +44,7 @@ mod traffic;
 mod trees;
 mod ocean;
 mod shore;
+mod skyglow;
 mod world;
 
 #[derive(Copy, Clone, PartialEq)]
@@ -120,8 +121,8 @@ fn attribution_default() -> &'static str {
 }
 fn attribution_rest() -> &'static str {
     t!(
-        "Elevation: Mapzen / AWS Terrain Tiles  ·  Buildings, roads, land cover & water © OpenStreetMap contributors, OpenFreeMap",
-        "Relief : Mapzen / AWS Terrain Tiles  ·  Bâtiments, routes, occupation du sol et eau © contributeurs OpenStreetMap, OpenFreeMap"
+        "Elevation: Mapzen / AWS Terrain Tiles  ·  Buildings, roads, land cover & water © OpenStreetMap contributors, OpenFreeMap  ·  Night lights: NASA Black Marble",
+        "Relief : Mapzen / AWS Terrain Tiles  ·  Bâtiments, routes, occupation du sol et eau © contributeurs OpenStreetMap, OpenFreeMap  ·  Lumières nocturnes : NASA Black Marble"
     )
 }
 
@@ -704,6 +705,7 @@ struct Game {
     n_cars: usize,
     /// how much city is around (0..1), for the orange skyglow at night
     city_glow: f32,
+    skyglow: skyglow::SkyGlow,
     /// an airport start being prepared: (airport, the airfield if it could be put together, runway, on approach, keep the local time)
     airport_rx: Option<std::sync::mpsc::Receiver<(u32, Option<Arc<airports::Geo>>, Option<String>, bool, bool)>>,
     /// an airport start asked for on the command line
@@ -850,7 +852,7 @@ impl Game {
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, gauges: gauges::Gauges::new(&plane, secs.to_bits()), plane,
+            start_rx: None, name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), plane,
             airport_rx: None, hold_spot: None,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
@@ -3100,6 +3102,14 @@ impl Game {
         // Detail building tiles in range stand in for "how much city is around".
         let city = if in_menu { 0.0 } else { (self.world.stats.2 as f32 / 45.0).min(1.0) };
         self.city_glow += (city - self.city_glow) * (dt_real as f32 * 0.5).min(1.0);
+        // City light in the air: the lights come on as the sun sets.
+        let glow_px = if in_menu { None } else { self.skyglow.update(cam) };
+        let glow = {
+            let (la, lo, _) = geo::pos_to_lla(cam);
+            let gh = self.world.ground(la, lo).map(|g| g.h).unwrap_or(0.0);
+            let on = 1.0 - ((up.dot(sun) as f32 + 0.2) / 0.25).clamp(0.0, 1.0);
+            if in_menu { [[0.0; 4]; 3] } else { self.skyglow.globals(cam, gh, on * on * (3.0 - 2.0 * on)) }
+        };
         let mu = up.dot(sun) as f32;
         let day = ((mu + 0.2) / 0.4).clamp(0.0, 1.0);
         let day = day * day * (3.0 - 2.0 * day);
@@ -3190,6 +3200,9 @@ impl Game {
             start: [if in_menu { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             quality: [0.0; 4],
             detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), 0.0],
+            glow_c: glow[0],
+            glow_e: glow[1],
+            glow_n: glow[2],
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -3399,6 +3412,7 @@ impl Game {
         g.cut_v = pf.cut_v;
         casc_vp[render::MASK_SLOT] = g.photo_vp;
         let (tiles, details, near) = self.world.draw_lists(cam, focus_abs, CASC);
+        let cover = self.world.light_cover(cam);
         // The shore distance field: a step of its rebuild this frame.
         let sf = self.shore.frame(cam);
         casc_vp[render::SHORE_SLOT] = sf.build_vp;
@@ -3441,7 +3455,7 @@ impl Game {
         let had_shots = shot.is_some() && self.shots.is_empty();
         let (skin_slots, skins) = if in_menu { (Vec::new(), Vec::new()) } else { self.destr.skin_draws() };
         self.r.stats[0] += now.elapsed().as_secs_f64();
-        self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.ocean.uniform(), egui: Some(ui), shot, logo: in_menu.then(|| self.window.scale_factor() as f32) });
+        self.r.render(Frame { g, tiles, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.ocean.uniform(), egui: Some(ui), shot, logo: in_menu.then(|| self.window.scale_factor() as f32), cover, glow: glow_px });
         if (had_shots && std::env::args().any(|a| a == "--shot") && self.record.is_none()) || rec_done {
             self.quit = true;
         }

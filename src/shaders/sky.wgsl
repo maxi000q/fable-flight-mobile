@@ -96,11 +96,11 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
     let cs = dot(rd, sun);
     col += sc.T * smoothstep(0.999978, 0.999990, cs) * G.sun_dir.w * 600.0;
     col += sc.T * (select(stars(rd) * 0.11, space(rd), G.start.x > 0.0) + moon_disc(rd));
-    // City light scattered by the haze: an orange glow low over the horizon.
     let el = dot(rd, G.up.xyz);
-    col += SKYGLOW * 0.0022 * G.misc.y * night_cam() * exp(-max(el, 0.0) * 9.0) * (1.0 + G.cloud.x);
     // Airglow and scattered starlight: even a moonless sky is deep blue, not black.
     col += vec3f(0.0004, 0.0008, 0.0019) * night_cam() * (1.0 - 0.4 * max(el, 0.0));
   }
+  // City light scattered by the haze: domes over the towns on the horizon.
+  col += glow_march(rd, select(1e9, gnd.x, gnd.x > 0.0), 12, fract(jit + G.time.w * 0.381966));
   return col;
 }
