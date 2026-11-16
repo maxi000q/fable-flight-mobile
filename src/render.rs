@@ -16,6 +16,13 @@ const CLOUD_DIST: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 pub(crate) const AMB: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Side of the sun's shadow map unless the graphics settings say otherwise
 /// (`Renderer::set_shadow_res`; the shaders read the size off the texture).
+/// Phones start at the Low preset's size: they would otherwise allocate this
+/// at 4096² (268 MB over four layers) only for the preset to remake it at
+/// 1024 a moment later, and that peak is exactly what a shared-memory GPU
+/// cannot afford during start-up.
+#[cfg(target_os = "android")]
+const SHADOW_RES: u32 = 1024;
+#[cfg(not(target_os = "android"))]
 const SHADOW_RES: u32 = 4096;
 pub const CASCADES: usize = 3;
 pub(crate) const MSAA: u32 = 4;
@@ -1330,6 +1337,18 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor { label: None, required_limits: wgpu::Limits { max_texture_dimension_2d: tex_limit, max_sampled_textures_per_shader_stage: adapter.limits().max_sampled_textures_per_shader_stage.clamp(16, 32), ..Default::default() }, memory_hints: MEMORY_HINTS, ..Default::default() })
             .await?;
+        // A device that dies (a phone's GPU running out of its shared memory,
+        // a driver reset) otherwise shows up as a confusing validation error
+        // on whatever innocent resource is touched next; log the real cause
+        // the moment it happens, so a field log says what actually died.
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            log::error!("wgpu: {e}");
+            eprintln!("wgpu: {e}");
+        }));
+        device.set_device_lost_callback(|reason, msg| {
+            log::error!("GPU device lost ({reason:?}): {msg}");
+            eprintln!("GPU device lost ({reason:?}): {msg}");
+        });
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).ok_or_else(|| anyhow::anyhow!("surface unsupported"))?;
         let caps = surface.get_capabilities(&adapter);

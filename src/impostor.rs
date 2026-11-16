@@ -11,16 +11,52 @@
 use crate::render::{tex_entry, ub_entry, TreeVertex, AMB, DEPTH, HDR, MSAA};
 use crate::trees::{CARDS, LODS, TREE_SPECIES, VARIANTS};
 
-/// Pictures per side of the grid. Must match IMP_N in trees.wgsl.
-pub const N: u32 = 8;
-/// Pixels per side of one picture. Must match IMP_CELL in trees.wgsl.
-pub const CELL: u32 = 128;
-const SIZE: u32 = N * CELL;
+/// The atlas's grid and cell size, as made and as the shader must read them
+/// (trees.wgsl reads them out of the `IB` block instead of constants, so one
+/// build can run both layouts).
+///
+/// A phone shares its RAM between the app, the GPU and the system, and the
+/// full layout is two 1024², 40-layer, 7-mip RGBA8 arrays: about 447 MB
+/// before the first frame. That is more than an Adreno 619-class GPU is
+/// ever handed, the allocation quietly fails, wgpu invalidates the device,
+/// and the next buffer created (`impostor quad`, the only
+/// mapped-at-creation one) dies with the "buffer is invalid" panic seen on
+/// 4 GB phones. The phone layout keeps every picture at full resolution and
+/// takes a quarter of the directions: 112 MB both sides, and a tree 120 m
+/// away still has 16 angles to turn through.
+#[derive(Clone, Copy)]
+pub struct Layout {
+    /// Pictures per side of the grid. Must match IMP_N in trees.wgsl.
+    pub n: u32,
+    /// Pixels per side of one picture. Must match IMP_CELL in trees.wgsl.
+    pub cell: u32,
+}
+
+impl Layout {
+    /// The desktop layout the game was built around.
+    pub const DESKTOP: Layout = Layout { n: 8, cell: 128 };
+    /// The layout phones start with (see the struct's comment).
+    pub const MOBILE: Layout = Layout { n: 4, cell: 128 };
+
+    fn size(self) -> u32 {
+        self.n * self.cell
+    }
+    fn frames(self) -> u32 {
+        self.n * self.n
+    }
+    /// Down to two pixels a picture; a box filter of whole texels never mixes
+    /// neighbouring pictures, since every level's picture size is a whole
+    /// number (a cell is a power of two in both layouts).
+    fn mips(self) -> u32 {
+        self.cell.ilog2()
+    }
+}
+
+const LAYOUT: Layout = if cfg!(target_os = "android") { Layout::MOBILE } else { Layout::DESKTOP };
+/// The sizes the shader needs: N, CELL, N*N, unused. Tacked onto the end of
+/// the bounds block (it grows by one vec4, to whole-vec4 alignment).
+const PARAMS: usize = LAYERS as usize + 1;
 pub const LAYERS: u32 = (TREE_SPECIES * VARIANTS) as u32;
-/// Down to two pixels a picture; a box filter of whole texels never mixes
-/// neighbouring pictures, since every level's picture size is a whole number.
-const MIPS: u32 = 7;
-const FRAMES: u32 = N * N;
 const FMT_A: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const FMT_N: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -39,6 +75,8 @@ pub struct Impostors {
     /// base vertex, the model)
     pub quad: wgpu::Buffer,
     pub ready: bool,
+    /// the sizes the shader must agree with (`bounds` carries them)
+    pub layout: Layout,
 }
 
 const MIP_WGSL: &str = r#"
@@ -65,11 +103,12 @@ struct O { @location(0) a: vec4f, @location(1) n: vec4f };
 
 impl Impostors {
     pub fn new(d: &wgpu::Device, l0: &wgpu::BindGroupLayout, l_tileu: &wgpu::BindGroupLayout, m_tree: &wgpu::ShaderModule) -> Self {
+        let (size, mips) = (LAYOUT.size(), LAYOUT.mips());
         let tex = |label: &str, format| {
             d.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: LAYERS },
-                mip_level_count: MIPS,
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: LAYERS },
+                mip_level_count: mips,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
@@ -78,7 +117,7 @@ impl Impostors {
             })
         };
         let (tex_a, tex_n) = (tex("impostor albedo", FMT_A), tex("impostor normal", FMT_N));
-        let bsize = LAYERS as u64 * 16;
+        let bsize = PARAMS as u64 * 16;
         let bounds = d.create_buffer(&wgpu::BufferDescriptor { label: Some("impostor bounds"), size: bsize, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let arr = wgpu::TextureViewDimension::D2Array;
         let l_bake = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("impostor bake"), entries: &[ub_entry(1, false, bsize)] });
@@ -125,8 +164,12 @@ impl Impostors {
         let d2 = wgpu::TextureViewDimension::D2;
         let l_mip = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("impostor mips"), entries: &[tex_entry(0, d2, false), tex_entry(1, d2, false)] });
         let p_mip = pipe("impostor mips", &[Some(&l_mip)], &m_mip, "vs", "fs", &[], &bake_targets, false, 1);
-        let quad = wgpu::util::DeviceExt::create_buffer_init(d, &wgpu::util::BufferInitDescriptor { label: Some("impostor quad"), contents: bytemuck::cast_slice(&[0u32, 1, 2, 2, 1, 3]), usage: wgpu::BufferUsages::INDEX });
-        Self { tex_a, tex_n, bounds, bg_bake, bg, p_bake, p_bake_card, p_mip, l_mip, p_draw, quad, ready: false }
+        // Written through the queue rather than mapped at creation: some
+        // Android drivers (Adreno) hand `create_buffer_init` an unmappable
+        // allocation for a buffer this small, and a failed mapping is what
+        // turned a device under memory pressure into a start-up panic.
+        let quad = d.create_buffer(&wgpu::BufferDescriptor { label: Some("impostor quad"), size: 24, usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        Self { tex_a, tex_n, bounds, bg_bake, bg, p_bake, p_bake_card, p_mip, l_mip, p_draw, quad, ready: false, layout: LAYOUT }
     }
 
     /// Bounding sphere (centre, radius) of each tree model at full detail:
@@ -155,11 +198,18 @@ impl Impostors {
     /// Take every picture of every tree model, then build the mip chains.
     #[allow(clippy::too_many_arguments)]
     pub fn bake(&mut self, d: &wgpu::Device, q: &wgpu::Queue, bg0: &wgpu::BindGroup, bg_tileu: &wgpu::BindGroup, vbuf: &wgpu::Buffer, ibuf: &wgpu::Buffer, ranges: &[(u32, u32, i32)], bounds: &[[f32; 4]]) {
-        q.write_buffer(&self.bounds, 0, bytemuck::cast_slice(bounds));
+        // The bounds block carries the shader's copy of the layout too (N,
+        // CELL, N*N), and the quad's six indices go on with it.
+        let mut ub: Vec<[f32; 4]> = bounds.to_vec();
+        ub.push([self.layout.n as f32, self.layout.cell as f32, self.layout.frames() as f32, 0.0]);
+        q.write_buffer(&self.bounds, 0, bytemuck::cast_slice(&ub));
+        q.write_buffer(&self.quad, 0, bytemuck::cast_slice(&[0u32, 1, 2, 2, 1, 3]));
+        let size = self.layout.size();
+        let (n, cell, frames, mips) = (self.layout.n, self.layout.cell, self.layout.frames(), self.layout.mips());
         let ms = |f| {
             d.create_texture(&wgpu::TextureDescriptor {
                 label: Some("impostor bake target"),
-                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: MSAA,
                 dimension: wgpu::TextureDimension::D2,
@@ -195,10 +245,10 @@ impl Impostors {
             rp.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
             let solid = ranges[layer as usize * LODS];
             let cards = ranges[layer as usize * LODS + CARDS as usize];
-            for f in 0..FRAMES {
-                rp.set_viewport(((f % N) * CELL) as f32, ((f / N) * CELL) as f32, CELL as f32, CELL as f32, 0.0, 1.0);
+            for f in 0..frames {
+                rp.set_viewport(((f % n) * cell) as f32, ((f / n) * cell) as f32, cell as f32, cell as f32, 0.0, 1.0);
                 // The instance index tells the shader which model and which picture.
-                let inst = layer * FRAMES + f;
+                let inst = layer * frames + f;
                 rp.set_pipeline(&self.p_bake);
                 rp.draw_indexed(solid.0..solid.0 + solid.1, solid.2, inst..inst + 1);
                 if cards.1 > 0 {
@@ -208,7 +258,7 @@ impl Impostors {
             }
         }
         for layer in 0..LAYERS {
-            for mip in 1..MIPS {
+            for mip in 1..mips {
                 let (sa, sn) = (one(&self.tex_a, layer, mip - 1), one(&self.tex_n, layer, mip - 1));
                 let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,

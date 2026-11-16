@@ -53,7 +53,7 @@ jobs:
           OUT="$GITHUB_WORKSPACE" bash build-apk.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: FableFlightMobile-1.0.6-apks
+          name: FableFlightMobile-1.0.7-apks
           path: |
             FableFlightMobile-debug.apk
             FableFlightMobile-release.apk
@@ -61,8 +61,8 @@ jobs:
       - name: Publish release with the APKs
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.6
-          name: "Fable Flight Mobile v1.0.6 - event-loop fix + stable debug signing key"
+          tag_name: v1.0.7
+          name: "Fable Flight Mobile v1.0.7 - Adreno 4 GB launch fix"
           files: |
             FableFlightMobile-debug.apk
             FableFlightMobile-release.apk

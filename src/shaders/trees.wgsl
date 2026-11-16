@@ -473,14 +473,20 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
 // directions over the upper hemisphere (impostor.rs). The three pictures
 // nearest the view are blended and lit like the real tree from the albedo,
 // normal, depth and openness to the sky stored for every pixel.
-const IMP_N = 8u;          // must match N in impostor.rs
-const IMP_CELL = 128.0;    // must match CELL in impostor.rs
-const IMP_FRAMES = 64u;    // IMP_N * IMP_N
 const IMP_PAD = 0.94;      // part of a picture's width the bounding sphere fills
-struct ImpBounds { b: array<vec4f, 40> };   // per model: centre, radius
+// Bounds per model (centre, radius), then the atlas's layout on the end:
+// [N, CELL, N*N, unused]. The sizes are not constants because a phone's
+// atlas is smaller than a desktop's (see impostor.rs `Layout`).
+struct ImpBounds {
+  b: array<vec4f, 40>,
+  p: vec4f,
+};
 @group(2) @binding(1) var<uniform> IB: ImpBounds;
 @group(2) @binding(2) var t_imp_a: texture_2d_array<f32>;   // albedo, coverage
 @group(2) @binding(3) var t_imp_n: texture_2d_array<f32>;   // normal (picture x, y), depth, openness
+fn imp_n() -> u32 { return u32(IB.p.x); }
+fn imp_cell() -> f32 { return IB.p.y; }
+fn imp_frames() -> u32 { return u32(IB.p.z); }
 
 // Direction to the camera (y up, y >= 0) <-> position on the hemi-octahedral grid (-1..1).
 fn hemi_enc(d: vec3f) -> vec2f {
@@ -496,7 +502,7 @@ fn frame_from(F: vec3f) -> Frame {
   return Frame(F, cross(u, F), u);
 }
 fn frame_of(c: vec2u) -> Frame {
-  let o = vec2f(c) / f32(IMP_N - 1u) * 2.0 - 1.0;
+  let o = vec2f(c) / f32(imp_n() - 1u) * 2.0 - 1.0;
   let p = vec2f(o.x + o.y, o.x - o.y) * 0.5;
   return frame_from(normalize(vec3f(p.x, 1.0 - abs(p.x) - abs(p.y), p.y)));
 }
@@ -516,9 +522,9 @@ struct BOut {
 struct BakeOut { @location(0) a: vec4f, @location(1) n: vec4f, @builtin(sample_mask) mask: u32 };
 
 fn bake_vertex(p: vec3f, nrm: vec3f, col: vec4f, uv: vec4f, aux: vec4f, ii: u32, grow: f32) -> BOut {
-  let layer = ii / IMP_FRAMES;
-  let f = ii % IMP_FRAMES;
-  let fr = frame_of(vec2u(f % IMP_N, f / IMP_N));
+  let layer = ii / imp_frames();
+  let f = ii % imp_frames();
+  let fr = frame_of(vec2u(f % imp_n(), f / imp_n()));
   let b = IB.b[layer];
   let q = p - b.xyz;
   let s = b.w / IMP_PAD;
@@ -674,8 +680,8 @@ struct IOut {
   var lv = -vec3f(dot(V, ex), dot(V, ey), dot(V, ez));
   lv.y = max(lv.y, 0.0);
   lv = normalize(lv + vec3f(0.0, 1e-4, 0.0));
-  let g = (hemi_enc(lv) * 0.5 + 0.5) * f32(IMP_N - 1u);
-  let c0 = min(vec2u(max(floor(g), vec2f(0.0))), vec2u(IMP_N - 2u));
+  let g = (hemi_enc(lv) * 0.5 + 0.5) * f32(imp_n() - 1u);
+  let c0 = min(vec2u(max(floor(g), vec2f(0.0))), vec2u(imp_n() - 2u));
   let fr = clamp(g - vec2f(c0), vec2f(0.0), vec2f(1.0));
   var cs = array<vec2u, 3>(c0, c0 + vec2u(1u, 0u), c0 + vec2u(0u, 1u));
   var w = vec3f(1.0 - fr.x - fr.y, fr.x, fr.y);
@@ -711,7 +717,7 @@ struct IOut {
   o.uva = vec4f(uv[0], uv[1]);
   o.uvb = uv[2];
   o.w = w;
-  o.cells = vec4u(cs[0].y * IMP_N + cs[0].x, cs[1].y * IMP_N + cs[1].x, cs[2].y * IMP_N + cs[2].x, layer);
+  o.cells = vec4u(cs[0].y * imp_n() + cs[0].x, cs[1].y * imp_n() + cs[1].x, cs[2].y * imp_n() + cs[2].x, layer);
   o.ex = vec4f(ex, b.w * s);
   o.ey = ey;
   o.ez = ez;
@@ -727,10 +733,11 @@ struct IOut {
   let tf = tree_far();
   if (ign(in.clip.xy) >= 1.0 - smoothstep(tf * 0.8, tf, length(in.C))) { discard; }
   // Mip level from how big a picture is on screen, a little on the sharp
-  // side (the temporal filter takes out the shimmer).
-  let lod = clamp(log2(max(length(dpdx(in.uva.xy)), length(dpdy(in.uva.xy))) * 0.5 * IMP_CELL) - 0.5, 0.0, 6.0);
+  // side (the temporal filter takes out the shimmer). The top is the last
+  // mip that is still a whole picture: log2(CELL) - 1 of them.
+  let lod = clamp(log2(max(length(dpdx(in.uva.xy)), length(dpdy(in.uva.xy))) * 0.5 * imp_cell()) - 0.5, 0.0, log2(imp_cell()) - 1.0);
   // Keep the filter inside the picture: half a texel of the coarser level.
-  let half = 0.5 * exp2(ceil(lod)) / IMP_CELL;
+  let half = 0.5 * exp2(ceil(lod)) / imp_cell();
   // Mostly the nearest picture alone: blends of three are softer, since
   // leaves do not line up exactly between views. They cross-fade only near
   // the hand-over from one picture to the next.
@@ -747,13 +754,13 @@ struct IOut {
     let wi = ww[i];
     if (wi < 0.002) { continue; }
     let cid = in.cells[i];
-    let c = vec2u(cid % IMP_N, cid / IMP_N);
+    let c = vec2u(cid % imp_n(), cid / imp_n());
     // The picture was taken from a slightly different direction: find where
     // this pixel's ray meets the surface in it, from the depth stored there.
     var u = uvs[i];
     for (var it = 0; it < 2; it++) {
       let l = vec2f(0.5 + 0.5 * u.x, 0.5 - 0.5 * u.y);
-      let a0 = (vec2f(c) + clamp(l, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
+      let a0 = (vec2f(c) + clamp(l, vec2f(half), vec2f(1.0 - half))) / f32(imp_n());
       let A0 = textureSampleLevel(t_imp_a, s_clamp, a0, layer, lod + 1.0);
       if (A0.a < 0.05) { break; }
       let D0 = textureSampleLevel(t_imp_n, s_clamp, a0, layer, lod + 1.0).z / A0.a;
@@ -761,7 +768,7 @@ struct IOut {
     }
     let loc0 = vec2f(0.5 + 0.5 * u.x, 0.5 - 0.5 * u.y);
     if (any(loc0 < vec2f(0.0)) || any(loc0 > vec2f(1.0))) { continue; }
-    let auv = (vec2f(c) + clamp(loc0, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
+    let auv = (vec2f(c) + clamp(loc0, vec2f(half), vec2f(1.0 - half))) / f32(imp_n());
     let A = textureSampleLevel(t_imp_a, s_clamp, auv, layer, lod);
     if (A.a < 0.002) { continue; }
     let Nn = textureSampleLevel(t_imp_n, s_clamp, auv, layer, lod);
