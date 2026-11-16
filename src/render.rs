@@ -1348,7 +1348,7 @@ impl Renderer {
             .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, force_fallback_adapter: false, compatible_surface: Some(&surface), ..Default::default() })
             .await?;
         let info = adapter.get_info();
-        log::info!("GPU: {} ({:?})", info.name, info.device_type);
+        log::info!("GPU: {} ({:?}, {:?} backend)", info.name, info.device_type, info.backend);
         let integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
         // Requiring an 8192 texture limit locks out GPUs that top out at
         // 4096 (plenty of phones of the 4 GB-RAM era: Mali-G52 and the
@@ -1378,6 +1378,7 @@ impl Renderer {
         config.format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
         config.present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         surface.configure(&device, &config);
+        log::info!("renderer: surface configured ({}x{}, {:?})", config.width, config.height, config.format);
 
         let d = &device;
         let common = include_str!("shaders/common.wgsl");
@@ -1415,6 +1416,12 @@ impl Renderer {
         let m_ao = module("ao", include_str!("shaders/ao.wgsl"));
         let m_taa = module("taa", include_str!("shaders/taa.wgsl"));
         let m_dres = module_s("resolve", include_str!("shaders/resolve.wgsl"));
+        log::info!("renderer: {} shader modules assembled", [
+            (&m_lut, "lut"), (&m_terrain, "terrain"), (&m_photo, "photo"), (&m_build, "buildings"), (&m_obj, "plane"),
+            (&m_comp, "composite"), (&m_cloud, "clouds"), (&m_post, "post"), (&m_psim, "psim"), (&m_pdraw, "pdraw"),
+            (&m_road, "roads"), (&m_field, "airfield"), (&m_lights, "lights"), (&m_tree, "trees"), (&m_inst, "inst"),
+            (&m_vol, "vol"), (&m_ao, "ao"), (&m_taa, "taa"), (&m_dres, "resolve"),
+        ].len());
 
         // ---- shared resources
         let sampler = |addr, aniso: u16, cmp| {
@@ -1494,25 +1501,52 @@ impl Renderer {
         let vol_dens = vol3("smoke density", VOL_N);
         let vol_light = vol3("smoke light", VOL_N);
         let dummy_vol = vol3("dummy volume", [1, 1, 1]);
-        let noise_tex = make_tex(d, "noise3d", 128, 128, 128, 1, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING);
+        let noise_tex = make_tex(d, "noise3d", 128, 128, 128, 1, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         let noise = view(&noise_tex);
         {
+            // The cloud-noise volume is filled as a 2D array (layer = z) and
+            // copied into the 3D texture: textureStore to a
+            // texture_storage_3d — the only 3D storage write in the engine —
+            // is what faulted the Adreno at start-up on every 1.0.7-1.0.9
+            // build ('GPU device lost: driver implementation is at fault'
+            // before the first buffer write, whatever the memory cuts). The
+            // copy itself is ordinary per-slice blit work every driver does.
+            let slices = d.create_texture(&wgpu::TextureDescriptor {
+                label: Some("noise3d slices"),
+                size: wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 128 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
             let m = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("noise3d"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/noise3d.wgsl").into()) });
             let p = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("noise3d"), layout: None, module: &m, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
-            let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &p.get_bind_group_layout(0), entries: &[tex_res(0, &noise)] });
+            let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &p.get_bind_group_layout(0), entries: &[tex_res(0, &slices.create_view(&Default::default()))] });
             let mut enc = d.create_command_encoder(&Default::default());
             {
                 let mut cp = enc.begin_compute_pass(&Default::default());
                 cp.set_pipeline(&p);
                 cp.set_bind_group(0, &bg, &[]);
-                cp.dispatch_workgroups(32, 32, 32);
+                cp.dispatch_workgroups(32, 32, 128);
             }
+            // One call, 128 slice copies: the array's layers become the
+            // volume's z. (wgpu keeps the slices alive until the copy has
+            // run; dropping them here is safe.)
+            enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo { texture: &slices, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: &noise_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 128 },
+            );
+            log::info!("renderer: filling the cloud-noise volume");
             queue.submit([enc.finish()]);
         }
         let ocean = crate::ocean::OceanGpu::new(d, &queue);
         let shore = crate::shore::ShoreGpu::new(d, &queue, PHOTO_MASK_FMT);
         let wave = upload_mips(d, &queue, "wave", 256, wgpu::TextureFormat::Rgba8Unorm, 4, &crate::sources::mip_chain(wave_texture(), 256, 4));
         let ground_mats = GroundMats::new(d, &queue);
+        log::info!("renderer: noise, ocean, shore, wave and ground materials up");
         let (det_alb, det_nrm) = ground_mats.views();
         let s_detail = sampler(wgpu::AddressMode::Repeat, 8, false);
 
@@ -1990,6 +2024,7 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        log::info!("renderer: pipelines built");
 
         // ---- per-draw uniform pools
         let pool = |label: &str, n: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: n * UB_ALIGN, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -2033,6 +2068,7 @@ impl Renderer {
         let tess_nidx = tess_ix.len() as u32;
         let tess_ibuf = idx_buf("tess idx", &tess_ix);
         let cell_ibuf = idx_buf("cell idx", &patch(1));
+        log::info!("renderer: start-up buffers written");
 
         // ---- particles
         let psim_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("psim"), size: psim_size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -2049,6 +2085,7 @@ impl Renderer {
         let fluid = crate::fluid::FluidGpu::new(d, &l0, common, &vol_acc);
 
         let egui = egui_wgpu::Renderer::new(d, wgpu::TextureFormat::Rgba8Unorm, egui_wgpu::RendererOptions::default());
+        log::info!("renderer: egui up");
         let targets = Self::make_targets(d, &config, (config.width, config.height), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
         let fluid_t = fluid.draw_targets(d, &targets.depth, config.width, config.height);
         // The transmittance and multi-scatter tables depend only on the planet

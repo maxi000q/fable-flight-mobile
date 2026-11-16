@@ -809,6 +809,7 @@ impl Game {
         }
         log::info!("Game::new: creating the renderer (GPU device, pipelines)");
         let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync))?;
+        log::info!("Game::new: renderer ready");
         if let Some(sc) = args.render_scale {
             gfx.scale = sc;
         } else if touchui::active() && !graphics::Graphics::saved() {
