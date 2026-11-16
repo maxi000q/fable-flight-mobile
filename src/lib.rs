@@ -768,6 +768,7 @@ struct Game {
 
 impl Game {
     fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
+        log::info!("Game::new: loading settings");
         let prefs = settings::Settings::load();
         // Saved graphics settings; the command line overrides them for this run.
         let mut gfx = graphics::Graphics::load();
@@ -783,6 +784,7 @@ impl Game {
         }
         gfx.vsync &= args.vsync;
         gfx.taa &= args.taa && prefs.taa;
+        log::info!("Game::new: creating the renderer (GPU device, pipelines)");
         let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync))?;
         if let Some(sc) = args.render_scale {
             gfx.scale = sc;
@@ -841,13 +843,16 @@ impl Game {
         // imagery) in memory at once, and on a 4 GB device that competes
         // with the GPU's share of the same RAM.
         let loader_threads = if cfg!(target_os = "android") { 4 } else { 14 };
+        log::info!("Game::new: spawning the world and {loader_threads} loader threads");
         let mut world = world::World::new(sources::Loader::new(src.clone(), loader_threads), args.max_zoom);
         let mut r = r;
         r.set_paint(spec.paint.as_ref());
+        log::info!("Game::new: building the aircraft model");
         let Loaded { spec: _, model, piece_mesh, group_mesh, piece_cut, group_pivots, plane_box, lamps } = Loaded::build(spec, &mut r);
         let tm = trees::build_meshes();
         r.set_tree_meshes(&tm.meshes);
         world.tree_dims = tm.dims;
+        log::info!("Game::new: trees and scenery meshes");
         let mut solids = cars::build_models();
         solids.push(cars::cube());
         solids.extend((0..3).map(|k| cars::rock(k * 17 + 3)));
@@ -5235,9 +5240,16 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes().with_title("Fable Flight").with_inner_size(winit::dpi::PhysicalSize::new(self.args.size.0, self.args.size.1));
         let window = Arc::new(el.create_window(attrs).expect("window"));
+        log::info!("window created; starting Game::new");
         match Game::new(window, &self.args) {
-            Ok(g) => self.game = Some(g),
+            Ok(g) => {
+                log::info!("Game::new finished; entering the main loop");
+                self.game = Some(g);
+            }
             Err(e) => {
+                // The whole chain of causes, not just the last: this is what
+                // a black screen used to hide entirely.
+                log::error!("failed to start: {e:#}");
                 eprintln!("failed to start: {e:#}");
                 el.exit();
             }
@@ -5609,6 +5621,16 @@ pub fn main() -> anyhow::Result<()> {
 /// controls are on (they are what a phone has) and the rest is the same
 /// `main`. The window is fullscreen by default on Android (winit asks the
 /// system for it), so nothing is sized by hand.
+///
+/// The glue spawns `android_main` with a plain `std::thread::spawn`, so it
+/// runs on the default 2 MB stack — while the game's init (`Game::new`:
+/// meshes built, textures decoded, the aircraft's tree walked) is written
+/// against a desktop's 8 MB main-thread stack, and dies with a stack
+/// overflow, which looks exactly like "crashes on launch". So the whole
+/// game — event loop and all — is moved onto a thread with a 64 MB stack,
+/// and the `AndroidApp` handle is passed to it through a channel, the one
+/// way to hand it across threads (it is not `Send`, by design, but the
+/// event loop must be created on the thread that runs it).
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
@@ -5628,14 +5650,51 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         log::error!("{msg}");
         eprintln!("{msg}");
     }));
-    touchui::set_active(true);
-    let args = parse_args();
-    let el = EventLoop::builder()
-        .with_android_app(app)
-        .build()
-        .expect("event loop");
-    el.set_control_flow(ControlFlow::Poll);
-    let _ = el.run_app(&mut App { args, game: None });
+    log::info!("android_main: entry, launching the game thread");
+    // The thread the glue gave us is parked here (its stack is the small
+    // one); the game runs on the big-stack thread and this one just waits,
+    // keeping the NativeActivity callbacks alive until the game exits.
+    let (tx, rx) = std::sync::mpsc::channel::<AndroidAppBox>();
+    let t = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let app = rx.recv().expect("AndroidApp handoff");
+            touchui::set_active(true);
+            let args = parse_args();
+            let el = match EventLoop::builder().with_android_app(app.get()).build() {
+                Ok(el) => el,
+                Err(e) => {
+                    log::error!("event loop: {e}");
+                    std::process::exit(1);
+                }
+            };
+            el.set_control_flow(ControlFlow::Poll);
+            let _ = el.run_app(&mut App { args, game: None });
+        });
+    if let Err(e) = t {
+        log::error!("spawning the game thread: {e}");
+        std::process::exit(1);
+    }
+    tx.send(AndroidAppBox(app)).expect("game thread alive");
+    // Block until the game thread finishes: when this function returns, the
+    // glue tears everything down, and it must not do that mid-game.
+    let _ = t.unwrap().join();
+    log::info!("android_main: game thread finished");
+}
+
+/// The one lawful way to move an `AndroidApp` between threads: it is not
+/// `Send` (its JNI pointers belong to the thread that made them), but only
+/// this once it is handed over before anything is derived from it, and the
+/// receiving thread is the one that lives as long as the app.
+#[cfg(target_os = "android")]
+struct AndroidAppBox(winit::platform::android::activity::AndroidApp);
+#[cfg(target_os = "android")]
+unsafe impl Send for AndroidAppBox {}
+#[cfg(target_os = "android")]
+impl AndroidAppBox {
+    fn get(self) -> winit::platform::android::activity::AndroidApp {
+        self.0
+    }
 }
 
 /// Logcat plus a plain file: a logger that copies each record to both.

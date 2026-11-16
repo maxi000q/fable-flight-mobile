@@ -30,11 +30,11 @@ build_variant() {
     local pkg="com.maxi.fableflightmobile${suffix}"
     local vcode vname ks kspass label
     if [ "$variant" = debug ]; then
-        vcode=102; vname="1.0.2-debug"
+        vcode=103; vname="1.0.3-debug"
         ks=debug.keystore; kspass=android
         label="Fable Flight Dbg"
     else
-        vcode=2; vname="1.0.2"
+        vcode=3; vname="1.0.3"
         ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Mobile"
     fi
