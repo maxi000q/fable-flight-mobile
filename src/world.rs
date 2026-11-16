@@ -1245,18 +1245,91 @@ impl World {
         out
     }
 
+    /// The corner (x, y at sources::DATA_ZOOM) of the square of building tiles
+    /// around the camera that `cover` describes.
+    pub fn cover_base(cam: DVec3) -> (i64, i64) {
+        let (lat, lon, _) = geo::pos_to_lla(cam);
+        let t = TileId::at(lat, lon, DATA_ZOOM);
+        let h = (crate::render::COVER_N / 2) as i64;
+        (t.x as i64 - h, t.y as i64 - h)
+    }
+
+    /// A terrain tile's place in the cover square (terrain.wgsl `city_glow`):
+    /// its corner in building tiles from the square's corner, and the square's
+    /// corner itself (x | y << 14, as the bits of a float) so the shader can
+    /// tell where on Earth it is exactly.
+    fn cover_info(id: TileId, base: (i64, i64)) -> [f32; 3] {
+        let s = 2f64.powi(DATA_ZOOM as i32 - id.z as i32);
+        let packed = (base.0.clamp(0, 16383) as u32) | ((base.1.clamp(0, 16383) as u32) << 14);
+        [(id.x as f64 * s - base.0 as f64) as f32, (id.y as f64 * s - base.1 as f64) as f32, f32::from_bits(packed)]
+    }
+
+    /// Building tiles over which the night glow on the terrain hands over to
+    /// the lit windows, counted in from the edge of the loaded ones.
+    const COVER_RAMP: f32 = 3.0;
+
+    /// How far each building tile in the square around the camera has faded
+    /// in (render::Frame::cover): the terrain leaves its city lights to them.
+    pub fn light_cover(&self, cam: DVec3) -> Vec<u8> {
+        let n = crate::render::COVER_N;
+        let mut out = vec![0u8; n * n];
+        if !self.buildings_on {
+            return out;
+        }
+        let mut shown = vec![0f32; n * n];
+        let base = Self::cover_base(cam);
+        for id in &self.draw_b {
+            if let Some(BSlot::Ready(b)) = self.builds.get(id) {
+                let (x, y) = (id.x as i64 - base.0, id.y as i64 - base.1);
+                if (0..n as i64).contains(&x) && (0..n as i64).contains(&y) {
+                    shown[y as usize * n + x as usize] = b.shown.clamp(0.0, 1.0);
+                }
+            }
+        }
+        // Soft erosion: the glow only gives way some tiles inside the edge of
+        // what is loaded, ramping over COVER_RAMP tiles, so there is no line
+        // where it stops (the terrain samples this bilinearly as well). Outside
+        // the square counts as not covered.
+        let r = Self::COVER_RAMP.ceil() as i64 + 1;
+        let ramp = |d2: i64| {
+            let t = (((d2 as f32).sqrt() - 1.0) / (Self::COVER_RAMP - 1.0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        for y in 0..n as i64 {
+            for x in 0..n as i64 {
+                let mut v = shown[y as usize * n + x as usize];
+                if v <= 0.0 {
+                    continue;
+                }
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let (u, w) = (x + dx, y + dy);
+                        let c = if (0..n as i64).contains(&u) && (0..n as i64).contains(&w) { shown[w as usize * n + u as usize] } else { 0.0 };
+                        if c < v {
+                            v = v.min(c + ramp(dx * dx + dy * dy));
+                        }
+                    }
+                }
+                out[y as usize * n + x as usize] = (v * 255.0) as u8;
+            }
+        }
+        out
+    }
+
     /// Terrain tiles and detail tiles to draw. `focus` and `casc` (radius of
     /// each shadow cascade) decide what has to be rendered into the shadow maps.
     pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: [f32; 3]) -> (Vec<(&TileGpu, [f32; 12])>, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
         let mut tiles = Vec::with_capacity(self.draw.len());
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let agl = calt - self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
+        let base = Self::cover_base(cam);
         for id in &self.draw {
             if let Some(Slot::Ready(t)) = self.tiles.get(id) {
                 let o = (t.center - cam).as_vec3();
                 let cell = id.width_m() / GRID as f64;
                 let tess = tess_block(*id, clat, clon, agl, cell);
-                tiles.push((&t.gpu, [o.x, o.y, o.z, cell as f32, id.z as f32, 0.0, 0.0, 0.0, tess[0], tess[1], tess[2], tess[3]]));
+                let cv = Self::cover_info(*id, base);
+                tiles.push((&t.gpu, [o.x, o.y, o.z, cell as f32, id.z as f32, cv[0], cv[1], cv[2], tess[0], tess[1], tess[2], tess[3]]));
             }
         }
         let mut details = Vec::with_capacity(self.draw_b.len());

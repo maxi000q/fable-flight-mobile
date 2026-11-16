@@ -1,5 +1,7 @@
 // offset: xyz tile centre relative to the camera, w = grid cell size (m).
-// info: x = zoom. tess: the block of cells drawn tessellated (x0, y0, w, h).
+// info: x = zoom, yz = the tile's corner in building tiles (zoom 14) from the
+// corner of the cover square, w = that corner (x | y << 14, as float bits; see
+// world.rs `cover_info`). tess: the block of cells drawn tessellated (x0, y0, w, h).
 struct Tile { offset: vec4f, info: vec4f, tess: vec4f };
 @group(1) @binding(0) var<uniform> T: Tile;
 @group(1) @binding(1) var t_img: texture_2d<f32>;
@@ -7,6 +9,11 @@ struct Tile { offset: vec4f, info: vec4f, tess: vec4f };
 @group(1) @binding(2) var t_mask: texture_2d<f32>;
 // The tile's own vertex buffer (10 floats per vertex), read by the tessellator.
 @group(1) @binding(3) var<storage, read> TV: array<f32>;
+// How much artificial light the ground gives off at night (sources.rs `NightLights`, from NASA Black Marble).
+@group(1) @binding(4) var t_lights: texture_2d<f32>;
+// How far the building tile at each place in the square around the camera
+// has faded in (render.rs COVER_N, world.rs `light_cover`).
+@group(1) @binding(5) var t_cover: texture_2d<f32>;
 
 struct VOut {
   @builtin(position) clip: vec4f,
@@ -642,6 +649,85 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
   return finish(v.P, v.N, v.uv, v.depth, 0.0, T.offset.w);
 }
 
+// ------------------------------------------------------------ city lights
+// Building tiles only load within a few km, and only they have lit windows.
+// Beyond them the ground itself glows with the city's light (sources.rs
+// `NightLights`): up close as scattered points (windows, lamps), each holding
+// the light of its whole cell, and once the cells shrink below a pixel or so,
+// as their average. Where a building tile is drawn it takes over, fading in
+// as the tile does, so the lights never stop at the edge of what is loaded.
+const GLOW_CELLS = 128.0;   // cells across a building tile (~15 m at 40 deg)
+const GLOW_K = 0.0016;      // radiance of the brightest downtown (x sun_dir.w)
+
+// The points of one level: cells 2^lv base cells across, each with at most
+// one light (chance p, carrying 1/p cells' worth) of random brightness and
+// colour. `J`: base cells per pixel along screen x and y. Each light is
+// drawn round on screen, about a pixel across.
+fn glow_dots(gq: vec2f, dens: f32, J: mat2x2f, lv: u32) -> vec3f {
+  let sc = f32(1u << lv);
+  let bits = bitcast<u32>(T.info.w);
+  let bi = vec2u(bits & 16383u, bits >> 14u) * u32(GLOW_CELLS);
+  let m = (1u << lv) - 1u;
+  // Exact cell index on Earth: the square's corner in whole cells of this level, and the rest.
+  let cq = gq * (GLOW_CELLS / sc) + vec2f(bi & vec2u(m)) / sc;
+  let id = vec2i(bi >> vec2u(lv)) + vec2i(floor(cq));
+  let h0 = hx_pcg(bitcast<u32>(id.x) ^ hx_pcg(bitcast<u32>(id.y) + 0x9e3779b9u + lv * 0x632be5abu));
+  let h1 = hx_pcg(h0);
+  let h2 = hx_pcg(h1);
+  let h3 = hx_pcg(h2);
+  let u = vec4f(f32(h0 >> 8u), f32(h1 >> 8u), f32(h2 >> 8u), f32(h3 >> 8u)) / 16777216.0;
+  let p = 1.0 - pow(1.0 - clamp(dens * 1.8, 0.0, 0.999), f32(1u << (2u * min(lv, 8u))));
+  if (u.x >= p) { return vec3f(0.0); }
+  // Offset from the light in pixels, and the cell's area in pixels.
+  let Jl = J * (1.0 / sc);
+  let det = Jl[0].x * Jl[1].y - Jl[0].y * Jl[1].x;
+  let d = fract(cq) - (0.3 + 0.4 * u.yz);
+  let px = vec2f(Jl[1].y * d.x - Jl[1].x * d.y, -Jl[0].y * d.x + Jl[0].x * d.y) / det;
+  let area = 1.0 / max(abs(det), 1e-6);
+  let rr = 0.85;
+  let w = 2.0 * fract(u.w * 7.31);
+  let col = select(select(vec3f(0.85, 0.9, 1.0), vec3f(1.0, 0.72, 0.42), u.w < 0.9), vec3f(1.0, 0.55, 0.22), u.w < 0.55);
+  // Up close (cells many pixels across) a light is a small blob of its own size, not a pixel.
+  let big = clamp(sqrt(area) * 0.12, rr, 6.0);
+  return col * (w * dens / p * area * exp(-dot(px, px) / (big * big)) / (PI * big * big));
+}
+
+fn cover_at(i: vec2i) -> f32 {
+  let n = i32(textureDimensions(t_cover).x);
+  if (any(i < vec2i(0)) || any(i >= vec2i(n))) { return 0.0; }
+  return textureLoad(t_cover, i, 0).r;
+}
+
+fn city_glow(gq: vec2f, dens: f32, dcx: vec2f, dcy: vec2f, upn: vec3f) -> vec3f {
+  let night = night_at(upn);
+  if (night <= 0.0 || dens < 0.004) { return vec3f(0.0); }
+  // Bilinear over the (already softly eroded, world.rs `light_cover`) cover,
+  // eased, so the hand-over has no tile-shaped steps.
+  let cp = gq - 0.5;
+  let c0 = vec2i(floor(cp));
+  let cf = cp - floor(cp);
+  let a = cover_at(c0);
+  let b = cover_at(c0 + vec2i(1, 0));
+  let c = cover_at(c0 + vec2i(0, 1));
+  let d = cover_at(c0 + vec2i(1, 1));
+  let cl = mix(mix(a, b, cf.x), mix(c, d, cf.x), cf.y);
+  let cover = cl * cl * (3.0 - 2.0 * cl);
+  if (cover >= 0.999) { return vec3f(0.0); }
+  // Lights stay points a pixel or two across: as they shrink, neighbouring
+  // ones merge into one carrying all their light (powers of two, cross-faded).
+  let J = mat2x2f(dcx, dcy);
+  // Cells per pixel (linear, from the area a cell covers on screen).
+  let fp0 = sqrt(abs(dcx.x * dcy.y - dcx.y * dcy.x));
+  let lv = clamp(log2(fp0 / 0.3), 0.0, 12.0);
+  let l0 = floor(lv);
+  let t = lv - l0;
+  var col = glow_dots(gq, dens, J, u32(l0)) * (1.0 - t);
+  if (t > 0.0) { col += glow_dots(gq, dens, J, u32(l0) + 1u) * t; }
+  // A quarter of it as the warm light spilt on streets and walls between the points.
+  col = col * 0.75 + vec3f(1.0, 0.62, 0.34) * dens * 0.25;
+  return col * (GLOW_K * G.sun_dir.w * night * (1.0 - cover));
+}
+
 // ------------------------------------------------------------ surface
 @fragment fn fs(in: VOut) -> GOut {
   // Derivatives first, while every pixel of the quad is still running.
@@ -652,6 +738,10 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
   let dalt = vec2f(dpdx(alt), dpdy(alt));
   let img = textureSample(t_img, s_aniso, in.uv).rgb;
   let m = textureSample(t_mask, s_clamp, in.uv);
+  let lights = textureSample(t_lights, s_clamp, in.uv).r;
+  let gq = T.info.yz + in.uv * exp2(14.0 - T.info.x);
+  let dcx = dpdx(gq) * GLOW_CELLS;
+  let dcy = dpdy(gq) * GLOW_CELLS;
   let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, in.uv, 3.0).r);
   if (m.r > 0.5) {
     let wclass = round(m.g * 255.0 / 80.0);
@@ -764,6 +854,6 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
     let soil = mix(vec3f(0.11, 0.085, 0.06), vec3f(0.19, 0.17, 0.15), smoothstep(0.4, 0.65, rk)) * (0.6 + 0.8 * rk2);
     albedo = mix(albedo, soil, clamp(abs(cr.w) * 1.6 + length(cr.xyz) * 1.5, 0.0, 1.0));
   }
-  let c = shade(in.P, N, albedo);
+  let c = shade(in.P, N, albedo) + city_glow(gq, lights, dcx, dcy, upn);
   return GOut(vec4f(c, 1.0), vec4f(N, 0.0), amb_share(c));
 }

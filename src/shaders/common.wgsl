@@ -71,6 +71,12 @@ struct Globals {
   // Graphics settings: building level-of-detail distance factor, tree
   // impostor distance factor, how far out trees are drawn (m). 0 = High.
   detail: vec4f,
+  // City light in the air (skyglow.rs): map centre relative to the camera + half
+  // its side (0 = none); its east axis + ground height under the camera; its
+  // north axis + how far the lights are on (0 by day).
+  glow_c: vec4f,
+  glow_e: vec4f,
+  glow_n: vec4f,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -101,6 +107,9 @@ struct Globals {
 // Distance to the shore (shore.rs): metres to the nearest land, seaward
 // direction (east, north), 1.
 @group(0) @binding(18) var t_shore: texture_2d<f32>;
+// Light rising off the towns around the camera (skyglow.rs): the night-lights map
+// averaged over 1.2 km cells, then blurred for the light reaching ~1.5, 4.5, 15 km up.
+@group(0) @binding(19) var t_glow: texture_2d<f32>;
 
 // GPU particles (explosions, smoke, dust, spray) and their simulation constants.
 struct Particle {
@@ -251,6 +260,84 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
   }
   // 1.35: artistic lift so the sky and haze read as bright as they do in photographs.
   return Scatter(L * G.sun_dir.w * 1.35, T);
+}
+
+// ------------------------------------------------------------ city glow
+// Colour of the towns' light: sodium orange with some whiter LED in it.
+const GLOW_COL = vec3f(1.0, 0.58, 0.30);
+// Radiance of a map value of 1 (the terrain's brightest downtown, terrain.wgsl GLOW_K).
+const CITY_K = 0.0016;
+// Artistic lift of the scattered light: the haze over real cities is murkier
+// (smog, humidity) than the clear-day aerosol the atmosphere is built on.
+const GLOW_GAIN = 16.0;
+// Extra aerosol scattering the towns' light (multiplies the haze layer's).
+const URBAN_HAZE = 4.0;
+fn glow_on() -> bool { return G.glow_n.w > 0.0 && G.glow_c.w > 0.0; }
+// City light arriving from below at P (camera-relative), hag metres above the
+// ground: the light of the ground around, over an area that grows with height
+// (a lit plane seen from height h: half its light comes from within h), dimmed
+// by the haze on the way up. Illuminance, render units.
+fn city_up(P: vec3f, hag: f32) -> vec3f {
+  let q = P - G.glow_c.xyz;
+  let uv = vec2f(dot(q, G.glow_e.xyz), -dot(q, G.glow_n.xyz)) / (2.0 * G.glow_c.w) + 0.5;
+  let m = min(uv, 1.0 - uv);
+  let edge = smoothstep(0.0, 0.1, min(m.x, m.y));
+  if (edge <= 0.0) { return vec3f(0.0); }
+  let s = textureSampleLevel(t_glow, s_clamp, uv, 0.0);
+  // The channels stand for 0.4, 1.5, 4.5 and 15 km up.
+  let lh = log2(clamp(hag, 400.0, 15000.0) / 400.0);
+  var v = mix(s.z, s.w, (lh - 3.492) / 1.737);
+  if (lh < 1.907) { v = mix(s.x, s.y, lh / 1.907); }
+  else if (lh < 3.492) { v = mix(s.y, s.z, (lh - 1.907) / 1.585); }
+  let hh = max(hag, 0.0);
+  let tau = (MIE_S + MIE_A) * G.weather.w * 1800.0 * (1.0 - exp(-hh / 1200.0)) + 1.2e-5 * hh;
+  return GLOW_COL * (PI * CITY_K * G.sun_dir.w * G.glow_n.w) * v * exp(-tau) * edge;
+}
+// The haze lit from below by the towns, along the view ray out to tmax (or
+// where it leaves the low air / the map). Light scattered toward the camera,
+// already dimmed on its way there. Seen from above a city, the haze scatters
+// the rising light forward into the eye; from afar it is a dome on the horizon.
+fn glow_march(rd: vec3f, tmax_in: f32, steps: i32, jit: f32) -> vec3f {
+  if (!glow_on()) { return vec3f(0.0); }
+  let oc = -G.planet.xyz;
+  let gnd = G.glow_e.w;
+  let top = ray_sphere(oc, rd, G.planet.w + gnd + 7000.0);
+  if (top.y <= 0.0) { return vec3f(0.0); }
+  let t0 = max(top.x, 0.0);
+  let t1 = min(min(tmax_in, top.y), G.glow_c.w * 1.2);
+  if (t1 <= t0) { return vec3f(0.0); }
+  var T = vec3f(1.0);
+  var L = vec3f(0.0);
+  let len = t1 - t0;
+  var tp = t0;
+  for (var i = 0; i < steps; i++) {
+    let f = f32(i + 1) / f32(steps);
+    let tn = t0 + len * f * f;
+    let dt = tn - tp;
+    let p = oc + rd * mix(tp, tn, jit);
+    let r = length(p);
+    let upn = p / r;
+    let h = r - G.planet.w;
+    let hag = h - gnd;
+    // The haze follows the ground (the boundary layer), not sea level; over
+    // towns it is stirred up higher by the heat of the city.
+    let dm = exp(-max(hag, 0.0) / 1600.0) * G.weather.w;
+    let sr = RAYLEIGH * exp(-max(h, 0.0) / 8000.0);
+    let sm = MIE_S * dm;
+    let ext = sr + vec3f((MIE_S + MIE_A) * dm);
+    let cu = dot(upn, -rd);
+    let E = city_up(p + G.planet.xyz, hag);
+    // Over towns the air holds far more aerosol than the open-country model:
+    // the glow is mostly that grey-orange haze, the blue air scatters a little.
+    // The light comes up from a wide patch of ground and scatters more than
+    // once, so the haze's phase is half evened out.
+    let S = E * (sr * phase_r(cu) * 0.35 + vec3f(sm * URBAN_HAZE * mix(phase_m(cu, 0.35), 0.25 / PI, 0.5)));
+    let st = exp(-ext * dt);
+    L += T * S * (vec3f(1.0) - st) / max(ext, vec3f(1e-12));
+    T *= st;
+    tp = tn;
+  }
+  return L * GLOW_GAIN;
 }
 
 // Sky along a ray from the camera to space or the ground.
@@ -976,7 +1063,11 @@ fn light_at_nv(P: vec3f) -> Light {
   let mum = dot(upn, G.moon.xyz);
   let night = 1.0 - smoothstep(-0.12, 0.02, mu);
   amb += vec3f(0.30, 0.45, 0.85) * 0.16 * smoothstep(-0.1, 0.35, mum) * G.moon.w * mix(1.0, 0.7, G.cloud.x);
-  amb += (vec3f(0.0016, 0.0024, 0.0048) + SKYGLOW * 0.0022 * G.misc.y * (0.6 + 0.6 * G.cloud.x)) * night;
+  amb += vec3f(0.0016, 0.0024, 0.0048) * night;
+  // The towns' light sent back down by the haze and the cloud base above.
+  if (glow_on()) {
+    amb += city_up(P, 600.0) * (0.012 + 0.05 * clamp(G.cloud.x, 0.0, 1.0)) * GLOW_GAIN / PI;
+  }
   return Light(sun, amb, upn, h);
 }
 // What a mirror at P sees along R: the sky (with clouds), or below the

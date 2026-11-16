@@ -55,6 +55,9 @@ const PHOTO_MASK: u32 = 4096;
 const PHOTO_MASK_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Slot of the coverage mask's projection among the cascade matrices.
 pub const MASK_SLOT: usize = CASCADES + 1;
+/// Side of the square of building tiles (sources::DATA_ZOOM) around the camera
+/// whose fade-in the terrain reads, to leave their lights to them (`Frame::cover`).
+pub const COVER_N: usize = 64;
 /// Slot of the shore mask's projection (shore.rs).
 pub const SHORE_SLOT: usize = CASCADES + 2;
 /// Slot of the shore's wide mask's projection (shore.rs).
@@ -151,6 +154,12 @@ pub struct Globals {
     /// graphics settings (graphics.rs): building LOD distance factor, tree
     /// impostor distance factor, how far out trees are drawn (m); 0 = High
     pub detail: [f32; 4],
+    /// city light in the air (skyglow.rs `SkyGlow::globals`): map centre
+    /// relative to the camera + half side (0 = none); its east axis + ground
+    /// height under the camera; its north axis + how far the lights are on
+    pub glow_c: [f32; 4],
+    pub glow_e: [f32; 4],
+    pub glow_n: [f32; 4],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
@@ -550,7 +559,7 @@ pub fn building_payload(b: &crate::buildings::BuildingData) -> [&[u8]; 5] {
 }
 /// Bytes of a terrain tile's upload, for the per-frame upload budget.
 pub fn tile_bytes(t: &crate::sources::TileData) -> usize {
-    std::mem::size_of_val(&t.verts[..]) + t.imagery.iter().chain(&t.mask).map(|m| m.len()).sum::<usize>()
+    std::mem::size_of_val(&t.verts[..]) + t.imagery.iter().chain(&t.mask).chain(&t.lights).map(|m| m.len()).sum::<usize>()
 }
 /// One model drawn for a run of the frame's near instances.
 pub struct NearDraw {
@@ -675,6 +684,12 @@ pub struct Frame<'a> {
     pub shot: Option<std::path::PathBuf>,
     /// the start screen's title, drawn at this UI scale (None: not shown)
     pub logo: Option<f32>,
+    /// COVER_N x COVER_N, row by row: how far the building tile there has faded
+    /// in (255 = fully drawn, 0 = none), from the corner tile in
+    /// `World::cover_base`. The terrain's city glow gives way to it.
+    pub cover: Vec<u8>,
+    /// a new city-light map to upload (skyglow.rs, N x N RGBA16F)
+    pub glow: Option<Vec<u16>>,
 }
 
 struct Targets {
@@ -805,6 +820,11 @@ pub struct Renderer {
     photo_mask: wgpu::TextureView,
     /// the mask holds something that has to be cleared when no tiles are drawn
     photo_mask_dirty: bool,
+    /// how far each building tile around the camera has faded in (`Frame::cover`)
+    light_cover: wgpu::Texture,
+    light_cover_view: wgpu::TextureView,
+    /// city light rising off the ground around the camera (skyglow.rs)
+    glow_tex: wgpu::Texture,
     build_ub: wgpu::Buffer,
     obj_ub: wgpu::Buffer,
     bg_obj: wgpu::BindGroup,
@@ -959,6 +979,7 @@ struct Bg0Src {
     cs: wgpu::TextureView,
     ocean: wgpu::TextureView,
     shore: wgpu::TextureView,
+    glow: wgpu::TextureView,
 }
 
 impl Bg0Src {
@@ -989,6 +1010,7 @@ impl Bg0Src {
                 tex_res(16, &self.cs),
                 tex_res(17, &self.ocean),
                 tex_res(18, &self.shore),
+                tex_res(19, &self.glow),
             ],
         })
     }
@@ -1431,10 +1453,15 @@ impl Renderer {
                 tex_entry(16, wgpu::TextureViewDimension::D2Array, false),
                 tex_entry(17, wgpu::TextureViewDimension::D2Array, false),
                 tex_entry(18, d2, false),
+                tex_entry(19, d2, false),
             ],
         });
         // Coverage of the photorealistic 3D tiles, seen from above (tiles3d.rs).
         let photo_mask = view(&make_tex(d, "photo mask", PHOTO_MASK, PHOTO_MASK, 1, 1, PHOTO_MASK_FMT, rt));
+        let light_cover = make_tex(d, "light cover", COVER_N as u32, COVER_N as u32, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let light_cover_view = view(&light_cover);
+        let glow_tex = make_tex(d, "city glow", crate::skyglow::N as u32, crate::skyglow::N as u32, 1, 1, wgpu::TextureFormat::Rgba16Float, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let glow_view = view(&glow_tex);
         let no_mask = view(&make_tex(d, "no photo mask", 1, 1, 1, 1, PHOTO_MASK_FMT, rt));
         let make_bg0 = |sky: &wgpu::TextureView, trans: &wgpu::TextureView, ms: &wgpu::TextureView, sh: &wgpu::TextureView, vl: &wgpu::TextureView, pm: &wgpu::TextureView, cs: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1460,6 +1487,7 @@ impl Renderer {
                     tex_res(16, cs),
                     tex_res(17, &ocean.view),
                     tex_res(18, &shore.view),
+                    tex_res(19, &glow_view),
                 ],
             })
         };
@@ -1468,7 +1496,7 @@ impl Renderer {
         let bg0_src = Bg0Src {
             layout: l0.clone(), ub: globals_ub.clone(), trans: lut_trans.clone(), ms: lut_ms.clone(), sky: lut_sky.clone(), noise: noise.clone(), wave: wave.clone(),
             s_clamp: s_clamp.clone(), s_repeat: s_repeat.clone(), s_shadow: s_shadow.clone(), s_aniso: s_aniso.clone(), vol: vol_light.clone(), det_alb: det_alb.clone(), det_nrm: det_nrm.clone(),
-            s_detail: s_detail.clone(), mask: photo_mask.clone(), cs: cs_mix.clone(), ocean: ocean.view.clone(), shore: shore.view.clone(),
+            s_detail: s_detail.clone(), mask: photo_mask.clone(), cs: cs_mix.clone(), ocean: ocean.view.clone(), shore: shore.view.clone(), glow: glow_view.clone(),
         };
         // Variant for passes that render into the LUTs / shadow map / smoke volume / photo mask / cloud shadow themselves.
         let bg0_pre = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
@@ -1485,6 +1513,8 @@ impl Renderer {
                 tex_entry(1, d2, false),
                 tex_entry(2, d2, false),
                 wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                tex_entry(4, d2, false),
+                tex_entry(5, d2, false),
             ],
         );
         let l_build = layout("build", &[ub_entry(0, true, 64), tex_entry(1, d2, false)]);
@@ -1935,7 +1965,7 @@ impl Renderer {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
-            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
+            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
         })
@@ -2077,7 +2107,8 @@ impl Renderer {
         let vbuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&t.verts), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE });
         let img = upload_mips(d, &self.queue, "imagery", t.img_size, wgpu::TextureFormat::Rgba8UnormSrgb, 4, &t.imagery);
         let mask = upload_mips(d, &self.queue, "mask", crate::sources::MASK as u32, wgpu::TextureFormat::Rgba8Unorm, 4, &t.mask);
-        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_tile, entries: &[buf_res(0, &self.tile_ub, 48), tex_res(1, &img), tex_res(2, &mask), buf_res(3, &vbuf, 0)] });
+        let lights = upload_mips(d, &self.queue, "lights", crate::sources::MASK as u32, wgpu::TextureFormat::R8Unorm, 1, &t.lights);
+        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_tile, entries: &[buf_res(0, &self.tile_ub, 48), tex_res(1, &img), tex_res(2, &mask), buf_res(3, &vbuf, 0), tex_res(4, &lights), tex_res(5, &self.light_cover_view)] });
         TileGpu { vbuf, bind }
     }
 
@@ -2311,6 +2342,23 @@ impl Renderer {
             blob[i * 256..i * 256 + 48].copy_from_slice(bytemuck::bytes_of(u));
         }
         q.write_buffer(&self.tile_ub, 0, &blob);
+        if let Some(px) = &f.glow {
+            let n = crate::skyglow::N as u32;
+            q.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &self.glow_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(px),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(n * 8), rows_per_image: Some(n) },
+                wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+            );
+        }
+        if f.cover.len() == COVER_N * COVER_N {
+            q.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &self.light_cover, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &f.cover,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(COVER_N as u32), rows_per_image: Some(COVER_N as u32) },
+                wgpu::Extent3d { width: COVER_N as u32, height: COVER_N as u32, depth_or_array_layers: 1 },
+            );
+        }
         // One extra slot after the tiles for loose trees: they are already
         // camera-relative, and offset.w = 1 keeps them to the model they were given.
         let n_fields = f.fields.len().min(MAX_FIELDS);

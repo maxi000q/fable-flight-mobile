@@ -736,6 +736,8 @@ pub struct TileData {
     pub imagery: Vec<Vec<u8>>, // mip chain, rgba
     pub img_size: u32,
     pub mask: Vec<Vec<u8>>, // mip chain, rgba (see ground_mask)
+    /// mip chain, one byte: how much artificial light there is at night (see `NightLights`)
+    pub lights: Vec<Vec<u8>>,
     /// imagery source generation the tile was made with (see `Google::generation`)
     pub imagery_gen: u32,
 }
@@ -799,6 +801,169 @@ fn water_mask(vt: &VecTile, ox: f64, oy: f64, scale: f64) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Artificial light at night, from NASA's Black Marble 2016 (public domain,
+/// NASA Earth Observatory; `assets/night_lights.bin`, packed by
+/// `assets/mknight.py`): 15" grayscale in 1-degree blocks, plus two coarser
+/// levels for tiles seen from far away. The terrain glows with it where no
+/// building tile is drawn (terrain.wgsl `city_glow`), so a city keeps its
+/// lights out to the horizon.
+pub struct NightLights {
+    data: &'static [u8],
+    /// block side in pixels
+    b: usize,
+    /// per level: columns, rows, degrees per block, index of its first block
+    levels: Vec<(u32, u32, u32, u32)>,
+    offs: Vec<u32>,
+    /// where the block data starts
+    base: usize,
+    cache: Mutex<HashMap<u32, Arc<Vec<u8>>>>,
+}
+
+/// Blocks kept unpacked at once (57.6 KB each).
+const NL_CACHE: usize = 1024;
+/// Light of a saturated map pixel (1 = the terrain shader's brightest downtown).
+const NL_PEAK: f32 = 0.5;
+/// Exponent from the map's grey to linear light.
+const NL_CURVE: f32 = 4.4;
+
+impl NightLights {
+    pub fn get() -> &'static NightLights {
+        static N: std::sync::OnceLock<NightLights> = std::sync::OnceLock::new();
+        N.get_or_init(|| NightLights::parse(include_bytes!("../assets/night_lights.bin")))
+    }
+
+    fn parse(data: &'static [u8]) -> Self {
+        let u16_at = |i: usize| u16::from_le_bytes([data[i], data[i + 1]]) as u32;
+        assert_eq!(&data[..4], b"NLM2", "night_lights.bin");
+        let b = u16_at(4) as usize;
+        let n = data[6] as usize;
+        let mut levels = Vec::with_capacity(n);
+        let mut first = 0;
+        for l in 0..n {
+            let (c, r, d) = (u16_at(7 + l * 6), u16_at(9 + l * 6), u16_at(11 + l * 6));
+            levels.push((c, r, d, first));
+            first += c * r;
+        }
+        let o = 7 + n * 6;
+        let offs: Vec<u32> = (0..=first as usize).map(|i| u32::from_le_bytes(data[o + i * 4..o + i * 4 + 4].try_into().unwrap())).collect();
+        let base = o + offs.len() * 4;
+        NightLights { data, b, levels, offs, base, cache: Mutex::new(HashMap::new()) }
+    }
+
+    /// Block `i` unpacked, or None where it is dark.
+    fn block(&self, i: u32) -> Option<Arc<Vec<u8>>> {
+        let (a, z) = (self.offs[i as usize] as usize, self.offs[i as usize + 1] as usize);
+        if a == z {
+            return None;
+        }
+        if let Some(b) = self.cache.lock().get(&i) {
+            return Some(b.clone());
+        }
+        use std::io::Read;
+        let mut px = Vec::with_capacity(self.b * self.b);
+        flate2::read::ZlibDecoder::new(&self.data[self.base + a..self.base + z]).read_to_end(&mut px).ok()?;
+        px.resize(self.b * self.b, 0);
+        let px = Arc::new(px);
+        let mut c = self.cache.lock();
+        if c.len() >= NL_CACHE {
+            c.clear();
+        }
+        c.insert(i, px.clone());
+        Some(px)
+    }
+
+    /// Linear light of level `lv`'s pixel (x, y) (0 = 180°W / 90°N): x wraps,
+    /// y clamps. Keeps the blocks it touched, so call it in nearby runs.
+    fn texels(&self, lv: usize) -> impl FnMut(i64, i64) -> f32 + '_ {
+        let (cols, rows, _, first) = self.levels[lv];
+        let (w, h) = ((cols as usize * self.b) as i64, (rows as usize * self.b) as i64);
+        // The map is a stretched picture: most of a metro area sits near white.
+        // A steep curve leaves the core bright and thins the suburbs out.
+        let lin: [f32; 256] = std::array::from_fn(|v| NL_PEAK * (v as f32 / 255.0).powf(NL_CURVE));
+        let mut local: HashMap<u32, Option<Arc<Vec<u8>>>> = HashMap::new();
+        let mut last: (u32, Option<Arc<Vec<u8>>>) = (u32::MAX, None);
+        move |x: i64, y: i64| -> f32 {
+            let (x, y) = (x.rem_euclid(w), y.clamp(0, h - 1));
+            let (bx, by) = ((x as usize / self.b) as u32, (y as usize / self.b) as u32);
+            let key = first + by * cols + bx;
+            if key != last.0 {
+                last = (key, local.entry(key).or_insert_with_key(|i| self.block(*i)).clone());
+            }
+            last.1.as_ref().map_or(0.0, |p| lin[p[(y as usize % self.b) * self.b + x as usize % self.b] as usize])
+        }
+    }
+
+    /// Mean light (units of `tile_mask`, before its byte scaling) over each of
+    /// an n x n grid of `cell`-metre squares on the tangent plane at (lat0,
+    /// lon0) (degrees), row by row from the north-west corner. Water is not
+    /// left out: the sky glow (skyglow.rs) is blurred far wider than any shore.
+    pub fn grid(&self, lat0: f64, lon0: f64, n: usize, cell: f64) -> Vec<f32> {
+        let ppd = self.b as f64 / self.levels[0].2 as f64;
+        let px_m = 111_320.0 / ppd;
+        let taps = ((cell / px_m).ceil() as usize + 1).clamp(2, 6);
+        let mut texel = self.texels(0);
+        let mdeg = 180.0 / (std::f64::consts::PI * crate::geo::R);
+        let coslat = lat0.to_radians().cos().max(0.05);
+        let mut out = vec![0f32; n * n];
+        let half = n as f64 * 0.5;
+        for j in 0..n {
+            for i in 0..n {
+                let mut sum = 0.0;
+                for ty in 0..taps {
+                    let nm = (half - j as f64 - (ty as f64 + 0.5) / taps as f64) * cell;
+                    let y = ((90.0 - (lat0 + nm * mdeg)) * ppd).floor() as i64;
+                    for tx in 0..taps {
+                        let em = (i as f64 + (tx as f64 + 0.5) / taps as f64 - half) * cell;
+                        let x = ((lon0 + em * mdeg / coslat + 180.0) * ppd).floor() as i64;
+                        sum += texel(x, y);
+                    }
+                }
+                out[j * n + i] = sum / (taps * taps) as f32;
+            }
+        }
+        out
+    }
+
+    /// One byte per mask pixel of tile `id` (0..255 = 0..1, linear: the
+    /// terrain shader's brightest downtown is 1), averaged over the pixel, so it shrinks
+    /// properly into mips. Nothing over water (`ground`: the tile mask).
+    pub fn tile_mask(&self, id: TileId, ground: &[u8]) -> Vec<u8> {
+        // The finest level whose pixels are no smaller than about 2/3 of the tile's.
+        let tile_deg = 360.0 / (1u64 << id.z) as f64;
+        let px_of = |l: usize| self.b as f64 / self.levels[l].2 as f64 * tile_deg / MASK as f64;
+        let lv = (0..self.levels.len()).find(|&l| px_of(l) <= 1.5).unwrap_or(self.levels.len() - 1);
+        let deg = self.levels[lv].2;
+        let ppd = self.b as f64 / deg as f64;
+        let taps = (px_of(lv).ceil() as usize).clamp(1, 4);
+        let mut texel = self.texels(lv);
+        // Mercator: longitude goes with x only, latitude with y only. Per tap
+        // column / row: first texel and the weight of the next.
+        let n = MASK * taps;
+        let split = |g: f64| (g.floor() as i64, (g - g.floor()) as f32);
+        let xs: Vec<(i64, f32)> = (0..n).map(|k| split((id.lat_lon((k as f64 + 0.5) / n as f64, 0.5).1.to_degrees() + 180.0) * ppd - 0.5)).collect();
+        let ys: Vec<(i64, f32)> = (0..n).map(|k| split((90.0 - id.lat_lon(0.5, (k as f64 + 0.5) / n as f64).0.to_degrees()) * ppd - 0.5)).collect();
+        let mut out = vec![0u8; MASK * MASK];
+        for py in 0..MASK {
+            for px in 0..MASK {
+                let i = py * MASK + px;
+                if ground[i * 4] > 127 {
+                    continue;
+                }
+                let mut sum = 0.0;
+                for &(y0, fy) in &ys[py * taps..(py + 1) * taps] {
+                    for &(x0, fx) in &xs[px * taps..(px + 1) * taps] {
+                        let top = texel(x0, y0) * (1.0 - fx) + texel(x0 + 1, y0) * fx;
+                        let bot = texel(x0, y0 + 1) * (1.0 - fx) + texel(x0 + 1, y0 + 1) * fx;
+                        sum += top * (1.0 - fy) + bot * fy;
+                    }
+                }
+                out[i] = (sum / (taps * taps) as f32 * 255.0 + 0.5).min(255.0) as u8;
+            }
+        }
+        out
+    }
 }
 
 // Ground classes in the B channel of the tile mask (low nibble; the high
@@ -967,6 +1132,7 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             m
         }
     };
+    let lights = NightLights::get().tile_mask(id, &mask);
 
     let (clat, clon) = id.lat_lon(0.5, 0.5);
     let center = geo::lla_to_pos(clat, clon, 0.0);
@@ -1065,6 +1231,7 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
         imagery: mip_chain(img.into_raw(), img_size as usize, 4),
         img_size,
         mask: mask_mips,
+        lights: mip_chain(lights, MASK, 1),
         imagery_gen,
     })
 }
@@ -1149,5 +1316,22 @@ impl Loader {
     pub fn submit(&self, prio: f32, job: Job) {
         self.queue.0.lock().push((prio, job));
         self.queue.1.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod night_lights_tests {
+    use super::*;
+    #[test]
+    fn tile_mask_speed_and_values() {
+        let nl = NightLights::get();
+        let ground = vec![0u8; MASK * MASK * 4];
+        for (lat, lon, z) in [(40.75f64, -73.99f64, 14u8), (40.75, -73.99, 10), (40.75, -73.99, 6), (40.0, -90.0, 3), (40.0, -90.0, 1)] {
+            let id = TileId::at(lat.to_radians(), lon.to_radians(), z);
+            let t = std::time::Instant::now();
+            let m = nl.tile_mask(id, &ground);
+            let mean = m.iter().map(|v| *v as f64).sum::<f64>() / m.len() as f64;
+            eprintln!("z{z}: {:.1} ms, mean {mean:.1}, max {}", t.elapsed().as_secs_f64() * 1e3, m.iter().max().unwrap());
+        }
     }
 }

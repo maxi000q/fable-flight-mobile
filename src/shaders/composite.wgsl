@@ -594,7 +594,7 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
     let t1 = min(dist, top.y);
     if (t1 > t0) {
       let sc = atm_march(oc, rd, t0, t1, 12, fract(jit + G.time.w * 0.618034));
-      col = col * sc.T + sc.L + SKYGLOW * 0.004 * G.misc.y * night_cam() * (1.0 - luma(sc.T));
+      col = col * sc.T + sc.L + glow_march(rd, t1, 8, fract(jit + G.time.w * 0.381966));
     }
   }
   if (cov < 0.996) { col = mix(sky_color(rd, jit), col, cov); }
