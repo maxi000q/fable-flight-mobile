@@ -158,7 +158,7 @@ pub struct Crash {
     heavy: bool,
     /// buildings the wreckage ploughed through this frame (tile, footprint,
     /// where, velocity): main.rs brings them down
-    pub crush: Vec<(geo::TileId, usize, DVec3, DVec3)>,
+    pub crush: Vec<(geo::TileId, usize, DVec3, DVec3, f64)>,
     crushed: Vec<(geo::TileId, usize)>,
     /// splashes to be heard this frame (strength)
     pub splashes: Vec<f32>,
@@ -887,7 +887,7 @@ impl Crash {
                     let keep = m / (m + mb);
                     if d.vel.length() * keep > 4.0 {
                         self.crushed.push((b.tile, b.idx));
-                        self.crush.push((b.tile, b.idx, p, d.vel));
+                        self.crush.push((b.tile, b.idx, p, d.vel, 0.5 * m * d.vel.length_squared()));
                         d.vel *= keep;
                         d.omega *= keep.sqrt();
                         let (la, lo, _) = geo::pos_to_lla(p);
