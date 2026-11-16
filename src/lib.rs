@@ -191,6 +191,7 @@ impl Loaded {
     }
 }
 
+#[derive(Clone)]
 struct Args {
     lat: f64,
     lon: f64,
@@ -765,6 +766,14 @@ struct Game {
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
 }
+
+// On Android the finished Game is handed back from the big-stack init
+// worker to the glue thread, so it must be Send there.
+#[cfg(target_os = "android")]
+const _: () = {
+    fn assert_send<T: Send>() {}
+    let _ = assert_send::<Game>;
+};
 
 impl Game {
     fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
@@ -5241,16 +5250,39 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes().with_title("Fable Flight").with_inner_size(winit::dpi::PhysicalSize::new(self.args.size.0, self.args.size.1));
         let window = Arc::new(el.create_window(attrs).expect("window"));
         log::info!("window created; starting Game::new");
-        match Game::new(window, &self.args) {
-            Ok(g) => {
+        // Game::new is written against a desktop's 8 MB main-thread stack and
+        // overflows the glue thread's 2 MB one (it looks like "crashes on
+        // launch"). Run it on a 64 MB-stack worker and hand the finished Game
+        // back here; the event loop itself stays on the glue thread, where
+        // android-activity requires every event poll to happen.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let init_args = self.args.clone();
+        let spawned = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let _ = tx.send(Game::new(window, &init_args));
+            });
+        if let Err(e) = spawned {
+            log::error!("spawning the init thread: {e}");
+            el.exit();
+            return;
+        }
+        match rx.recv() {
+            Ok(Ok(g)) => {
                 log::info!("Game::new finished; entering the main loop");
                 self.game = Some(g);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // The whole chain of causes, not just the last: this is what
                 // a black screen used to hide entirely.
                 log::error!("failed to start: {e:#}");
                 eprintln!("failed to start: {e:#}");
+                el.exit();
+            }
+            Err(_) => {
+                // The worker died before sending: a panic (already logged by
+                // the hook) or a stack overflow, which aborts the process.
+                log::error!("failed to start: the init thread died (see the panic above)");
                 el.exit();
             }
         }
@@ -5622,15 +5654,15 @@ pub fn main() -> anyhow::Result<()> {
 /// `main`. The window is fullscreen by default on Android (winit asks the
 /// system for it), so nothing is sized by hand.
 ///
-/// The glue spawns `android_main` with a plain `std::thread::spawn`, so it
-/// runs on the default 2 MB stack — while the game's init (`Game::new`:
-/// meshes built, textures decoded, the aircraft's tree walked) is written
-/// against a desktop's 8 MB main-thread stack, and dies with a stack
-/// overflow, which looks exactly like "crashes on launch". So the whole
-/// game — event loop and all — is moved onto a thread with a 64 MB stack,
-/// and the `AndroidApp` handle is passed to it through a channel, the one
-/// way to hand it across threads (it is not `Send`, by design, but the
-/// event loop must be created on the thread that runs it).
+/// The event loop must run on the glue's own thread: android-activity
+/// prepares the ALooper there and asserts that every poll happens on it
+/// ("Application tried to poll events from non-main thread"), so running the
+/// loop on a spawned thread panics at the first poll. That thread has only a
+/// 2 MB stack, while the game's init (`Game::new`: meshes built, textures
+/// decoded, the aircraft's tree walked) is written against a desktop's 8 MB
+/// main-thread stack and would overflow it. So the loop stays here, and only
+/// `Game::new` is offloaded to a 64 MB-stack worker (in `App::resumed`), which
+/// hands the finished `Game` back; the steady frame loop then runs here.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
@@ -5668,58 +5700,26 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         log::error!("{msg}");
         eprintln!("{msg}");
     }));
-    log::info!("android_main: entry, launching the game thread");
-    // The thread the glue gave us is parked here (its stack is the small
-    // one); the game runs on the big-stack thread and this one just waits,
-    // keeping the NativeActivity callbacks alive until the game exits.
-    let (tx, rx) = std::sync::mpsc::channel::<AndroidAppBox>();
-    let t = std::thread::Builder::new()
-        .stack_size(64 << 20)
-        .spawn(move || {
-            let app = rx.recv().expect("AndroidApp handoff");
-            touchui::set_active(true);
-            let args = parse_args();
-            let el = match EventLoop::builder().with_android_app(app.get()).build() {
-                Ok(el) => el,
-                Err(e) => {
-                    log::error!("event loop: {e}");
-                    std::process::exit(1);
-                }
-            };
-            el.set_control_flow(ControlFlow::Poll);
-            if let Err(e) = el.run_app(&mut App { args, game: None }) {
-                log::error!("event loop run: {e}");
-            }
-        });
-    if let Err(e) = t {
-        log::error!("spawning the game thread: {e}");
-        std::process::exit(1);
+    log::info!("android_main: entry, building the event loop on the glue thread");
+    touchui::set_active(true);
+    let args = parse_args();
+    let el = match EventLoop::builder().with_android_app(app).build() {
+        Ok(el) => el,
+        Err(e) => {
+            log::error!("event loop: {e}");
+            std::process::exit(1);
+        }
+    };
+    el.set_control_flow(ControlFlow::Poll);
+    if let Err(e) = el.run_app(&mut App { args, game: None }) {
+        log::error!("event loop run: {e}");
     }
-    tx.send(AndroidAppBox(app)).expect("game thread alive");
-    // Block until the game thread finishes: when this function returns, the
-    // glue tears everything down, and it must not do that mid-game.
-    let _ = t.unwrap().join();
-    log::info!("android_main: game thread finished");
+    log::info!("android_main: event loop finished");
     // Never return into a half-dead process: the loader, audio and network
     // threads would keep it alive, and the next launch would re-enter
     // android_main and hit winit's one-EventLoop-per-process guard. Exit so
     // every launch starts from a clean process.
     std::process::exit(0);
-}
-
-/// The one lawful way to move an `AndroidApp` between threads: it is not
-/// `Send` (its JNI pointers belong to the thread that made them), but only
-/// this once it is handed over before anything is derived from it, and the
-/// receiving thread is the one that lives as long as the app.
-#[cfg(target_os = "android")]
-struct AndroidAppBox(winit::platform::android::activity::AndroidApp);
-#[cfg(target_os = "android")]
-unsafe impl Send for AndroidAppBox {}
-#[cfg(target_os = "android")]
-impl AndroidAppBox {
-    fn get(self) -> winit::platform::android::activity::AndroidApp {
-        self.0
-    }
 }
 
 /// Logcat plus a plain file: a logger that copies each record to both.
