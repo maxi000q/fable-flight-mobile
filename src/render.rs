@@ -2291,10 +2291,10 @@ impl Renderer {
         // The UI's texture changes are taken in whether or not a frame can be
         // drawn: each builds on the one before, so one dropped with a skipped
         // frame (a hidden window on macOS) would leave the next nothing to patch.
-        if let Some((_, delta, _)) = &f.egui {
-            for (id, ds) in &delta.set {
-                for d in ds {
-                    self.egui.update_texture(&self.device, &self.queue, *id, d);
+        if let Some((_, delta, _)) = &mut f.egui {
+            for (id, ds) in delta.set.drain() {
+                for d in &ds {
+                    self.egui.update_texture(&self.device, &self.queue, id, d);
                 }
             }
         }
@@ -2319,9 +2319,9 @@ impl Renderer {
             }
         };
         if frame.is_none() && !self.headless {
-            if let Some((_, delta, _)) = &f.egui {
-                for id in &delta.free {
-                    self.egui.free_texture(id);
+            if let Some((_, delta, _)) = &mut f.egui {
+                for id in delta.free.drain() {
+                    self.egui.free_texture(&id);
                 }
             }
             return;
@@ -3146,9 +3146,9 @@ impl Renderer {
             }
         }
         self.stats[3] += t_sub.elapsed().as_secs_f64();
-        if let Some((_, delta, _)) = egui_jobs {
-            for id in &delta.free {
-                self.egui.free_texture(id);
+        if let Some((_, mut delta, _)) = egui_jobs {
+            for id in delta.free.drain() {
+                self.egui.free_texture(&id);
             }
         }
         if let Some((path, buf, w, h, row)) = shot {
