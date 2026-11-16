@@ -603,21 +603,24 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
 
 @fragment fn fs(in: FsIn) -> @location(0) vec4f {
   let px = vec2i(in.pos.xy);
-  var water_samples = 0;
-  for (var i = 0; i < 4; i++) {
+  // SAMPLES is injected before this file (1 on a phone): with one sample the
+  // resolved path below is exactly the per-sample one, so the count is 0
+  // and the loop never runs.
+  var water_samples = 0u;
+  for (var i = 0u; i < SAMPLES; i++) {
     if (textureLoad(t_aux_ms, px, i).a > 0.996) { water_samples++; }
   }
-  if (water_samples > 0 && water_samples < 4) {
+  if (water_samples > 0 && water_samples < SAMPLES) {
     // Shade before resolving: each water sample needs its own tint, parameters
     // and depth, even when no neighbouring pixel is entirely water. Foreground
     // samples retain their own lighting and haze rather than water's colour.
     var col = vec3f(0.0);
-    for (var i = 0; i < 4; i++) {
+    for (var i = 0u; i < SAMPLES; i++) {
       col += composite_sample(in, textureLoad(t_depth_ms, px, i),
         textureLoad(t_color_ms, px, i), textureLoad(t_aux_ms, px, i),
         textureLoad(t_amb_ms, px, i).r);
     }
-    return vec4f(col * 0.25, 1.0);
+    return vec4f(col / f32(SAMPLES), 1.0);
   }
   return vec4f(composite_sample(in, textureLoad(t_depth, px, 0),
     textureLoad(t_color, px, 0), textureLoad(t_aux, px, 0),

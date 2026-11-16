@@ -110,8 +110,9 @@ const MOON_E: f32 = SUN_E * 0.0035;
 const INTEGRATED_SCALE: f32 = 0.75;
 /// Render resolution phones start at (before any saved settings). Low on
 /// purpose: a 4 GB phone shares its RAM between the app, the GPU and the
-/// system, and the temporal AA's sharpening hides most of the softness.
-const MOBILE_SCALE: f32 = 0.65;
+/// system (often with under a gigabyte free for all of it), and the
+/// temporal AA's sharpening hides most of the softness.
+const MOBILE_SCALE: f32 = 0.5;
 /// What a 3D tiles detail level costs, as measured over San Francisco (see
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
@@ -793,6 +794,19 @@ impl Game {
         }
         gfx.vsync &= args.vsync;
         gfx.taa &= args.taa && prefs.taa;
+        // What the phone actually has to give: on a shared-memory GPU the
+        // renderer's start-up allocations all come out of this.
+        if cfg!(target_os = "android") {
+            let mem = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+            let grab = |k: &str| mem.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).map(|kb| kb / 1024);
+            log::info!(
+                "Game::new: {} MB total, {} MB free, {} MB available (Android low-RAM killer at {} MB)",
+                grab("MemTotal:").unwrap_or(0),
+                grab("MemFree:").unwrap_or(0),
+                grab("MemAvailable:").unwrap_or(0),
+                grab("LowMemKiller:").unwrap_or(0)
+            );
+        }
         log::info!("Game::new: creating the renderer (GPU device, pipelines)");
         let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync))?;
         if let Some(sc) = args.render_scale {

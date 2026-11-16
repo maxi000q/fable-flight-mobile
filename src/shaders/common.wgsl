@@ -579,7 +579,9 @@ fn cloud_density(pp: vec3f, h: f32, cheap: bool) -> f32 {
 // hq: smooth (cubic B-spline) filtering, for surfaces; the haze marches, which
 // call it many times a pixel, take one bilinear fetch.
 struct CloudSun { vis: f32, closed: f32 };
-const CS_RES = 1024.0;
+// CS_RES mirrors render.rs's cloud-shadow map side (512 on a phone, 1024 on
+// a desktop); the renderer injects it before this file.
+
 fn cs_fetch(uv: vec2f, layer: i32, hq: bool) -> vec4f {
   if (!hq) { return textureSampleLevel(t_cshadow, s_clamp, uv, layer, 0.0); }
   // Cubic B-spline from four bilinear taps: no texel corners in the shadow's outline.

@@ -13,8 +13,16 @@ use anyhow::{anyhow, Result};
 use crossbeam_channel::{unbounded, Receiver};
 use image::imageops::FilterType;
 
-/// Texels per side (the arrays' size, DET_N in render.rs).
+/// Texels per side (the arrays' size, DET_N in render.rs). The arrays
+/// themselves are made at half of this on a phone (see render.rs `DET_N`);
+/// the downloads are resized to whatever the arrays take.
 pub const N: u32 = 1024;
+/// The side the photo scans are resized to for the GPU arrays: what
+/// render.rs's DET_N is on this platform.
+#[cfg(target_os = "android")]
+pub(crate) const GPU_N: u32 = 512;
+#[cfg(not(target_os = "android"))]
+pub(crate) const GPU_N: u32 = N;
 /// Stored colour is ratio * this, so ratios up to ~2.9 fit in 8 bits.
 const RATIO_SCALE: f32 = 0.35;
 
@@ -101,17 +109,18 @@ fn load(fetch: &Fetcher, s: &Spec) -> Result<Layer> {
         let name = if name.is_empty() || name.starts_with('.') { format!("{map}.jpg") } else { name };
         let data = fetch.get_cached(&format!("ph/{id}/{name}"), url)?;
         let img = image::load_from_memory(&data)?;
-        Ok(if img.width() == N && img.height() == N { img } else { img.resize_exact(N, N, FilterType::Triangle) })
+        let n = GPU_N;
+        Ok(if img.width() == n && img.height() == n { img } else { img.resize_exact(n, n, FilterType::Triangle) })
     };
     let diff = get("Diffuse")?.to_rgb8();
     let nor = get("nor_gl")?.to_rgb8();
     let disp = get("Displacement")?.to_luma16();
-    let n = N as usize;
+    let n = GPU_N as usize;
 
     // Colour: linear light, divided by its blurred self.
     let lut: Vec<f32> = (0..256).map(|i| srgb_to_linear(i as f32 / 255.0)).collect();
     let mut ch: [Vec<f32>; 3] = std::array::from_fn(|c| diff.pixels().map(|p| lut[p[c] as usize]).collect());
-    let sigma = s.high_pass / s.size * N as f32;
+    let sigma = s.high_pass / s.size * GPU_N as f32;
     let mut alb = vec![0u8; n * n * 4];
     for (c, plane) in ch.iter_mut().enumerate() {
         let mut low = plane.clone();

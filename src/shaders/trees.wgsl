@@ -35,6 +35,16 @@ struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f3
 struct COut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f32, @builtin(sample_mask) mask: u32 };
 struct TW { P: vec3f, N: vec3f, L: vec3f };
 
+// A crown's coverage spread over the multisamples: cnt of the 4 bits, rotated
+// by a per-pixel angle (the rot below) so neighbouring pixels dither. At one
+// sample (SAMPLES < 2: a phone) every surviving pixel must write its only
+// sample — bit 0 — so the mask is full whatever the rotation.
+fn sample_mask(cnt: u32, rot: u32) -> u32 {
+  if (cnt >= 4u || SAMPLES < 2u) { return 15u; }
+  let bits = (1u << cnt) - 1u;
+  return ((bits << rot) | (bits >> (4u - rot))) & 15u;
+}
+
 // 1 where leaf cards are fully out, 0 beyond their range. Trees hand over to
 // their impostors (pictures of exactly this, see below) before the cards
 // start to go.
@@ -345,9 +355,7 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
   let o = solid_frag(in, true);
   let cnt = min(u32(o.cover * 4.0 + ign(in.clip.xy)), 4u);
   if (cnt == 0u) { discard; }
-  let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
-  let bits = (1u << cnt) - 1u;
-  return COut(o.c, o.n, o.amb, ((bits << rot) | (bits >> (4u - rot))) & 15u);
+  return COut(o.c, o.n, o.amb, sample_mask(cnt, u32(ign(in.clip.yx + 31.0) * 4.0) & 3u));
 }
 
 // --------------------------------------------------------------- leaf cards
@@ -443,9 +451,7 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
   // Spread it over the multisamples (alpha itself has to stay 1 for the composite).
   let cnt = min(u32(a * 4.0 + ign(in.clip.xy)), 4u);
   if (cnt == 0u) { discard; }
-  let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
-  let bits = (1u << cnt) - 1u;
-  let mask = ((bits << rot) | (bits >> (4u - rot))) & 15u;
+  let mask = sample_mask(cnt, u32(ign(in.clip.yx + 31.0) * 4.0) & 3u);
 
   let V = normalize(in.P);
   if (dot(Ng, V) > 0.0) { Ng = -Ng; }
@@ -543,14 +549,13 @@ fn bake_vertex(p: vec3f, nrm: vec3f, col: vec4f, uv: vec4f, aux: vec4f, ii: u32,
 fn bake_out(in: BOut, albedo: vec3f, N_in: vec3f, ao: f32, cover: f32) -> BakeOut {
   let cnt = min(u32(cover * 4.0 + ign(in.clip.xy)), 4u);
   if (cnt == 0u) { discard; }
-  let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
-  let bits = (1u << cnt) - 1u;
+  let mask = sample_mask(cnt, u32(ign(in.clip.yx + 31.0) * 4.0) & 3u);
   let fr = frame_from(in.F);
   let N = normalize(N_in);
   let b = IB.b[in.layer];
   let depth = clamp(0.5 + 0.5 * dot(in.P - b.xyz, fr.F) / b.w, 0.0, 1.0);
   let nv = vec2f(dot(N, fr.r), dot(N, fr.u)) * 0.5 + 0.5;
-  return BakeOut(vec4f(albedo, 1.0), vec4f(nv, depth, ao), ((bits << rot) | (bits >> (4u - rot))) & 15u);
+  return BakeOut(vec4f(albedo, 1.0), vec4f(nv, depth, ao), mask);
 }
 // The solid model as solid_frag shades it close up, without the light.
 // Openness is kept above 0.04 on foliage: 0 marks bark.
@@ -782,9 +787,7 @@ struct IOut {
   let cover = acc.a;
   let cnt = min(u32(cover * 4.0 + ign(in.clip.xy)), 4u);
   if (cnt == 0u) { discard; }
-  let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
-  let bits = (1u << cnt) - 1u;
-  let mask = ((bits << rot) | (bits >> (4u - rot))) & 15u;
+  let mask = sample_mask(cnt, u32(ign(in.clip.yx + 31.0) * 4.0) & 3u);
 
   let inv = 1.0 / max(cover, 1e-4);
   let ao = open * inv;

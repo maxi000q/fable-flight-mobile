@@ -19,11 +19,12 @@ use crate::trees::{CARDS, LODS, TREE_SPECIES, VARIANTS};
 /// full layout is two 1024², 40-layer, 7-mip RGBA8 arrays: about 447 MB
 /// before the first frame. That is more than an Adreno 619-class GPU is
 /// ever handed, the allocation quietly fails, wgpu invalidates the device,
-/// and the next buffer created (`impostor quad`, the only
-/// mapped-at-creation one) dies with the "buffer is invalid" panic seen on
-/// 4 GB phones. The phone layout keeps every picture at full resolution and
-/// takes a quarter of the directions: 112 MB both sides, and a tree 120 m
-/// away still has 16 angles to turn through.
+/// and the next buffer created (`impostor quad`, then `tile idx` — whatever
+/// comes first) dies with the "buffer is invalid" panic seen on 4 GB phones
+/// with under a gigabyte to spare. The phone layout is a quarter of the
+/// directions at half the size: 28 MB both sides. Coarse for a tree 120 m
+/// away on a screen a few inches across; the mip chain, the temporal filter
+/// and the phone's own pixel density hide most of what is lost.
 #[derive(Clone, Copy)]
 pub struct Layout {
     /// Pictures per side of the grid. Must match IMP_N in trees.wgsl.
@@ -35,8 +36,9 @@ pub struct Layout {
 impl Layout {
     /// The desktop layout the game was built around.
     pub const DESKTOP: Layout = Layout { n: 8, cell: 128 };
-    /// The layout phones start with (see the struct's comment).
-    pub const MOBILE: Layout = Layout { n: 4, cell: 128 };
+    /// The layout phones start with (see the struct's comment): a quarter
+    /// of the directions, half the pictures' size.
+    pub const MOBILE: Layout = Layout { n: 4, cell: 64 };
 
     fn size(self) -> u32 {
         self.n * self.cell

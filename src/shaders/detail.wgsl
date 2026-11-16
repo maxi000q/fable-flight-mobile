@@ -9,7 +9,8 @@
 @group(0) @binding(1) var i_alb: texture_2d_array<f32>;
 @group(0) @binding(2) var o_nrm: texture_storage_2d_array<rgba8unorm, write>;
 
-const N = 1024;
+// N (the array side) is injected before this file by the renderer: 512 on
+// a phone, 1024 on a desktop.
 const TAU = 6.28318530718;
 // Metres covered by one repeat, and metres of relief between height 0 and 1
 // (keep in step with DET_PROC in render.rs).

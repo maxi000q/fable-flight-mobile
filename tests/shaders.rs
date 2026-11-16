@@ -20,9 +20,16 @@ fn shaders_validate() {
     let common = include_str!("../src/shaders/common.wgsl");
     // Modules that draw the sky get sky.wgsl too, as in render.rs.
     let sky = include_str!("../src/shaders/sky.wgsl");
+    // The constants render.rs injects before every module: the multisample
+    // count (per-sample loops) and the cloud-shadow map side.
+    // Mirrors render.rs's cfg: phones build at one sample and a 512-side
+    // cloud-shadow map.
+    let (samples, cs_res, det_n) = if cfg!(target_os = "android") { (1, 512, 512) } else { (4, 1024, 1024) };
+    let ov = format!("const SAMPLES = {samples}u;\nconst CS_RES = {cs_res}.0;\n");
+    let ov_det = format!("{ov}const N = {det_n};\n");
     let mut ok = check("noise3d", include_str!("../src/shaders/noise3d.wgsl"));
-    ok &= check("resolve", include_str!("../src/shaders/resolve.wgsl"));
-    ok &= check("detail", include_str!("../src/shaders/detail.wgsl"));
+    ok &= check("resolve", &format!("{ov}{}", include_str!("../src/shaders/resolve.wgsl")));
+    ok &= check("detail", &format!("{ov_det}{}", include_str!("../src/shaders/detail.wgsl")));
     ok &= check("ocean", include_str!("../src/shaders/ocean.wgsl"));
     ok &= check("shore", include_str!("../src/shaders/shore.wgsl"));
     for (name, src) in [
@@ -40,15 +47,15 @@ fn shaders_validate() {
         ("airfield", include_str!("../src/shaders/airfield.wgsl")),
         ("lights", include_str!("../src/shaders/lights.wgsl")),
     ] {
-        ok &= check(name, &format!("{common}\n{src}"));
+        ok &= check(name, &format!("{ov}{common}\n{src}"));
     }
     // As in render.rs, buildings and instanced solids share the facade shading.
     let facade = include_str!("../src/shaders/facade.wgsl");
     for (name, src) in [("buildings", include_str!("../src/shaders/buildings.wgsl")), ("inst", include_str!("../src/shaders/inst.wgsl"))] {
-        ok &= check(name, &format!("{common}\n{facade}\n{src}"));
+        ok &= check(name, &format!("{ov}{common}\n{facade}\n{src}"));
     }
     for (name, src) in [("composite", include_str!("../src/shaders/composite.wgsl")), ("clouds", include_str!("../src/shaders/clouds.wgsl"))] {
-        ok &= check(name, &format!("{common}\n{sky}\n{src}"));
+        ok &= check(name, &format!("{ov}{common}\n{sky}\n{src}"));
     }
     // plane.wgsl takes the 747 deck's string table: checked in b747::deck's tests.
     assert!(ok, "shader errors above");

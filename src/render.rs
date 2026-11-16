@@ -25,6 +25,15 @@ const SHADOW_RES: u32 = 1024;
 #[cfg(not(target_os = "android"))]
 const SHADOW_RES: u32 = 4096;
 pub const CASCADES: usize = 3;
+/// Multisample count of the G-buffer. Phones render at MSAA 1: their GPU
+/// memory is shared with the system, the four-sample colour/aux/depth/amb
+/// targets are another ~70 MB at the phone render size, and the temporal
+/// anti-aliasing covers the edges anyway. The shaders that read the
+/// multisampled textures get this as a `SAMPLES` constant (see `module`),
+/// so the per-sample loops follow.
+#[cfg(target_os = "android")]
+pub(crate) const MSAA: u32 = 1;
+#[cfg(not(target_os = "android"))]
 pub(crate) const MSAA: u32 = 4;
 const MAX_INST: usize = 16384;
 const MAX_FALL: usize = 4096;
@@ -192,6 +201,11 @@ pub struct Globals {
 /// snap to whole outer texels of a fixed tangent frame, so one map's texels sit
 /// exactly where the last one's did: no crawling, and the cross-fade is a plain
 /// texel-by-texel blend.
+/// Phones draw the cloud shadow at half the side (16 MB of maps instead of
+/// 67): a 400 m texel under high cloud is plenty on a screen inches across.
+#[cfg(target_os = "android")]
+const CS_RES: u32 = 512;
+#[cfg(not(target_os = "android"))]
 const CS_RES: u32 = 1024;
 const CS_SLICES: u32 = 16;
 /// The same on an integrated GPU, where the rays cost a few ms a frame: the
@@ -1146,6 +1160,12 @@ const MEMORY_HINTS: wgpu::MemoryHints = wgpu::MemoryHints::Manual { suballocated
 /// Sub-cells per side of a tessellated terrain cell (TN in terrain.wgsl).
 const TESS_N: u16 = 16;
 /// Size and layer count of the ground material arrays (see detail.wgsl).
+/// The ground material arrays' side. Phones generate them at half the side
+/// (36 MB both arrays instead of 145): the procedural detail is noise, and
+/// the photo scans download at 512 and simply skip the resize.
+#[cfg(target_os = "android")]
+const DET_N: u32 = 512;
+#[cfg(not(target_os = "android"))]
 const DET_N: u32 = crate::materials::N;
 const DET_LAYERS: u32 = 13;
 /// Per-layer metres per repeat, metres of relief, scale of the second sample,
@@ -1210,7 +1230,10 @@ impl GroundMats {
             })
         };
         let (alb, nrm) = (mk("ground albedo"), mk("ground normal"));
-        let m = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("detail"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/detail.wgsl").into()) });
+        // detail.wgsl also needs the arrays' side; the other injected
+        // constants (SAMPLES, CS_RES) are harmless here as it never names them.
+        let ov = format!("const SAMPLES = {MSAA}u;\nconst CS_RES = {CS_RES}.0;\nconst N = {DET_N};\n");
+        let m = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("detail"), source: wgpu::ShaderSource::Wgsl(format!("{ov}{}", include_str!("shaders/detail.wgsl")).into()) });
         let pipe = |entry: &str| d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(entry), layout: None, module: &m, entry_point: Some(entry), compilation_options: Default::default(), cache: None });
         let (p_gen, p_nrm, p_down) = (pipe("gen"), pipe("nrm"), pipe("down"));
         let mut enc = d.create_command_encoder(&Default::default());
@@ -1358,7 +1381,14 @@ impl Renderer {
 
         let d = &device;
         let common = include_str!("shaders/common.wgsl");
-        let module = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{common}\n{src}").into()) });
+        // The sample count the per-sample shader loops run to (composite's
+        // water edge, resolve's depth collapse) and the cloud-shadow map side
+        // the shaders must agree with (common.wgsl's CS_RES default): both
+        // constants are injected before the module source, matching `MSAA`
+        // and `CS_RES` on this build.
+        let overrides = format!("const SAMPLES = {MSAA}u;\nconst CS_RES = {CS_RES}.0;\n");
+        let module = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{overrides}{common}\n{src}").into()) });
+        let module_s = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{overrides}{src}").into()) });
         let m_lut = module("lut", include_str!("shaders/lut.wgsl"));
         let m_terrain = module("terrain", include_str!("shaders/terrain.wgsl"));
         let m_photo = module("photo", include_str!("shaders/photo.wgsl"));
@@ -1366,7 +1396,7 @@ impl Renderer {
         let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
         let m_obj = module("plane", &format!("{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl")));
         let sky = include_str!("shaders/sky.wgsl");
-        let m_comp = module("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
+        let m_comp = module_s("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
         let m_cloud = module("clouds", &format!("{sky}\n{}", include_str!("shaders/clouds.wgsl")));
         let m_post = module("post", include_str!("shaders/post.wgsl"));
         let m_psim = module("psim", include_str!("shaders/particles_sim.wgsl"));
@@ -1374,12 +1404,12 @@ impl Renderer {
         let m_road = module("roads", include_str!("shaders/roads.wgsl"));
         let m_field = module("airfield", include_str!("shaders/airfield.wgsl"));
         let m_lights = module("lights", include_str!("shaders/lights.wgsl"));
-        let m_tree = module("trees", include_str!("shaders/trees.wgsl"));
+        let m_tree = module_s("trees", include_str!("shaders/trees.wgsl"));
         let m_inst = module("inst", &format!("{facade}\n{}", include_str!("shaders/inst.wgsl")));
         let m_vol = module("vol", include_str!("shaders/vol.wgsl"));
         let m_ao = module("ao", include_str!("shaders/ao.wgsl"));
         let m_taa = module("taa", include_str!("shaders/taa.wgsl"));
-        let m_dres = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("resolve"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/resolve.wgsl").into()) });
+        let m_dres = module_s("resolve", include_str!("shaders/resolve.wgsl"));
 
         // ---- shared resources
         let sampler = |addr, aniso: u16, cmp| {
@@ -1970,8 +2000,20 @@ impl Renderer {
         let paint = paint_texture(d, &queue, None);
         let paint_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("paint"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bg_obj = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_obj, entries: &[buf_res(0, &obj_ub, std::mem::size_of::<ObjU>() as u64), tex_res(1, &paint), buf_res(2, &paint_ub, 32)] });
-        let ix = crate::sources::tile_indices();
-        let tile_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tile idx"), contents: bytemuck::cast_slice(&ix), usage: wgpu::BufferUsages::INDEX });
+        // The start-up index buffers go through write_buffer rather than
+        // mapped-at-creation: on a phone whose driver is already out of
+        // memory, a failed mapping is what turned the quiet failure into
+        // "Failed to get mapped range" killing the app.
+        let idx_buf = |label: &str, ix: &[u16]| {
+            let b = d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: ix.len().max(1) as u64 * 2, usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            if !ix.is_empty() {
+                queue.write_buffer(&b, 0, bytemuck::cast_slice(ix));
+            }
+            b
+        };
+        let tile_ix = crate::sources::tile_indices();
+        let tile_nidx = tile_ix.len() as u32;
+        let tile_ibuf = idx_buf("tile idx", &tile_ix);
         let patch = |n: u16| {
             let mut v = Vec::new();
             for b in 0..n {
@@ -1982,9 +2024,10 @@ impl Renderer {
             }
             v
         };
-        let (tix, cix) = (patch(TESS_N), patch(1));
-        let tess_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tess idx"), contents: bytemuck::cast_slice(&tix), usage: wgpu::BufferUsages::INDEX });
-        let cell_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("cell idx"), contents: bytemuck::cast_slice(&cix), usage: wgpu::BufferUsages::INDEX });
+        let tess_ix = patch(TESS_N);
+        let tess_nidx = tess_ix.len() as u32;
+        let tess_ibuf = idx_buf("tess idx", &tess_ix);
+        let cell_ibuf = idx_buf("cell idx", &patch(1));
 
         // ---- particles
         let psim_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("psim"), size: psim_size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -2019,8 +2062,8 @@ impl Renderer {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
-            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
-            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
+            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx,
+            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
         })
     }

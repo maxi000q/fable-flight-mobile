@@ -1,5 +1,6 @@
 // Collapses the multisampled depth buffer to one sample per pixel (nearest
-// surface) for the passes that read depth as a texture.
+// surface) for the passes that read depth as a texture. SAMPLES (1 on a
+// phone) is injected before this file by the renderer.
 @group(0) @binding(0) var t_d: texture_depth_multisampled_2d;
 
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -8,5 +9,9 @@
 }
 @fragment fn fs(@builtin(position) p: vec4f) -> @builtin(frag_depth) f32 {
   let c = vec2i(p.xy);
-  return max(max(textureLoad(t_d, c, 0), textureLoad(t_d, c, 1)), max(textureLoad(t_d, c, 2), textureLoad(t_d, c, 3)));
+  var d = textureLoad(t_d, c, 0);
+  for (var i = 1u; i < SAMPLES; i++) {
+    d = max(d, textureLoad(t_d, c, i));
+  }
+  return d;
 }
