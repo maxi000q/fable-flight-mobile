@@ -160,6 +160,10 @@ pub struct Globals {
     pub glow_c: [f32; 4],
     pub glow_e: [f32; 4],
     pub glow_n: [f32; 4],
+    /// the flown aircraft's landing lights (common.wgsl `spot_light`): two
+    /// lamps, each camera-relative position + intensity (0 = off); then the
+    /// beam's direction + cosine of its half-angle
+    pub spot: [[f32; 4]; 3],
 }
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl

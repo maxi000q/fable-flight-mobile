@@ -77,6 +77,10 @@ struct Globals {
   glow_c: vec4f,
   glow_e: vec4f,
   glow_n: vec4f,
+  // The flown aircraft's landing lights (`spot_light`): two lamps, each
+  // camera-relative position + intensity (0 = off); the beam's direction +
+  // cosine of its half-angle.
+  spot: array<vec4f, 3>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -1102,12 +1106,39 @@ fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
 // Light of a fire: a glowing ball of radius light_pos.w whose light falls off
 // with the square of the distance beyond it.
 fn point_light(P: vec3f, N: vec3f) -> vec3f {
+  return fire_light(P, N) + spot_light(P, N);
+}
+// The one burning light (a crash's fire, the afterburners).
+fn fire_light(P: vec3f, N: vec3f) -> vec3f {
   let d = G.light_pos.xyz - P;
   let r2 = dot(d, d);
   let rad = G.light_pos.w;
   if (rad <= 0.0) { return vec3f(0.0); }
   let att = rad * rad / (rad * rad + r2);
   return G.light_col.rgb * att * max(dot(N, d * inverseSqrt(max(r2, 1e-6))) * 0.7 + 0.3, 0.0);
+}
+// The flown aircraft's landing lights: two beams, a bright core fading out
+// into a wider spill, falling off with the square of the distance (and
+// through the haze). They graze the ground; rough pavement and runway paint
+// throw much of it back toward the lamps (and the eye beside them), which
+// the softened incidence term stands in for.
+fn spot_light(P: vec3f, N: vec3f) -> vec3f {
+  var c = vec3f(0.0);
+  let dir = G.spot[2].xyz;
+  let cmin = G.spot[2].w;
+  for (var i = 0; i < 2; i++) {
+    let s = G.spot[i];
+    if (s.w <= 0.0) { continue; }
+    let d = s.xyz - P;
+    let r2 = max(dot(d, d), 100.0);
+    let l = d * inverseSqrt(r2);
+    let ca = dot(-l, dir);
+    if (ca <= cmin) { continue; }
+    let x = (ca - cmin) / (1.0 - cmin);
+    let beam = x * x * (0.35 + 0.65 * smoothstep(0.55, 0.95, x));
+    c += s.w * beam * sqrt(max(dot(N, l), 0.0)) / r2 * exp(-sqrt(r2) * 2.5e-5 * max(G.weather.w, 0.2));
+  }
+  return vec3f(1.0, 0.92, 0.80) * c;
 }
 fn shade(P: vec3f, N: vec3f, albedo: vec3f) -> vec3f {
   let l = light_at(P);
