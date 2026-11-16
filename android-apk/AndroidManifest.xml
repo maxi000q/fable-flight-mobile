@@ -16,10 +16,15 @@
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:hasCode="false"
+        android:extractNativeLibs="false">
 
         <!-- NativeActivity loads the Rust library and hands it the window;
-             it also keeps the screen on while it is in the foreground. -->
+             it also keeps the screen on while it is in the foreground.
+             hasCode=false above is what makes a pure-native package install
+             at all: without it the installer rejects it ("appears to be
+             invalid") for lacking a classes.dex. -->
         <activity
             android:name="android.app.NativeActivity"
             android:label="Fable Flight Mobile"
@@ -35,5 +40,7 @@
         </activity>
     </application>
 
-    <!-- 64-bit only: modern phones and the Play Store's current requirement. -->
+    <!-- The .so is stored uncompressed and 16 KB page-aligned in the APK, so
+         the loader maps it in place (no extraction at install time); that is
+         also what 16 KB-page devices on Android 15+ require. -->
 </manifest>

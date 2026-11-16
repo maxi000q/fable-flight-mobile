@@ -1,4 +1,10 @@
 resources.zip
-base.apk
-aligned.apk
-staged/
+base-*.apk
+packed-*.apk
+aligned-*.apk
+manifest-*.xml
+staged*/
+debug.keystore
+FableFlightMobile-*.apk
+*.idsig
+jniLibs/arm64-v8a/*.so
