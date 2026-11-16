@@ -1775,8 +1775,9 @@ const GS_Z = -1.30; // cabin::PANEL_Z
     let _b = back;
     return vec4f(col * lit * alpha, alpha);
   }
-  // The Hornet's HUD combiner: the symbology, focused at infinity.
-  if (kind() == 2u && in.L.y > 0.86 && abs(in.L.x) < 0.1 && in.L.z > -5.3 && in.L.z < -5.15) { return hud18(in, px); }
+  // The Hornet's HUD combiner: the symbology, focused at infinity. (The
+  // combiner's top is at 1.045; the canopy passes over it from 1.13 up.)
+  if (kind() == 2u && in.L.y > 0.86 && in.L.y < 1.06 && abs(in.L.x) < 0.1 && in.L.z > -5.3 && in.L.z < -5.15) { return hud18(in, px); }
   let d = window(in.L);
   let cov = 1.0 - smoothstep(-px, px, d);
   if (cov <= 0.0) { discard; }
