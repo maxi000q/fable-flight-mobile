@@ -1909,6 +1909,39 @@ pub fn raster(buf: &mut [u8], w: usize, ext: f32, rings: &[Vec<[f32; 2]>], value
     crate::mvt::fill_rings(buf, w, w, &px, value);
 }
 
+/// Does this footprint (tile units) lie mostly on the street? `road` is the
+/// RASTER x RASTER carriageway mask from `roads::surface_mask`. The footprint is
+/// sampled on a grid; it is on the road when over a fifth of its points are.
+pub fn on_road(road: &[u8], ring: &[[f32; 2]], ext: f32) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+    let k = RASTER as f32 / ext;
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in ring {
+        lo = [lo[0].min(p[0] * k), lo[1].min(p[1] * k)];
+        hi = [hi[0].max(p[0] * k), hi[1].max(p[1] * k)];
+    }
+    let step = ((hi[0] - lo[0]).max(hi[1] - lo[1]) / 24.0).clamp(0.5, 8.0);
+    let (mut inside, mut hit) = (0u32, 0u32);
+    let mut y = lo[1] + step * 0.5;
+    while y < hi[1] {
+        let mut x = lo[0] + step * 0.5;
+        while x < hi[0] {
+            if point_in_ring([x / k, y / k], ring) {
+                inside += 1;
+                let (bx, by) = (x as i64, y as i64);
+                if bx >= 0 && by >= 0 && (bx as usize) < RASTER && (by as usize) < RASTER && road[by as usize * RASTER + bx as usize] != 0 {
+                    hit += 1;
+                }
+            }
+            x += step;
+        }
+        y += step;
+    }
+    inside > 0 && hit * 5 > inside
+}
+
 pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     debug_assert_eq!(id.z, DATA_ZOOM);
     let vt = src.vector(id)?;
@@ -1949,11 +1982,19 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     // Ends of each height class in the four runs (relative to each run's start).
     let mut cls: [Option<[u32; 4]>; 4] = [None; 4];
     let mut built = vec![0u8; RASTER * RASTER];
+    // Where the streets run on the ground, known before any building is made:
+    // a footprint that sits on one is a map error (or a road drawn through a
+    // building), and would stand on the carriageway. Parts raised well above the
+    // ground (an arcade or a bridge building over the street) are left alone.
+    let street = crate::roads::surface_mask(&vt, ext, cx.unit_m);
     for bi in order {
         let b = &vt.buildings[bi];
-        if let Some(f) = building(&cx, &mut m, &vt.buildings, &rels, bi, &hoods, &landuse) {
-            footprints.push(f);
-            raster(&mut built, RASTER, ext, &b.rings[..1], 1);
+        let on_street = rels[bi].lo < 3.0 && on_road(&street, &b.rings[0], ext);
+        if !on_street {
+            if let Some(f) = building(&cx, &mut m, &vt.buildings, &rels, bi, &hoods, &landuse) {
+                footprints.push(f);
+                raster(&mut built, RASTER, ext, &b.rings[..1], 1);
+            }
         }
         if rels[bi].hi >= 12.0 {
             n_far_tall = m.far.len() as u32;
