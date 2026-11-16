@@ -2304,7 +2304,19 @@ impl Game {
 
     /// Knock a building down, with any parts standing on it.
     /// `hit`: the aircraft itself went in (the wall shows its outline).
-    fn bring_down(&mut self, tile: geo::TileId, idx: usize, at: DVec3, vel: DVec3, hit: Option<destruct::Hitter>, femit: &mut Vec<(DVec3, render::Particle)>) {
+    /// `energy`: kinetic energy (J) of what hit it. A building only comes down
+    /// as a whole when that is enough for its size (see `destruct::resistance`);
+    /// less breaks out the part round the impact, and a mere fraction of it
+    /// (a blast from the next lot, a lump of rubble) leaves a building alone.
+    fn bring_down(&mut self, tile: geo::TileId, idx: usize, at: DVec3, vel: DVec3, energy: f64, hit: Option<destruct::Hitter>, femit: &mut Vec<(DVec3, render::Particle)>) {
+        if hit.is_none() {
+            if let Some((base, top, area)) = self.world.footprint(tile, idx) {
+                let h = (top - base).max(3.0);
+                if energy < 0.03 * destruct::resistance(h as f32, (area.max(25.0) as f64 * h) as f32) {
+                    return;
+                }
+            }
+        }
         let above = self.world.structure_of(tile, idx);
         let mut parts = Vec::new();
         for (t, i) in std::iter::once((tile, idx)).chain(above) {
@@ -2331,7 +2343,7 @@ impl Game {
             }
             log::info!("3D tiles: building cut out, {} tiles, {} triangles", src.tiles.len(), src.tiles.iter().map(|t| t.tris.len()).sum::<usize>());
         }
-        self.destr.collapse(&parts, at, vel, hit, photo.as_ref(), femit);
+        self.destr.collapse(&parts, at, vel, energy, hit, photo.as_ref(), femit);
     }
 
     /// The wreck is made of what was left of the aircraft: every group's mesh
@@ -2793,6 +2805,8 @@ impl Game {
                     // it and on, slowed about as much as the house weighs.
                     let size = (self.spec.span / 5.5).max(1.0);
                     let heavy = size > 2.0;
+                    // What it brings to a building: its kinetic energy.
+                    let e_hit = 0.5 * self.spec.mass * imp.vel.length_squared();
                     let mut through = 0.0f32;
                     if let Some((tile, idx)) = imp.building.filter(|_| heavy) {
                         if let Some((base, top, area)) = self.world.footprint(tile, idx) {
@@ -2822,9 +2836,10 @@ impl Game {
                         }
                         let d = &self.plane.dmg;
                         let hit = destruct::Hitter { right: self.plane.right(), up: self.plane.up(), span: d.wing, shape: &self.spec.hole, full: self.spec.span, stab: d.stab, fin: d.fin };
-                        self.bring_down(tile, idx, imp.pos, imp.vel, Some(hit), &mut femit);
+                        self.bring_down(tile, idx, imp.pos, imp.vel, e_hit, Some(hit), &mut femit);
+                        // (next door only gets the blast and the flying pieces: a hundredth of it)
                         for (t, i) in self.world.buildings_near(site, 9.0 * (power * reach) as f64, if heavy { 700.0 } else { 160.0 }) {
-                            self.bring_down(t, i, imp.pos, imp.vel * 0.3, None, &mut femit);
+                            self.bring_down(t, i, imp.pos, imp.vel * 0.3, e_hit * 0.01, None, &mut femit);
                         }
                     } else if !imp.water {
                         // Open ground: a bite is taken out of it (a big one
@@ -2835,7 +2850,7 @@ impl Game {
                         self.destr.eject(site, r, imp.vel, &mut femit);
                         gone = r as f64;
                         for (t, i) in self.world.buildings_near(site, r as f64 + 4.0 * reach as f64, if heavy { 900.0 } else { 400.0 }) {
-                            self.bring_down(t, i, imp.pos, imp.vel * 0.3, None, &mut femit);
+                            self.bring_down(t, i, imp.pos, imp.vel * 0.3, e_hit * 0.01, None, &mut femit);
                         }
                     }
                     if !imp.water {
@@ -2857,8 +2872,8 @@ impl Game {
             self.destr.update(dt as f32, &self.world, &mut femit);
             // Buildings next door that heavy falling pieces went through.
             let hits: Vec<_> = self.destr.crush.drain(..).collect();
-            for (t, i, p, v) in hits {
-                self.bring_down(t, i, p, v * 0.4, None, &mut femit);
+            for (t, i, p, v, e) in hits {
+                self.bring_down(t, i, p, v * 0.4, e, None, &mut femit);
                 self.destr.booms.push(0.5);
             }
             self.sheds.update(dt as f32, &self.world);
@@ -2908,8 +2923,8 @@ impl Game {
         }
         // What the wreckage ploughed through on its way comes down.
         let crushed: Vec<_> = self.crash.as_mut().map(|cr| cr.crush.drain(..).collect()).unwrap_or_default();
-        for (t, i, p, v) in crushed {
-            self.bring_down(t, i, p, v * 0.5, None, &mut femit);
+        for (t, i, p, v, e) in crushed {
+            self.bring_down(t, i, p, v * 0.5, e, None, &mut femit);
             self.destr.booms.push(0.6);
             if let Some(a) = &self.audio {
                 a.event(audio::Event::Crunch(1.4));

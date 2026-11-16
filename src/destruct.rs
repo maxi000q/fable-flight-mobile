@@ -419,6 +419,9 @@ struct Structure {
     top_lower: f32,
     /// seconds until the damaged floors give
     delay: f32,
+    /// pieces further than this (m) from the impact stay standing; infinite
+    /// when the whole building comes down
+    reach: f32,
     hole: f32,
     t: f32,
     gave: bool,
@@ -449,7 +452,7 @@ pub struct Destruction {
     pub booms: Vec<f32>,
     /// standing buildings hit hard enough by falling pieces to come down:
     /// (tile, footprint, where, velocity of what hit it)
-    pub crush: Vec<(TileId, usize, DVec3, DVec3)>,
+    pub crush: Vec<(TileId, usize, DVec3, DVec3, f64)>,
     /// the broken edges of each slab shape, where rebar sticks out
     edges: Vec<Vec<Edge>>,
 }
@@ -489,6 +492,23 @@ fn inside(ring: &[Vec2], p: Vec2) -> bool {
         j = i;
     }
     c
+}
+
+/// Impact energy (J) that brings a building of this height (m) and envelope
+/// volume (m3) down as a whole. Short of it only the part round the impact
+/// gives way: a light aircraft (1 to 5 MJ) takes a shed or a garage apart,
+/// wrecks a corner of a house and leaves a hole in anything bigger, while an
+/// airliner (GJ) flattens a house and can bring down a tower.
+pub fn resistance(height: f32, vol: f32) -> f64 {
+    // J per m3 of envelope: sheds and garages, houses, everything taller
+    let per = if height < 4.5 {
+        5.0e2
+    } else if height < 12.0 {
+        6.0e3
+    } else {
+        3.0e4
+    };
+    vol.max(30.0) as f64 * per
 }
 
 impl Destruction {
@@ -624,7 +644,7 @@ impl Destruction {
     /// `hit`: the aircraft itself went in here, so the wall shows its outline.
     /// `photo`: the building as the 3D tiles had it (cut out of them), which
     /// its pieces then carry.
-    pub fn collapse(&mut self, parts: &[Wreck], impact: DVec3, vel: DVec3, hit: Option<Hitter>, photo: Option<&SkinSrc>, emit: &mut Vec<(DVec3, Particle)>) {
+    pub fn collapse(&mut self, parts: &[Wreck], impact: DVec3, vel: DVec3, energy: f64, hit: Option<Hitter>, photo: Option<&SkinSrc>, emit: &mut Vec<(DVec3, Particle)>) {
         let Some(w0) = parts.first() else { return };
         if w0.ring.len() < 3 {
             return;
@@ -744,6 +764,15 @@ impl Destruction {
         let speed = vel.length() as f32;
         let dirv = vel.normalize_or_zero().as_vec3();
         let hole = if hit.is_some() { 4.0 + speed * 0.05 } else { 4.0 + cs * 1.3 + speed * 0.06 };
+        // What hit it, against what it takes to bring it down. Short of that
+        // the building stands, with the part round the impact broken out: more
+        // of it the nearer the limit. Only past it does the whole come down.
+        let sev = if energy.is_nan() { 0.0 } else { (energy / resistance(height, vol)) as f32 };
+        let global = sev >= 1.0;
+        let reach = if global { f32::INFINITY } else { hole * 0.9 * (1.0 + 3.0 * sev) };
+        // A tower goes as one block only when it is brought down as a whole,
+        // and later the closer it came to holding (fire and load work on it).
+        let big = tall && global;
         let dir64 = dirv.as_dvec3();
         // How far into the building the aircraft's outline is cut through the floors.
         let tunnel = 8.0 + speed * 0.12;
@@ -770,7 +799,7 @@ impl Destruction {
             u,
             height,
             ext,
-            tall,
+            tall: big,
             cut,
             pivot: base + u * cut as f64 - dh * far as f64,
             axis: u.cross(dh).normalize(),
@@ -781,7 +810,8 @@ impl Destruction {
             drop: 0.0,
             drop_v: 0.0,
             top_lower: cut,
-            delay: if tall { self.rng.range(1.4, 2.6) } else { 0.0 },
+            delay: if big { self.rng.range(1.4, 2.6) * (1.0 + (3.0 - sev).clamp(0.0, 3.0)) } else { 0.0 },
+            reach,
             // (an aircraft-shaped hole keeps its shape until the floors give)
             hole: if hit.is_some() { 0.0 } else { hole },
             t: 0.0,
@@ -1137,8 +1167,10 @@ impl Destruction {
                 }
                 continue;
             }
-            let upper = tall && (pc.z1 - pc.vh) > cut;
-            st.left += 1;
+            let upper = big && (pc.z1 - pc.vh) > cut;
+            if d < reach {
+                st.left += 1;
+            }
             let sk = match (&mut sgroup, &sassign) {
                 (Some(g), Some(a)) if pc.outer || a.area[pi] > 0.0 => g.alloc(pc.col0),
                 _ => NO_SKIN,
@@ -1153,7 +1185,7 @@ impl Destruction {
                 col: pc.col,
                 mesh: M_CUBE,
                 mat: pc.mat,
-                hold: if tall { 0.0 } else { 0.08 + d / 24.0 + self.rng.range(0.0, 0.35) },
+                hold: if big { 0.0 } else { 0.08 + d / 24.0 + self.rng.range(0.0, 0.35) },
                 state: 0,
                 bounces: 0,
                 group: si,
@@ -1202,7 +1234,10 @@ impl Destruction {
                 let prot = DQuat::from_mat3(&glam::DMat3::from_cols(h.right, fwd, h.right.cross(fwd))).normalize();
                 let zc = (c - base).dot(u) as f32;
                 let half = Vec3::new((xr - xl) * 0.5, 0.15, (y1 - y0) * 0.5);
-                st.left += 1;
+                // (it stays, the dark inside of the hole, while the building does)
+                if global {
+                    st.left += 1;
+                }
                 let mut ch = Chunk::loose(c, half, prot, DVec3::ZERO, DVec3::ZERO, [0.012, 0.011, 0.01], M_CUBE);
                 ch.state = 0;
                 ch.bit = false;
@@ -1210,7 +1245,7 @@ impl Destruction {
                 ch.hold = 0.1;
                 ch.z1 = zc + half.z;
                 ch.vh = half.z;
-                ch.dimp = 0.0;
+                ch.dimp = if global { 0.0 } else { f32::MAX };
                 ch.void = true;
                 self.chunks.push(ch);
             }
@@ -1364,6 +1399,10 @@ impl Destruction {
             }
             if c.state == 0 {
                 let s = &structs[c.group as usize];
+                // Too far from the impact to give way: it stands.
+                if c.dimp >= s.reach {
+                    continue;
+                }
                 let dribble = !s.gave && c.dimp < s.hole * 1.8 && rng.f() < dt * 0.35;
                 if s.tall {
                     if c.upper {
@@ -1466,7 +1505,7 @@ impl Destruction {
                     let vol = c.mass;
                     let sp2 = c.vel.length_squared() as f32;
                     if !c.bit && vn > 6.0 && h < un.roof + r + 1.0 && vol * sp2 > 3000.0 * bh * (bh / 10.0).max(1.0) && *crush_cool <= 0.0 && crush.len() < 4 && !crush.iter().any(|x| x.0 == t && x.1 == i) {
-                        crush.push((t, i, c.pos, c.vel));
+                        crush.push((t, i, c.pos, c.vel, 0.5 * c.mass as f64 * 200.0 * c.vel.length_squared()));
                         *crush_cool = 0.2;
                         c.under = Under::NONE;
                         continue;
@@ -1485,8 +1524,19 @@ impl Destruction {
                 }
                 if vn < -3.0 && c.bounces < 3 {
                     c.bounces += 1;
-                    c.vel = tang * 0.55 - up * vn * if c.bit { 0.3 } else { 0.15 };
-                    c.omega *= 0.5;
+                    let rest = if c.bit { 0.3 } else { 0.15 };
+                    // Coulomb friction: a sliding contact loses at most mu times the
+                    // normal impulse, so a hard hit stops its slide and a graze keeps it.
+                    let tl = tang.length();
+                    let keep = if tl > 1e-6 { (1.0 - 0.6 * (1.0 + rest) * -vn / tl).clamp(0.15, 0.95) } else { 0.0 };
+                    c.vel = tang * keep - up * vn * rest;
+                    // The contact spins the piece: round lumps pick up a roll, blocks a little.
+                    let roll = if is_rock(c.mesh) { 0.6 } else { 0.25 };
+                    c.omega = c.omega * 0.5 + up.cross(c.vel - up * c.vel.dot(up)) * (roll / r.max(0.2));
+                    let spin = c.omega.length();
+                    if spin > 20.0 {
+                        c.omega *= 20.0 / spin;
+                    }
                     if !c.bit || rng.f() < 0.3 {
                         landed.push((c.pos - up * r, c.half.max_element(), -vn as f32));
                     }
@@ -1866,5 +1916,46 @@ impl Destruction {
         self.chunks.clear();
         self.structs.clear();
         self.field.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Kinetic energy (J) of an aircraft of `kg` at `v` m/s.
+    fn ke(kg: f64, v: f64) -> f64 {
+        0.5 * kg * v * v
+    }
+
+    #[test]
+    fn a_cessna_does_not_bring_down_a_building() {
+        let cessna = ke(1100.0, 60.0);
+        // a house (12 x 10 x 7 m) and an office block (40 x 30 x 20 m) stand
+        assert!(cessna < resistance(7.0, 840.0));
+        assert!(cessna < resistance(20.0, 24_000.0));
+        // (and a tower stands, with a hole in it)
+        assert!(cessna < 0.01 * resistance(100.0, 250_000.0));
+        // but a shed or a garage does not stand up to it
+        assert!(cessna > resistance(3.0, 50.0));
+        assert!(cessna > resistance(3.0, 150.0));
+    }
+
+    #[test]
+    fn an_airliner_flattens_a_house_and_a_jet_hurts_an_office() {
+        let airliner = ke(290_000.0, 100.0);
+        assert!(airliner > resistance(7.0, 840.0));
+        // an airliner at speed can bring a tower down; a Cessna never could
+        assert!(ke(290_000.0, 250.0) > resistance(100.0, 250_000.0));
+        // a fighter at speed breaks a large part of a mid-rise, not all of it
+        let fighter = ke(15_500.0, 250.0);
+        assert!(fighter < resistance(20.0, 24_000.0));
+        assert!(fighter > 0.3 * resistance(20.0, 24_000.0));
+    }
+
+    #[test]
+    fn resistance_grows_with_size() {
+        assert!(resistance(20.0, 30_000.0) > resistance(20.0, 3_000.0));
+        assert!(resistance(40.0, 30_000.0) > resistance(20.0, 30_000.0));
     }
 }
