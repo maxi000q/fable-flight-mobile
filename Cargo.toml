@@ -26,8 +26,20 @@ rodio = { version = "0.23.0", default-features = false, features = ["playback"] 
 serde_json = "1.0.154"
 ureq = "3.5.1"
 wgpu = "30"
-winit = "0.30"
+winit = { version = "0.30", features = ["android-native-activity"] }
 roxmltree = "0.20"
 
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
+
+# Android: a dynamic library the app package loads, with winit's glue built
+# on NativeActivity (no Java to compile). Everywhere else it is a plain
+# binary as before; the feature is harmless off Android.
+[lib]
+name = "fablegame"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "fablegame"
+path = "src/main.rs"

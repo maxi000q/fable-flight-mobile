@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.maxi.fableflightmobile">
+
+    <!-- The GPU-backed flight sim needs a real GPU surface; phones that
+         report none are filtered out on the store. -->
+    <uses-feature android:name="android.hardware.opengles.aep" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:label="Fable Flight Mobile"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+        android:hardwareAccelerated="true">
+
+        <!-- NativeActivity loads the Rust library and hands it the window;
+             it also keeps the screen on while it is in the foreground. -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="Fable Flight Mobile"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:launchMode="singleTask"
+            android:exported="true">
+            <meta-data android:name="android.app.lib_name" android:value="fablegame" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+    <!-- 64-bit only: modern phones and the Play Store's current requirement. -->
+</manifest>
