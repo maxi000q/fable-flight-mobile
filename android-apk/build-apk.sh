@@ -30,11 +30,16 @@ build_variant() {
     local pkg="com.maxi.fableflightmobile${suffix}"
     local vcode vname ks kspass label
     if [ "$variant" = debug ]; then
-        vcode=105; vname="1.0.5-debug"
-        ks=debug.keystore; kspass=android
+        vcode=106; vname="1.0.6-debug"
+        # Sign debug with the same committed key as release: a fresh CI
+        # checkout has no debug.keystore, so generating one per build gave
+        # every APK a different signature and forced an uninstall (losing
+        # settings and cached tiles) on every update. One stable key lets
+        # updates install straight over the previous build.
+        ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Dbg"
     else
-        vcode=5; vname="1.0.5"
+        vcode=6; vname="1.0.6"
         ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Mobile"
     fi
@@ -79,14 +84,6 @@ build_variant() {
 
 # The icon resources, compiled once.
 "$BT/aapt2" compile --dir res -o resources.zip
-
-# The debug keystore (android/android), the usual debug one.
-if [ ! -f debug.keystore ]; then
-    keytool -genkeypair -keystore debug.keystore -alias fableflight \
-        -keyalg RSA -keysize 2048 -validity 10000 \
-        -storepass android -keypass android \
-        -dname "CN=Android Debug, OU=Mobile, O=maxi000q, C=US" >/dev/null 2>&1
-fi
 
 build_variant debug .debug
 build_variant release ""
