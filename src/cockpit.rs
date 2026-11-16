@@ -27,6 +27,8 @@ pub struct Head {
     /// the eye's adaptation, in stops over the outside exposure
     pub adapt: f32,
     pub inside: f32,
+    /// sitting in the other cockpit (`Spec::eye2`)
+    pub rear: bool,
 }
 
 /// The eye: its position and orientation in the body frame, the vertical field of view.
@@ -50,7 +52,7 @@ pub fn look(yaw: f64, pitch: f64) -> DQuat {
 
 impl Head {
     pub fn new(yaw: f64, pitch: f64) -> Head {
-        Head { yaw, pitch, lean: DVec3::ZERO, roll: 0.0, zoom: 1.0, zoom_s: 1.0, adapt: 0.55, inside: 0.5 }
+        Head { yaw, pitch, lean: DVec3::ZERO, roll: 0.0, zoom: 1.0, zoom_s: 1.0, adapt: 0.55, inside: 0.5, rear: false }
     }
 
     /// Snap to the asked-for look at once (entering the cockpit, respawning).
@@ -96,7 +98,7 @@ impl Head {
 
         let q = look(self.yaw, self.pitch);
         // The eyes swing round the neck joint behind them.
-        let eye = spec.eye.as_dvec3() + shake + self.lean - NECK + q * NECK;
+        let eye = spec.eye2.filter(|_| self.rear).unwrap_or(spec.eye).as_dvec3() + shake + self.lean - NECK + q * NECK;
 
         // Tilt part of the way back toward the horizon (only near level).
         let d = rot * (q * DVec3::NEG_Z);
@@ -161,7 +163,8 @@ fn lookup(t: &[f32], d: DVec3) -> f32 {
 }
 /// For each look direction from the seat, how much of it lands inside the cabin.
 fn table(spec: &'static Spec) -> &'static [f32] {
-    static T: [std::sync::OnceLock<Vec<f32>>; 4] = [const { std::sync::OnceLock::new() }; 4];
+    // (one for each type, by its id)
+    static T: [std::sync::OnceLock<Vec<f32>>; 8] = [const { std::sync::OnceLock::new() }; 8];
     T[spec.id as usize].get_or_init(|| {
         let mut t = vec![0.0f32; LW * LH];
         std::thread::scope(|s| {

@@ -101,6 +101,8 @@ pub const STRINGS: &[&str] = &[
     "25", "30",
     // The Hornet's cockpit (fa18/pit.rs, pit18.wgsl).
     "DANGER", "FIRE", "MASTER CAUTION", "EXTGH", "A/A", "A/G", "MASTER ARM", "EMERG JETT", "APU FIRE", "IR COOL", "HMD", "SPIN", "NIGHT", "CONT", "5", "6", "7", "8", "9", "0", "ENT", "I/P", "ADF", "VOL", "COMM 1", "COMM 2", "EMCON", "A/P", "IFF", "TCN", "ILS", "D/L", "BCN", "ON/OFF", "DAY", "BLK LVL", "W/B", "BAL", "AOA", "INS", "LOCK", "SHOOT", "MODE", "QTY", "ZONE", "INT", "CRS", "ECM", "LDG GEAR", "NOSE", "LEFT", "RIGHT", "HALF", "FULL", "EXT LT", "FCS", "COMM", "INTR LT", "SNSR", "KY-58", "DEFOG", "IDLE", "MIL", "MAX", "CANOPY", "EJECTION SEAT", "UPPER", "RWS", "TWS", "STT", "RSET", "SIL", "AZ", "EL", "OPR", "ADI", "HSI", "SA", "STORES", "SUPT", "BIT", "FPAS", "CHKLST", "UFC", "TAC", "WYPT", "SEQ1", "SCL", "DCLTR", "MK-82", "AIM-9X", "AIM-120", "GUN", "PRGM", "T/R", "RCV", "X", "Y", "71X", "M", "RPM", "TEMP", "NOZ", "OIL", "BINGO", "T", "I", "L", "R", "G", "N", "E", "S", "W", "DIST", "RNG", "40",
+    // The Blackbird's cockpits (sr71/pit.rs).
+    "TEB", "OXY", "UHF", "TACAN", "LIGHTS", "DEF", "SAS", "AUTOPILOT", "SPIKE", "FWD BYPASS", "AFT BYPASS", "L UNSTART", "R UNSTART", "CIT", "FUEL LOW", "CG", "PITOT HEAT", "OIL PRESS", "SENSOR", "VIEWSIGHT", "RADAR", "MAP PROJ",
 ];
 
 /// Index of a string in `STRINGS` (panics if it is missing: a typo in the layout).

@@ -62,9 +62,16 @@ pub struct Params {
     /// the engine is a turbofan (1) rather than a piston single (0), and its fan speed (fraction of N1)
     pub jet: f32,
     pub n1: f32,
-    /// the jet is a fighter's pair of afterburning engines (1), played from recordings; how far the afterburners are lit, 0..1
+    /// the jet is a fighter's pair of afterburning engines (1), played from recordings, or of
+    /// afterburning turbojets (2: lower, rougher, howling at part power); how far the afterburners are lit, 0..1
     pub fighter: f32,
     pub burner: f32,
+    /// there are four of those engines, in pods far behind the flight deck (1), not a pair behind the seat (0)
+    pub four: f32,
+    /// a rocket's engines (see `Rocket`): how hard they burn, 0..1 of all of them flat out, and
+    /// the air's density there as a fraction of sea level's (what carries their sound)
+    pub rocket: f32,
+    pub air: f32,
     pub g_load: f32,
     /// RMS vertical turbulence, m/s
     pub rough: f32,
@@ -699,6 +706,12 @@ fn clips() -> &'static Clips {
 /// thump and tear and crackle over the top, and in the cockpit all of it is a
 /// rumble under the hiss of the air conditioning. `Jet` adds the tones that
 /// follow the fan exactly.
+///
+/// A pair of turbojets (`Params::fighter` 2, the Phantom's J79s) is the same
+/// recordings played lower with less of the whine and more of the roar, a
+/// heavier afterburner, and the J79's howl: a hollow moan at part power
+/// (strongest around 80% on an approach, gone at idle and flat out), here two
+/// narrow resonances in noise that follow the revs.
 struct Fighter {
     c: Option<&'static Clips>,
     /// where each loop has got to: idle, military power, the afterburner's crackle and rumble, cockpit
@@ -709,16 +722,22 @@ struct Fighter {
     /// set each control tick: the loops' levels, and the idle and military loops' pitch
     gain: [f32; 5],
     pitch: [f64; 2],
+    /// the afterburner loops' pitch, and how hard they light
+    low: f64,
+    thump: f32,
+    howl: [Bq; 2],
+    howl_gain: f32,
 }
 
 impl Fighter {
     fn new() -> Self {
         // (The loops start apart, so two of them never beat against each other from the same place.)
-        Self { c: None, pos: [0.0, 31_000.0, 97_000.0, 203_000.0, 11_000.0], light: None, lit: false, gain: [0.0; 5], pitch: [1.0; 2] }
+        Self { c: None, pos: [0.0, 31_000.0, 97_000.0, 203_000.0, 11_000.0], light: None, lit: false, gain: [0.0; 5], pitch: [1.0; 2], low: 1.0, thump: 0.9, howl: [Bq::default(); 2], howl_gain: 0.0 }
     }
     fn control(&mut self, p: &Params, lit: bool) {
         if p.fighter < 0.5 {
             self.gain = [0.0; 5];
+            self.howl_gain = 0.0;
             self.lit = false;
             return;
         }
@@ -731,17 +750,31 @@ impl Fighter {
         // the afterburner well into the master limiter, which is how loud it is.)
         self.gain = [0.07 * (1.0 - smooth(0.3, 0.95, x)) * run, (0.05 + 0.95 * x.powf(1.6)) * 0.31 * run, 0.42 * p.burner * run, 0.50 * p.burner * run, (0.3 + 0.7 * x + 0.5 * p.burner) * 0.13 * run];
         self.pitch = [(1.0 + 0.9 * (n1 - 0.62)).clamp(0.4, 1.5) as f64, 0.86 + 0.14 * x as f64];
+        if p.fighter > 1.5 {
+            for (g, k) in self.gain.iter_mut().zip([0.55, 1.3, 1.25, 1.4, 1.15]) {
+                *g *= k;
+            }
+            self.pitch = [self.pitch[0] * 0.80, self.pitch[1] * 0.84];
+            (self.low, self.thump) = (0.88, 1.25);
+            // The howl: about 330 Hz at 80%, and a fainter fifth above it.
+            let f = 330.0 * (1.0 + 1.1 * (n1 - 0.8));
+            self.howl[0].bp(f, 28.0);
+            self.howl[1].bp(f * 1.5, 34.0);
+            self.howl_gain = smooth(0.64, 0.76, n1) * (1.0 - smooth(0.86, 0.96, n1)) * run;
+        } else {
+            (self.low, self.thump, self.howl_gain) = (1.0, 0.9, 0.0);
+        }
         if lit && !self.lit && run > 0.5 {
             self.light = Some(0.0);
         }
         self.lit = lit;
     }
-    /// Left and right as heard outside, and in the cockpit.
-    fn sample(&mut self) -> ([f32; 2], [f32; 2]) {
+    /// Left and right as heard outside, and in the cockpit. `nz`: white noise (the howl is made from it).
+    fn sample(&mut self, nz: f32) -> ([f32; 2], [f32; 2]) {
         let Some(c) = self.c else { return ([0.0; 2], [0.0; 2]) };
         let mut out = [0.0f32; 2];
         for (k, clip) in [&c.idle, &c.mil, &c.burn, &c.rumble].into_iter().enumerate() {
-            self.pos[k] = (self.pos[k] + clip.step * if k < 2 { self.pitch[k] } else { 1.0 }) % clip.len().max(1.0);
+            self.pos[k] = (self.pos[k] + clip.step * if k < 2 { self.pitch[k] } else { self.low }) % clip.len().max(1.0);
             let g = self.gain[k];
             if g > 1e-4 {
                 let (l, r) = clip.at(self.pos[k]);
@@ -752,14 +785,60 @@ impl Fighter {
         if let Some(t) = self.light {
             // A thump that dies away into the roar it started.
             let (l, r) = c.light.at(t);
-            let g = 0.9 * (-(t / c.light.step.max(1e-9) / RATE as f64) as f32 / 0.5).exp();
+            let g = self.thump * (-(t / c.light.step.max(1e-9) / RATE as f64) as f32 / 0.5).exp();
             out[0] += l * g;
             out[1] += r * g;
             self.light = (t + c.light.step < c.light.len() - 1.0).then_some(t + c.light.step);
         }
         self.pos[4] = (self.pos[4] + c.cabin.step) % c.cabin.len().max(1.0);
         let (l, r) = c.cabin.at(self.pos[4]);
-        (out, [l * self.gain[4], r * self.gain[4]])
+        let mut cab = [l * self.gain[4], r * self.gain[4]];
+        if self.howl_gain > 1e-4 {
+            let h = (self.howl[0].run(nz) + self.howl[1].run(nz) * 0.45) * 5.0 * self.howl_gain;
+            out = [out[0] + h, out[1] + h];
+            cab = [cab[0] + h * 0.12, cab[1] + h * 0.12];
+        }
+        (out, cab)
+    }
+}
+
+/// A cluster of rocket engines, synthesised: no tone in it at all, a huge low
+/// roar that crackles (the jets' shock cells tearing at the air), swelling
+/// with the engines lit; a thump as they light and a cough as they cut. The
+/// air carries it: thinning toward space it fades to nothing outside, while
+/// what comes up through the structure stays.
+struct Rocket {
+    roar: [Bq; 2],
+    sub: Bq,
+    hull: Bq,
+    tear: Slow,
+    /// the level it is at, the level a moment ago, and the thump of lighting or cutting
+    lvl: f32,
+    was: f32,
+    thump: f32,
+}
+
+impl Rocket {
+    fn new() -> Self {
+        Self { roar: [Bq::new(Bq::lp, 420.0, 0.6), Bq::new(Bq::lp, 520.0, 0.6)], sub: Bq::new(Bq::lp, 65.0, 0.9), hull: Bq::new(Bq::lp, 95.0, 1.2), tear: Slow::default(), lvl: 0.0, was: 0.0, thump: 0.0 }
+    }
+    fn control(&mut self, p: &Params) {
+        let lvl = p.rocket * p.live;
+        // (Called every CTRL samples: a sudden change is an engine lighting or cutting.)
+        self.thump = (self.thump * 0.985 + (lvl - self.was).abs() * 6.0).min(2.5);
+        self.was = lvl;
+        self.lvl += (lvl - self.lvl) * 0.2;
+    }
+    /// Left and right as heard outside, and what comes through the structure.
+    fn sample(&mut self, p: &Params, rng: &mut Rng) -> ([f32; 2], f32) {
+        let (a, b) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+        // The crackle: the roar torn into bursts, sharper the harder it burns.
+        let tear = self.tear.run(rng.range(-1.0, 1.0), 0.004).abs().min(2.5);
+        let g = (self.lvl.sqrt() * (0.55 + 0.9 * tear * self.lvl) + self.thump * 0.5) * 2.2;
+        let sub = self.sub.run(a + b) * 3.0;
+        let out = [(self.roar[0].run(a) * 1.6 + sub) * g, (self.roar[1].run(b) * 1.6 + sub) * g];
+        let carry = p.air.clamp(0.0, 1.0).sqrt();
+        ([out[0] * carry, out[1] * carry], self.hull.run(sub) * (self.lvl.sqrt() + self.thump * 0.5) * 0.9)
     }
 }
 
@@ -1110,6 +1189,7 @@ struct Synth {
     eng: Engine,
     jet: Jet,
     fighter: Fighter,
+    rocket: Rocket,
     wind: Wind,
     body: Body,
     voices: Vec<Voice>,
@@ -1137,6 +1217,7 @@ impl Synth {
             eng: Engine::new(),
             jet: Jet::new(),
             fighter: Fighter::new(),
+            rocket: Rocket::new(),
             wind: Wind::new(),
             body: Body::new(),
             voices: Vec::with_capacity(MAX_VOICES),
@@ -1268,6 +1349,8 @@ impl Synth {
         sm(&mut p.n1, t.n1, 0.12);
         sm(&mut p.burner, t.burner, 0.05);
         (p.jet, p.fighter, p.vne) = (t.jet, t.fighter, t.vne);
+        p.four = t.four;
+        (p.rocket, p.air) = (t.rocket, t.air);
         p.health = if t.health <= 0.0 { 0.0 } else { p.health };
         p.warn = t.warn;
         if p.live < 0.01 {
@@ -1278,6 +1361,7 @@ impl Synth {
         self.eng.control(&p);
         self.jet.control(&p);
         self.fighter.control(&p, self.t.burner > 0.5);
+        self.rocket.control(&p);
         self.wind.control(&p);
         self.body.control(&p);
         for v in &mut self.voices {
@@ -1324,7 +1408,8 @@ impl Iterator for Synth {
         let (ex, prop, mech) = if p.live > 0.001 && p.rpm > 1.0 {
             if fighter {
                 // The recordings carry the roar: of the synthesised engine only the fan's tones are wanted.
-                (self.jet.sample(&Params { power: p.power.min(1.0) * 0.12, ..p }, rng) * 0.3, 0.0, 0.0)
+                // (A turbojet has no fan to sing: less of them still.)
+                (self.jet.sample(&Params { power: p.power.min(1.0) * 0.12, ..p }, rng) * if p.fighter > 1.5 { 0.12 } else { 0.3 }, 0.0, 0.0)
             } else if jet {
                 (self.jet.sample(&p, rng), 0.0, 0.0)
             } else {
@@ -1333,7 +1418,12 @@ impl Iterator for Synth {
         } else {
             (0.0, 0.0, 0.0)
         };
-        let (fx, fc) = if fighter && p.live > 0.001 { self.fighter.sample() } else { ([0.0; 2], [0.0; 2]) };
+        let (fx, fc) = if fighter && p.live > 0.001 { self.fighter.sample(if p.fighter > 1.5 { rng.f() } else { 0.0 }) } else { ([0.0; 2], [0.0; 2]) };
+        // (Four of them rather than two: 3 dB more outside; and far behind the flight deck: much less of them aboard.)
+        let (fx, fc, f_in) = if p.four > 0.5 { ([fx[0] * 1.41, fx[1] * 1.41], [fc[0] * 0.35, fc[1] * 0.35], 0.025) } else { (fx, fc, 0.10) };
+        // (A rocket is heard from far further off than the chase camera sits.)
+        let (rx, rc) = if self.rocket.lvl > 1e-4 || self.rocket.thump > 1e-3 { self.rocket.sample(&p, rng) } else { ([0.0; 2], 0.0) };
+        let rg = (150.0 / (p.dist + 60.0)).min(1.5);
         let w = self.wind.sample(&p, rng);
         let b = self.body.sample(&p, rng);
         let (mut sl, mut sr, mut ml, mut mr) = (b[0], b[1], b[2], b[3]);
@@ -1362,8 +1452,8 @@ impl Iterator for Synth {
         let dg = self.dist_gain;
         let wg = dg.sqrt().min(1.0);
         let eng = (ex + prop * 1.1 + mech * 0.6) * if jet { 3.2 } else { 1.0 };
-        let mut el = (eng + fx[0] + ml + sl * 0.3) * dg + w[0] * wg;
-        let mut er = (eng + fx[1] + mr + sr * 0.3) * dg + w[1] * wg;
+        let mut el = (eng + fx[0] + ml + sl * 0.3) * dg + w[0] * wg + rx[0] * rg;
+        let mut er = (eng + fx[1] + mr + sr * 0.3) * dg + w[1] * wg + rx[1] * rg;
         let k = c.abs_k;
         c.abs[0] += (el - c.abs[0]) * k;
         c.abs[1] += (c.abs[0] - c.abs[1]) * k;
@@ -1378,14 +1468,14 @@ impl Iterator for Synth {
         if p.cabin > 0.001 {
             // (An airliner's flight deck is far ahead of its engines, and well insulated.)
             // (A fighter's engines are right behind the seat: more of them comes through the airframe.)
-            let ie = (ex * 1.0 + prop * 1.5 + mech * 0.3) * if jet { 0.18 } else { 1.0 } + (fx[0] + fx[1]) * 0.10;
+            let ie = (ex * 1.0 + prop * 1.5 + mech * 0.3) * if jet { 0.18 } else { 1.0 } + (fx[0] + fx[1]) * f_in;
             let ie = c.eng_lp[0].run(ie);
             let ie = c.eng_lp[1].run(ie);
             let ie = c.eng_boom.run(ie) * 0.75 + ex * 0.03;
             c.mid_lp[0] += (ml - c.mid_lp[0]) * c.mid_k;
             c.mid_lp[1] += (mr - c.mid_lp[1]) * c.mid_k;
-            il = ie + w[2] + c.mid_lp[0] * 0.8 + sl + fc[0];
-            ir = ie + w[3] + c.mid_lp[1] * 0.8 + sr + fc[1];
+            il = ie + w[2] + c.mid_lp[0] * 0.8 + sl + fc[0] + rc;
+            ir = ie + w[3] + c.mid_lp[1] * 0.8 + sr + fc[1] + rc;
             let m = (il + ir) * 0.5;
             c.buf[c.pos] = m;
             for (d, g, side) in TAPS {
@@ -1563,6 +1653,53 @@ mod tests {
     }
 
     #[test]
+    fn turbojets_howl_at_part_power() {
+        let jet = |fighter: f32, n1: f32, power: f32, burner: f32| Params { jet: 1.0, fighter, burner, n1, rpm: n1 * 7_460.0, power, throttle: power, airspeed: 0.0, dist: 26.0, vne: 170.0, ..flying() };
+        // How much of the sound is in the howl's band (about 330 Hz at 80%).
+        let band = |x: &[[f32; 2]], f: f32| {
+            let mut b = Bq::new(Bq::bp, f, 12.0);
+            let y: Vec<[f32; 2]> = x.iter().map(|s| { let v = b.run(s[0]); [v, v] }).collect();
+            rms(&y) / rms(x)
+        };
+        let part = render(jet(2.0, 0.8, 0.35, 0.0), &[], 1.0);
+        let (howl, plain) = (band(&part, 330.0), band(&render(jet(1.0, 0.8, 0.35, 0.0), &[], 1.0), 330.0));
+        let (j79, f404) = (rms(&render(jet(2.0, 1.0, 1.0, 0.0), &[], 1.0)), rms(&render(jet(1.0, 1.0, 1.0, 0.0), &[], 1.0)));
+        let (wet, dry) = (rms(&render(jet(2.0, 1.0, 1.8, 1.0), &[], 1.0)), j79);
+        println!("turbojets: the howl's band holds {:.2} of the sound at 80% (the turbofans' {:.2}); military power {:.1} dB over the turbofans', afterburner {:.1} dB more", howl, plain, db(j79, f404), db(wet, dry));
+        assert!(howl > 2.0 * plain, "no howl at 80%: {howl:.3} against {plain:.3}");
+        assert!(j79 >= f404 && wet > dry);
+        // Four of them under an airliner's wing: louder outside, and much quieter on a flight deck far ahead of them.
+        let quad = |cabin: f32, four: f32| rms(&render(Params { cabin, four, ..jet(2.0, 1.0, 1.0, 0.0) }, &[], 1.0));
+        println!("four turbojets: {:.1} dB over a pair outside, {:.1} dB under it aboard", db(quad(0.0, 1.0), quad(0.0, 0.0)), db(quad(1.0, 0.0), quad(1.0, 1.0)));
+        assert!(quad(0.0, 1.0) > 1.2 * quad(0.0, 0.0) && quad(1.0, 1.0) < 0.6 * quad(1.0, 0.0));
+        // It is there on an approach only: not at idle, not flat out.
+        for (n1, there) in [(0.62, false), (0.8, true), (1.0, false)] {
+            let shared = Arc::new(Shared::default());
+            *shared.params.lock() = jet(2.0, n1, 0.3, 0.0);
+            let mut s = Synth::new(shared);
+            s.p = jet(2.0, n1, 0.3, 0.0);
+            for _ in 0..RATE {
+                s.next();
+            }
+            assert_eq!(s.fighter.howl_gain > 0.5, there, "howl at {n1}: {}", s.fighter.howl_gain);
+            assert!(there || s.fighter.howl_gain < 0.01);
+        }
+    }
+
+    #[test]
+    fn rockets_roar_and_fall_silent_in_space() {
+        let burn = |rocket: f32, air: f32, cabin: f32| Params { rocket, air, cabin, rpm: 0.0, airspeed: 0.0, dist: 230.0, ..flying() };
+        let (pad, part, quiet) = (rms(&render(burn(1.0, 1.0, 0.0), &[], 1.0)), rms(&render(burn(0.09, 1.0, 0.0), &[], 1.0)), rms(&render(burn(0.0, 1.0, 0.0), &[], 1.0)));
+        let (space, aboard) = (rms(&render(burn(1.0, 0.0, 0.0), &[], 1.0)), rms(&render(burn(1.0, 0.0, 1.0), &[], 1.0)));
+        println!("rocket: all engines {:.1} dB over three of 33, {:.1} dB over silence; in a vacuum {:.1} dB down outside, {:.1} dB aboard (re all engines at sea level)", db(pad, part), db(pad, quiet.max(1e-6)), db(space.max(1e-6), pad), db(aboard, pad));
+        assert!(pad > 3.0 * part && part > 3.0 * quiet, "{pad} {part} {quiet}");
+        assert!(space < 0.05 * pad, "heard in a vacuum: {space} against {pad}");
+        assert!(aboard > 5.0 * space.max(1e-6), "nothing through the structure: {aboard}");
+        // Low and toneless: most of it under a few hundred hertz.
+        assert!(bright(&render(burn(1.0, 1.0, 0.0), &[], 1.0)) < 0.25);
+    }
+
+    #[test]
     fn warnings_sound() {
         let base = Params { airspeed: 40.0, rpm: 0.0, ..flying() };
         let quiet = rms(&render(base, &[], 1.0));
@@ -1572,7 +1709,8 @@ mod tests {
         }
     }
 
-    /// `AUDIO_DEMO=/path/demo.wav cargo test audio_demo -- --nocapture` writes a tour of the sounds.
+    /// `AUDIO_DEMO=/path/demo.wav cargo test audio_demo -- --nocapture` writes a tour of the sounds
+    /// (`AUDIO_SCENES=turbojets`: only the scenes with that in their name).
     #[test]
     fn audio_demo() {
         let Ok(path) = std::env::var("AUDIO_DEMO") else { return };
@@ -1599,7 +1737,13 @@ mod tests {
             ("tree strike", f, vec![Event::Crunch(1.0)], 2.0),
             ("crash", Params { live: 0.0, fire: 0.8, ..f }, vec![Event::Boom(1.5)], 5.0),
             ("crash into water", Params { live: 0.0, ..f }, vec![Event::Splash(1.5)], 5.0),
+            ("turbojets idling", Params { jet: 1.0, fighter: 2.0, n1: 0.62, rpm: 4600.0, power: 0.06, throttle: 0.0, airspeed: 0.0, dist: 26.0, ..f }, vec![], 4.0),
+            ("turbojets at 80%, howling", Params { jet: 1.0, fighter: 2.0, n1: 0.8, rpm: 6000.0, power: 0.35, throttle: 0.5, airspeed: 30.0, dist: 26.0, ..f }, vec![], 5.0),
+            ("turbojets at 80%, cockpit", Params { jet: 1.0, fighter: 2.0, n1: 0.8, rpm: 6000.0, power: 0.35, throttle: 0.5, airspeed: 30.0, cabin: 1.0, ..f }, vec![], 4.0),
+            ("turbojets at military power", Params { jet: 1.0, fighter: 2.0, n1: 1.0, rpm: 7460.0, power: 1.0, throttle: 1.0, airspeed: 30.0, dist: 26.0, ..f }, vec![], 4.0),
+            ("turbojets in afterburner", Params { jet: 1.0, fighter: 2.0, n1: 1.0, rpm: 7460.0, power: 1.8, throttle: 1.0, burner: 1.0, airspeed: 30.0, dist: 26.0, ..f }, vec![], 5.0),
         ];
+        let scenes: Vec<_> = scenes.into_iter().filter(|s| std::env::var("AUDIO_SCENES").map_or(true, |k| s.0.contains(&k))).collect();
         let mut out: Vec<i16> = Vec::new();
         for (name, p, ev, secs) in scenes {
             let x = render(p, &ev, secs);
