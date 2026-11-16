@@ -1095,6 +1095,8 @@ def skin_door(name, s, x0, x1, y0, y1, hinge_x, open_angle, nx=10, ny=12, t=0.01
         rot = Matrix.Translation(h0) @ Matrix.Rotation(open_angle, 4, axis) @ Matrix.Translation(-h0)
     for v in g.bm.verts:
         v.co = rot @ v.co
+    if s < 0:
+        bmesh.ops.reverse_faces(g.bm, faces=g.bm.faces)  # mirrored: wound the other way
     # A hinge bracket or two along the hinge line, inside.
     for f in (0.2, 0.8):
         hp = h0.lerp(h1, f)
