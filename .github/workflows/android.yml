@@ -50,7 +50,7 @@ jobs:
           mkdir -p android-apk/jniLibs/arm64-v8a
           cp target/aarch64-linux-android/release/libfablegame.so android-apk/jniLibs/arm64-v8a/
           cd android-apk
-          OUT="$GITHUB_WORKSPACE" ./build-apk.sh
+          OUT="$GITHUB_WORKSPACE" bash build-apk.sh
       - uses: actions/upload-artifact@v4
         with:
           name: FableFlightMobile-1.0.4-apks
