@@ -28,6 +28,10 @@ fn shaders_validate() {
     let ov = format!("const SAMPLES = {samples}u;\nconst CS_RES = {cs_res}.0;\n");
     let ov_det = format!("{ov}const N = {det_n};\n");
     let mut ok = check("noise3d", include_str!("../src/shaders/noise3d.wgsl"));
+    // Mirrors render.rs's assembly exactly: every shading pass gets
+    // {ov}{common}, and ONLY resolve (self-contained) goes without common —
+    // 1.0.8 shipped dead because render.rs drifted from this mirror and
+    // dropped common from composite/trees. Keep the two in step.
     ok &= check("resolve", &format!("{ov}{}", include_str!("../src/shaders/resolve.wgsl")));
     ok &= check("detail", &format!("{ov_det}{}", include_str!("../src/shaders/detail.wgsl")));
     ok &= check("ocean", include_str!("../src/shaders/ocean.wgsl"));

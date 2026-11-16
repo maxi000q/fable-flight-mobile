@@ -1396,7 +1396,12 @@ impl Renderer {
         let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
         let m_obj = module("plane", &format!("{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl")));
         let sky = include_str!("shaders/sky.wgsl");
-        let m_comp = module_s("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
+        // composite and trees read G/Cascade from common.wgsl like every
+        // shading pass; only resolve is self-contained (SAMPLES alone), so it
+        // alone takes the `_s` (no common) assembly. Dropping common here is
+        // what killed start-up on 1.0.8: the modules failed to parse, the
+        // composite pipeline came back invalid and the driver lost the device.
+        let m_comp = module("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
         let m_cloud = module("clouds", &format!("{sky}\n{}", include_str!("shaders/clouds.wgsl")));
         let m_post = module("post", include_str!("shaders/post.wgsl"));
         let m_psim = module("psim", include_str!("shaders/particles_sim.wgsl"));
@@ -1404,7 +1409,7 @@ impl Renderer {
         let m_road = module("roads", include_str!("shaders/roads.wgsl"));
         let m_field = module("airfield", include_str!("shaders/airfield.wgsl"));
         let m_lights = module("lights", include_str!("shaders/lights.wgsl"));
-        let m_tree = module_s("trees", include_str!("shaders/trees.wgsl"));
+        let m_tree = module("trees", include_str!("shaders/trees.wgsl"));
         let m_inst = module("inst", &format!("{facade}\n{}", include_str!("shaders/inst.wgsl")));
         let m_vol = module("vol", include_str!("shaders/vol.wgsl"));
         let m_ao = module("ao", include_str!("shaders/ao.wgsl"));
