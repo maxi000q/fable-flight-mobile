@@ -790,7 +790,41 @@ pub struct Model {
     pub groups: Vec<Mesh>,
 }
 
+/// One of the outside lights, found from its lens: the glow sprites and the
+/// landing lights' beam (main.rs) sit where the lenses are modelled.
+#[derive(Clone, Copy, Debug)]
+pub struct Lamp {
+    pub piece: usize,
+    /// the lens's middle, body frame at rest
+    pub at: Vec3,
+    /// which light (`lamp::*`)
+    pub id: u32,
+}
+
 impl Model {
+    /// The outside lights (navigation, tail, strobes, beacons, landing): the
+    /// lens vertices of each, gathered into one lamp per lens.
+    pub fn lamps(&self) -> Vec<Lamp> {
+        let mut acc: Vec<(Lamp, Vec3, f32)> = Vec::new();
+        for (pi, p) in self.pieces.iter().enumerate() {
+            for v in &p.mesh.v {
+                if v.mat[0] != mat::LAMP || v.mat[3] > lamp::LANDING + 0.5 {
+                    continue;
+                }
+                let id = v.mat[3].round() as u32;
+                let at = Vec3::from(v.pos);
+                match acc.iter_mut().find(|(l, s, n)| l.piece == pi && l.id == id && (*s / *n).distance(at) < 0.6) {
+                    Some((_, s, n)) => {
+                        *s += at;
+                        *n += 1.0;
+                    }
+                    None => acc.push((Lamp { piece: pi, at, id }, at, 1.0)),
+                }
+            }
+        }
+        acc.into_iter().map(|(l, s, n)| Lamp { at: s / n, ..l }).collect()
+    }
+
     /// Finish a model: split the cut pieces and merge the groups.
     pub fn finish(mut pieces: Vec<Piece>) -> Model {
         split_cut(&mut pieces);

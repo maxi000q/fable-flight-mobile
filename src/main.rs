@@ -141,6 +141,8 @@ struct Loaded {
     /// everything within the aircraft's bounds, and a little around them for
     /// the gear, flaps and control surfaces as they move
     plane_box: [[f32; 4]; 2],
+    /// its outside lights (glow sprites, landing-light beam)
+    lamps: Vec<airframe::Lamp>,
 }
 
 impl Loaded {
@@ -174,7 +176,8 @@ impl Loaded {
             .collect();
         let (c, h) = model.bounds();
         let plane_box = [c.extend(0.0).to_array(), (h + Vec3::splat(0.25 * spec.span / 5.5)).extend(0.0).to_array()];
-        Loaded { spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, plane_box }
+        let lamps = model.lamps();
+        Loaded { spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, plane_box, lamps }
     }
 }
 
@@ -593,6 +596,8 @@ struct Game {
     prev_plane: Mat4,
     /// centre and half size of the aircraft in its body frame
     plane_box: [[f32; 4]; 2],
+    /// the outside lights of the aircraft being flown
+    lamps: Vec<airframe::Lamp>,
     frame: u64,
     fps: f64,
     /// --fps-log: on, start of this second, frames in it, its slowest frame
@@ -765,7 +770,7 @@ impl Game {
         }
         let mut world = world::World::new(sources::Loader::new(src.clone(), 14), args.max_zoom);
         let mut r = r;
-        let Loaded { spec: _, model, piece_mesh, group_mesh, piece_cut, group_pivots, plane_box } = Loaded::build(spec, &mut r);
+        let Loaded { spec: _, model, piece_mesh, group_mesh, piece_cut, group_pivots, plane_box, lamps } = Loaded::build(spec, &mut r);
         let tm = trees::build_meshes();
         r.set_tree_meshes(&tm.meshes);
         world.tree_dims = tm.dims;
@@ -823,7 +828,7 @@ impl Game {
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len()], window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box,
+            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, parking_brake: false, cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
@@ -890,6 +895,7 @@ impl Game {
             piece_cut: std::mem::replace(&mut self.piece_cut, next.piece_cut),
             group_pivots: std::mem::replace(&mut self.group_pivots, next.group_pivots),
             plane_box: std::mem::replace(&mut self.plane_box, next.plane_box),
+            lamps: std::mem::replace(&mut self.lamps, next.lamps),
         };
         self.hangar.push(old);
         self.spec = spec;
@@ -971,6 +977,74 @@ impl Game {
             [g[4][0], local as f32, p.gear as f32, p.flap_deg() as f32],
             [1000.0 + card.rem_euclid(360.0), strobe, beacon as f32, if p.gear_down { 1.0 } else { 0.0 }],
         ]
+    }
+
+    /// The flown aircraft's outside lights: a glow sprite on each lens
+    /// (lights.wgsl, as the traffic has), and the landing lights' beams
+    /// (Globals `spot`, common.wgsl `spot_light`). `p5` is the lights' state
+    /// (instruments row 5: nav on, strobe, beacon, landing).
+    fn own_lights(&self, base: &Mat4, pose: &[Mat4], p5: [f32; 4], g: &mut render::Globals, out: &mut Vec<airfield::Light>) {
+        use airfield::{L_GREEN, L_RED, L_STROBE, L_WHITE};
+        use airframe::lamp;
+        let dm = &self.plane.dmg;
+        let big = self.spec.span > 30.0;
+        let nav = if p5[0] >= 999.0 { 1.0 } else { 0.0 };
+        let mut beam: [(Vec3, f32); 2] = [(Vec3::ZERO, 0.0); 2];
+        let mut beam_dir = Vec3::ZERO;
+        let mid = {
+            let xs: Vec<f32> = self.lamps.iter().filter(|l| l.id == lamp::LANDING as u32 && l.at.x.abs() > 0.5).map(|l| l.at.x).collect();
+            xs.iter().sum::<f32>() / xs.len().max(1) as f32
+        };
+        for l in &self.lamps {
+            let p = &self.model.pieces[l.piece];
+            if dm.hidden(p) || !dm.tears_for(p).iter().all(|t| t.keeps(l.at)) {
+                continue;
+            }
+            let m = *base * pose[l.piece];
+            let at = m.transform_point3(l.at);
+            let fwd = m.transform_vector3(Vec3::NEG_Z).normalize();
+            let right = m.transform_vector3(Vec3::X).normalize();
+            // The navigation lights show only in their sectors: red ahead and
+            // out to the left, green to the right, white behind; each fades
+            // out a little past 90 degrees from the middle of its sector, so
+            // all show from above and below (lights.wgsl).
+            let (inten, col, dir, spread) = match l.id as f32 {
+                lamp::NAV_RED => (40.0 * nav, L_RED, (fwd - right).normalize(), -0.35),
+                lamp::NAV_GREEN => (40.0 * nav, L_GREEN, (fwd + right).normalize(), -0.35),
+                lamp::TAIL => (25.0 * nav, L_WHITE, -fwd, -0.35),
+                lamp::STROBE => (1600.0 * p5[1], L_STROBE, Vec3::ZERO, 0.0),
+                lamp::BEACON => (160.0 * p5[2], L_RED, Vec3::ZERO, 0.0),
+                _ => (if big { 6000.0 } else { 3000.0 } * p5[3], L_WHITE, fwd, 0.86),
+            };
+            if l.id == lamp::LANDING as u32 && p5[3] > 0.0 && l.at.x.abs() > 0.5 {
+                let k = (l.at.x > mid) as usize;
+                beam[k].0 += at;
+                beam[k].1 += 1.0;
+                beam_dir = fwd;
+            }
+            if inten > 0.0 && out.len() < render::MAX_DYN_LIGHTS {
+                out.push(airfield::Light { pos: at.into(), inten, dir: dir.into(), spread, col: [col[0], col[1], col[2], 3], fx: [0, 0, 255, 1] });
+            }
+        }
+        // The beams: aimed a little below the aircraft's axis, as they are
+        // set to light the runway ahead in the flare; per side about 3e5 cd
+        // on an airliner, 1e5 on a light aircraft (Globals units: cd / 1e4 /
+        // pi), times 60: MOON_E is far brighter than the real moon, and the
+        // beams graze the runway, so true-to-life ones would hardly show
+        // against moonlit pavement.
+        if beam_dir != Vec3::ZERO {
+            let up = (*base * pose[0]).transform_vector3(Vec3::Y).normalize();
+            let dir = (beam_dir - up * 0.11).normalize();
+            let per_side = if big { 3.0e5 } else { 1.0e5 } / 1.0e4 / std::f32::consts::PI * 60.0;
+            let n = beam.iter().filter(|b| b.1 > 0.0).count() as f32;
+            for (i, b) in beam.iter().enumerate() {
+                if b.1 > 0.0 {
+                    let at = b.0 / b.1;
+                    g.spot[i] = [at.x, at.y, at.z, per_side * 2.0 / n];
+                }
+            }
+            g.spot[2] = [dir.x, dir.y, dir.z, 14f32.to_radians().cos()];
+        }
     }
 
     fn sun_dir(&self) -> DVec3 {
@@ -2819,6 +2893,7 @@ impl Game {
             glow_c: glow[0],
             glow_e: glow[1],
             glow_n: glow[2],
+            spot: [[0.0; 4]; 3],
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -2895,6 +2970,7 @@ impl Game {
             }
         }
         let params = self.instruments(agl);
+        let mut own_lights = Vec::new();
         if !self.crashed && !in_menu {
             let base = Mat4::from_rotation_translation(self.plane.rot.as_quat(), (self.plane.pos - cam).as_vec3());
             let pose = self.plane.pose(&self.model.pieces);
@@ -2968,13 +3044,14 @@ impl Game {
                     });
                 }
             }
+            self.own_lights(&base, &pose, params[5], &mut g, &mut own_lights);
         }
         if !in_menu {
             self.sheds.draw(cam, params, &mut objs);
         }
         let mut insts = Vec::new();
         let mut fall = Vec::new();
-        let mut air_lights = Vec::new();
+        let mut air_lights = own_lights;
         if !in_menu {
             let local = (self.utc + clon.to_degrees() / 15.0).rem_euclid(24.0);
             let sun_up = geo::enu(cam).2.dot(self.sun_dir());
