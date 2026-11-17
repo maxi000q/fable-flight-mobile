@@ -809,6 +809,9 @@ pub struct Renderer {
     clouds_on: bool,
     cloud_shadows_on: bool,
     fx_on: bool,
+    /// the composite is the light one (StartupProfile::comp_lite): its bind
+    /// group holds only the resolved G-buffer, never the sample copies
+    comp_lite: bool,
     /// cloud raymarch step length relative to High (clouds.wgsl)
     pub cloud_step: f32,
     casc_ub: wgpu::Buffer,
@@ -1372,11 +1375,21 @@ pub struct StartupProfile {
     pub ao: bool,
     pub taa: bool,
     pub logo: bool,
+    /// Safe-mode composite. The full one's module — the water with its
+    /// breakers and reflections, the atmosphere marches — is the heaviest
+    /// shader of the set, and the one an Adreno 619 reliably loses its GPU
+    /// device to while compiling (every 1.0.7-1.0.14 start died at the
+    /// composite pipeline, four attempts in a row on the 1.0.14 log). The
+    /// light composite shades the same resolved G-buffer with a flat sea, a
+    /// simple sky and distance haze: a few dozen instructions the driver
+    /// cannot choke on. Game::new turns it on after a loss at the composite
+    /// and keeps it on across runs (GpuBlacklist).
+    pub comp_lite: bool,
 }
 
 impl StartupProfile {
     pub fn full(scale: f32) -> Self {
-        Self { scale, clouds: true, cloud_shadows: true, fx: true, ao: true, taa: true, logo: true }
+        Self { scale, clouds: true, cloud_shadows: true, fx: true, ao: true, taa: true, logo: true, comp_lite: false }
     }
 }
 
@@ -1397,6 +1410,7 @@ pub fn lost_feature() -> Option<&'static str> {
         "gtao" | "ao blur" => "ao",
         "taa" | "final taa" => "taa",
         "logo" => "logo",
+        "composite" | "composite lite" => "composite",
         _ => return None,
     })
 }
@@ -1633,12 +1647,38 @@ impl Renderer {
         let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
         let m_obj = module("plane", &format!("{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl")));
         let sky = include_str!("shaders/sky.wgsl");
+        // The G-buffer's sample copies (composite bindings 5-8): multisampled
+        // where MSAA > 1, plain textures at MSAA 1 — a 1x texture is not a
+        // multisampled resource to wgpu, so the shader declarations here and
+        // the layouts below must agree on which. composite.wgsl takes the
+        // declarations and its per-sample loads from this prelude.
+        let (ms_ty, ms_depth_ty, ms_idx) = if MSAA > 1 {
+            ("texture_multisampled_2d<f32>", "texture_depth_multisampled_2d", "i")
+        } else {
+            ("texture_2d<f32>", "texture_depth_2d", "0")
+        };
+        let comp_ms = format!(
+            "@group(1) @binding(5) var t_color_ms: {ms_ty};\n\
+             @group(1) @binding(6) var t_aux_ms: {ms_ty};\n\
+             @group(1) @binding(7) var t_depth_ms: {ms_depth_ty};\n\
+             @group(1) @binding(8) var t_amb_ms: {ms_ty};\n\
+             fn ms_color(px: vec2i, i: u32) -> vec4f {{ return textureLoad(t_color_ms, px, {ms_idx}); }}\n\
+             fn ms_aux(px: vec2i, i: u32) -> vec4f {{ return textureLoad(t_aux_ms, px, {ms_idx}); }}\n\
+             fn ms_depth(px: vec2i, i: u32) -> f32 {{ return textureLoad(t_depth_ms, px, {ms_idx}); }}\n\
+             fn ms_amb(px: vec2i, i: u32) -> f32 {{ return textureLoad(t_amb_ms, px, {ms_idx}).r; }}\n"
+        );
         // composite and trees read G/Cascade from common.wgsl like every
         // shading pass; only resolve is self-contained (SAMPLES alone), so it
         // alone takes the `_s` (no common) assembly. Dropping common here is
         // what killed start-up on 1.0.8: the modules failed to parse, the
         // composite pipeline came back invalid and the driver lost the device.
-        let m_comp = module("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
+        let m_comp = if prof.comp_lite {
+            // Safe mode (StartupProfile::comp_lite): a small self-contained
+            // shading of the resolved G-buffer — no sky.wgsl, no marches.
+            module("composite lite", include_str!("shaders/composite_lite.wgsl"))
+        } else {
+            module("composite", &format!("{comp_ms}\n{sky}\n{}", include_str!("shaders/composite.wgsl")))
+        };
         let m_cloud = module("clouds", &format!("{sky}\n{}", include_str!("shaders/clouds.wgsl")));
         let m_post = module("post", include_str!("shaders/post.wgsl"));
         let m_psim = module("psim", include_str!("shaders/particles_sim.wgsl"));
@@ -1651,7 +1691,23 @@ impl Renderer {
         let m_vol = module("vol", include_str!("shaders/vol.wgsl"));
         let m_ao = module("ao", include_str!("shaders/ao.wgsl"));
         let m_taa = module("taa", include_str!("shaders/taa.wgsl"));
-        let m_dres = module_s("resolve", include_str!("shaders/resolve.wgsl"));
+        let m_dres = if MSAA > 1 {
+            module_s("resolve", include_str!("shaders/resolve.wgsl"))
+        } else {
+            // At one sample the collapse is a plain copy, and the depth
+            // texture is not a multisampled resource (see comp_ms above).
+            module_s(
+                "resolve",
+                "@group(0) @binding(0) var t_d: texture_depth_2d;\n\
+                 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n\
+                   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));\n\
+                   return vec4f(p * 2.0 - 1.0, 0.0, 1.0);\n\
+                 }\n\
+                 @fragment fn fs(@builtin(position) p: vec4f) -> @builtin(frag_depth) f32 {\n\
+                   return textureLoad(t_d, vec2i(p.xy), 0);\n\
+                 }\n",
+            )
+        };
         // A pipeline that draws nothing, in place of one whose real shader
         // has killed this GPU before (see StartupProfile): the same layouts
         // and formats, so the frame's passes stay valid — the effect is
@@ -1915,7 +1971,7 @@ impl Renderer {
         let l_casc = layout("cascade", &[ub_entry(0, true, 64)]);
         let l_dres = layout(
             "depth resolve",
-            &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: d2, multisampled: true }, count: None }],
+            &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: d2, multisampled: MSAA > 1 }, count: None }],
         );
         let l_obj = layout("obj", &[ub_entry(0, true, std::mem::size_of::<ObjU>() as u64), tex_entry(1, wgpu::TextureViewDimension::D2Array, false), ub_entry(2, false, 32)]);
         let l_glass = layout("glass", &[tex_entry(1, d2, false), tex_entry(2, d2, true)]);
@@ -1925,13 +1981,19 @@ impl Renderer {
             ty: wgpu::BindingType::Texture {
                 sample_type: if depth { wgpu::TextureSampleType::Depth } else { wgpu::TextureSampleType::Float { filterable: false } },
                 view_dimension: d2,
-                multisampled: true,
+                multisampled: MSAA > 1,
             },
             count: None,
         };
         let l_composite = layout("composite", &[
             tex_entry(0, d2, false), tex_entry(1, d2, false), tex_entry(2, d2, true), tex_entry(3, d2, false), tex_entry(4, d2, false),
             ms_entry(5, false), ms_entry(6, false), ms_entry(7, true), ms_entry(8, false),
+        ]);
+        // The safe-mode composite reads only the resolved G-buffer (the first
+        // five of the same entries): its own layout, so a device that lost the
+        // GPU to the full shader never even holds the sample copies.
+        let l_composite_lite = layout("composite lite", &[
+            tex_entry(0, d2, false), tex_entry(1, d2, false), tex_entry(2, d2, true), tex_entry(3, d2, false), tex_entry(4, d2, false),
         ]);
         let l_ao = layout("ao", &[tex_entry(0, d2, true), tex_entry(1, d2, false), tex_entry(2, d2, false)]);
         let l_cloud = layout("cloud", &[tex_entry(0, d2, true)]);
@@ -1998,8 +2060,8 @@ impl Renderer {
             p_out: full("cloud shadow", &pl0, if prof.cloud_shadows { &m_cloud } else { &m_noop }, if prof.cloud_shadows { "vs_full" } else { "vs" }, if prof.cloud_shadows { "fs_cshadow_out" } else { "fs" }, CS_FMT, None)?,
             layers: cs_layers,
             p_mix: [
-                full("cloud shadow mix", &pl_csmix, if prof.cloud_shadows { &m_csmix } else { &m_noop }, "vs_full", if prof.cloud_shadows { "fs_in" } else { "fs" }, CS_FMT, None)?,
-                full("cloud shadow mix", &pl_csmix, if prof.cloud_shadows { &m_csmix } else { &m_noop }, "vs_full", if prof.cloud_shadows { "fs_out" } else { "fs" }, CS_FMT, None)?,
+                full("cloud shadow mix", &pl_csmix, if prof.cloud_shadows { &m_csmix } else { &m_noop }, if prof.cloud_shadows { "vs_full" } else { "vs" }, if prof.cloud_shadows { "fs_in" } else { "fs" }, CS_FMT, None)?,
+                full("cloud shadow mix", &pl_csmix, if prof.cloud_shadows { &m_csmix } else { &m_noop }, if prof.cloud_shadows { "vs_full" } else { "vs" }, if prof.cloud_shadows { "fs_out" } else { "fs" }, CS_FMT, None)?,
             ],
             bg_mix,
             mix_ub,
@@ -2016,7 +2078,15 @@ impl Renderer {
             sun_v: glam::DVec3::ZERO,
             mix: ([0; 8], 1.0),
         };
-        let p_composite = full("composite", &pl(&l_composite), &m_comp, "vs_full", "fs", HDR, None)?;
+        // The full composite, or the light one for a GPU that lost the device
+        // to it (StartupProfile::comp_lite); the active layout is what the
+        // targets' composite bind group is made of, here and on every resize.
+        let (p_composite, l_comp) = if prof.comp_lite {
+            log::info!("renderer: composite in safe mode (flat water, no reflections, no marches)");
+            (full("composite lite", &pl(&l_composite_lite), &m_comp, "vs_full", "fs", HDR, None)?, l_composite_lite.clone())
+        } else {
+            (full("composite", &pl(&l_composite), &m_comp, "vs_full", "fs", HDR, None)?, l_composite.clone())
+        };
         let p_gtao = full("gtao", &pl(&l_ao), if prof.ao { &m_ao } else { &m_noop }, "vs_full", if prof.ao { "fs_gtao" } else { "fs" }, AMB, None)?;
         let p_ao_blur = full("ao blur", &pl(&l_ao), if prof.ao { &m_ao } else { &m_noop }, "vs_full", if prof.ao { "fs_blur" } else { "fs" }, AMB, None)?;
         let p_cloud = {
@@ -2410,7 +2480,7 @@ impl Renderer {
         // settings) never holds both sets at once on its shared memory.
         let s = prof.scale.clamp(0.1, 1.0);
         let (rw, rh) = (((config.width as f32 * s).round() as u32).max(1), ((config.height as f32 * s).round() as u32).max(1));
-        let targets = Self::make_targets(d, &config, (rw, rh), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
+        let targets = Self::make_targets(d, &config, (rw, rh), &l_dres, &l_ao, &l_comp, prof.comp_lite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
         let fluid_t = fluid.draw_targets(d, &targets.depth, rw, rh);
         // The transmittance and multi-scatter tables depend only on the planet
         // and the haze: bake them now, and again whenever the haze changes.
@@ -2428,7 +2498,7 @@ impl Renderer {
         Ok(Self {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
-            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: s, ao: prof.ao, taa_on: prof.taa, clouds_on: prof.clouds, cloud_shadows_on: prof.cloud_shadows, fx_on: prof.fx, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
+            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: s, ao: prof.ao, taa_on: prof.taa, clouds_on: prof.clouds, cloud_shadows_on: prof.cloud_shadows, fx_on: prof.fx, comp_lite: prof.comp_lite, cloud_step: 1.0, l_tile, l_build, l_composite: l_comp, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
@@ -2437,7 +2507,7 @@ impl Renderer {
 
     #[allow(clippy::too_many_arguments)]
     fn make_targets(
-        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
+        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, comp_lite: bool, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
         l_post: &wgpu::BindGroupLayout, l_pdraw: &wgpu::BindGroupLayout, l_glass: &wgpu::BindGroupLayout, psim_ub: &wgpu::Buffer, pbuf: &wgpu::Buffer, black: &wgpu::TextureView,
     ) -> Targets {
         // Everything is drawn at the render resolution (w, h); the tonemap
@@ -2468,12 +2538,15 @@ impl Renderer {
         let taa = [view(&make_tex(d, "taa 0", w, h, 1, 1, HDR, rt)), view(&make_tex(d, "taa 1", w, h, 1, 1, HDR, rt))];
         let bg = |l: &wgpu::BindGroupLayout, e: &[wgpu::BindGroupEntry]| d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: l, entries: e });
         let post = |src: &wgpu::TextureView, bl: &wgpu::TextureView| bg(l_post, &[tex_res(0, src), tex_res(1, bl), tex_res(2, &depth)]);
+        // The safe-mode composite's bind group carries the resolved G-buffer
+        // alone; the full one also takes the per-sample copies.
+        let mut comp: Vec<wgpu::BindGroupEntry> = vec![tex_res(0, &color), tex_res(1, &aux), tex_res(2, &depth), tex_res(3, &ao), tex_res(4, &amb)];
+        if !comp_lite {
+            comp.extend([tex_res(5, &color_ms), tex_res(6, &aux_ms), tex_res(7, &depth_ms), tex_res(8, &amb_ms)]);
+        }
         Targets {
             bg_dres: bg(l_dres, &[tex_res(0, &depth_ms)]),
-            bg_composite: bg(l_composite, &[
-                tex_res(0, &color), tex_res(1, &aux), tex_res(2, &depth), tex_res(3, &ao), tex_res(4, &amb),
-                tex_res(5, &color_ms), tex_res(6, &aux_ms), tex_res(7, &depth_ms), tex_res(8, &amb_ms),
-            ]),
+            bg_composite: bg(l_composite, &comp),
             color_ms, aux_ms, amb_ms, depth_ms,
             // Each pass reads the other AO texture from the one it writes.
             bg_gtao: bg(l_ao, &[tex_res(0, &depth), tex_res(1, &aux), tex_res(2, &ao)]),
@@ -2527,7 +2600,7 @@ impl Renderer {
         self.taa_hist_ok = false;
         self.logo_key = None;
         let (w, h) = self.render_size();
-        self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
+        self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, self.comp_lite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
         self.fluid_t = self.fluid.draw_targets(&self.device, &self.targets.depth, w, h);
     }
 

@@ -6,10 +6,10 @@
 @group(1) @binding(4) var t_amb: texture_2d<f32>;
 // Keep the original samples at water silhouettes: resolved material parameters
 // mix water depth/class with foreground normals and cannot be shaded correctly.
-@group(1) @binding(5) var t_color_ms: texture_multisampled_2d<f32>;
-@group(1) @binding(6) var t_aux_ms: texture_multisampled_2d<f32>;
-@group(1) @binding(7) var t_depth_ms: texture_depth_multisampled_2d;
-@group(1) @binding(8) var t_amb_ms: texture_multisampled_2d<f32>;
+// The four sample-copy bindings (5-8) and their loaders (ms_color/ms_aux/
+// ms_depth/ms_amb) are injected before this file by the renderer: they are
+// multisampled textures where MSAA > 1 and plain ones at MSAA 1, matching the
+// pipeline layout (a 1x texture is not a multisampled resource to wgpu).
 
 // Wave texture lookup at the mip that matches the pixel footprint (fp, metres).
 fn wtex(uv: vec2f, size: f32, fp: f32) -> vec4f {
@@ -608,7 +608,7 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
   // and the loop never runs.
   var water_samples = 0u;
   for (var i = 0u; i < SAMPLES; i++) {
-    if (textureLoad(t_aux_ms, px, i).a > 0.996) { water_samples++; }
+    if (ms_aux(px, i).a > 0.996) { water_samples++; }
   }
   if (water_samples > 0 && water_samples < SAMPLES) {
     // Shade before resolving: each water sample needs its own tint, parameters
@@ -616,9 +616,9 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
     // samples retain their own lighting and haze rather than water's colour.
     var col = vec3f(0.0);
     for (var i = 0u; i < SAMPLES; i++) {
-      col += composite_sample(in, textureLoad(t_depth_ms, px, i),
-        textureLoad(t_color_ms, px, i), textureLoad(t_aux_ms, px, i),
-        textureLoad(t_amb_ms, px, i).r);
+      col += composite_sample(in, ms_depth(px, i),
+        ms_color(px, i), ms_aux(px, i),
+        ms_amb(px, i));
     }
     return vec4f(col / f32(SAMPLES), 1.0);
   }

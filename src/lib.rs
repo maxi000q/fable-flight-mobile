@@ -115,7 +115,7 @@ const INTEGRATED_SCALE: f32 = 0.75;
 const MOBILE_SCALE: f32 = 0.5;
 /// The app's version, as the APK carries it: start-up state that should not
 /// outlive a release (the GPU pipeline blacklist) is keyed to it.
-pub(crate) const VERSION: &str = "1.0.14";
+pub(crate) const VERSION: &str = "1.0.15";
 /// Where the Android app keeps its files (last_run.log's folder), for state
 /// that should outlive a start-up attempt. None on a desktop, where the
 /// GPU blacklist simply stays in memory for the one run.
@@ -795,8 +795,9 @@ impl GpuBlacklist {
         let mut off = std::collections::BTreeSet::new();
         if let Some(p) = GPU_STATE_DIR.get().and_then(|d| d.as_ref()).map(|d| d.join("gpu_blacklist.txt")) {
             if let Ok(s) = std::fs::read_to_string(&p) {
+                let header = format!("# {VERSION}");
                 let mut lines = s.lines();
-                if lines.next() == Some(concat!("# ", "1.0.14")) {
+                if lines.next() == Some(header.as_str()) {
                     for l in lines {
                         if let Some(f) = match l {
                             "clouds" => Some("clouds"),
@@ -805,6 +806,7 @@ impl GpuBlacklist {
                             "ao" => Some("ao"),
                             "taa" => Some("taa"),
                             "logo" => Some("logo"),
+                            "composite" => Some("composite"),
                             _ => None,
                         } {
                             off.insert(f);
@@ -902,6 +904,7 @@ impl Game {
                     "fx" => p.fx = false,
                     "ao" => p.ao = false,
                     "taa" => p.taa = false,
+                    "composite" => p.comp_lite = true,
                     _ => p.logo = false,
                 }
             }
@@ -914,6 +917,7 @@ impl Game {
                         (!p.ao).then_some("ambient occlusion"),
                         (!p.taa).then_some("anti-aliasing"),
                         (!p.logo).then_some("the start logo"),
+                        p.comp_lite.then_some("the detailed water and reflections (safe-mode composite)"),
                     ]
                     .into_iter()
                     .flatten()
@@ -932,10 +936,14 @@ impl Game {
                     if attempt == 4 {
                         return Err(anyhow::anyhow!("the renderer could not start on this GPU: {e}"));
                     }
-                    let minimal = if attempt == 2 { " with the minimal shader set" } else { "" };
+                    let minimal = if attempt >= 2 { " with the minimal shader set" } else { "" };
                     log::error!("Game::new: start-up attempt {attempt} failed ({e}); retrying on a fresh GPU device{minimal}");
                     if let Some(f) = render::lost_feature() {
-                        log::warn!("Game::new: the {f} shaders are off for the next attempts (and runs)");
+                        if f == "composite" {
+                            log::warn!("Game::new: the composite falls back to its safe mode for the next attempts (and runs)");
+                        } else {
+                            log::warn!("Game::new: the {f} shaders are off for the next attempts (and runs)");
+                        }
                         blacklist.add(f);
                         blacklist.save();
                     }

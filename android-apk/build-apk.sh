@@ -30,7 +30,7 @@ build_variant() {
     local pkg="com.maxi.fableflightmobile${suffix}"
     local vcode vname ks kspass label
     if [ "$variant" = debug ]; then
-        vcode=114; vname="1.0.14-debug"
+        vcode=115; vname="1.0.15-debug"
         # Sign debug with the same committed key as release: a fresh CI
         # checkout has no debug.keystore, so generating one per build gave
         # every APK a different signature and forced an uninstall (losing
@@ -39,7 +39,7 @@ build_variant() {
         ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Dbg"
     else
-        vcode=114; vname="1.0.14"
+        vcode=115; vname="1.0.15"
         ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Mobile"
     fi

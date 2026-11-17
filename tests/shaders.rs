@@ -58,6 +58,42 @@ fn shaders_validate() {
     for (name, src) in [("buildings", include_str!("../src/shaders/buildings.wgsl")), ("inst", include_str!("../src/shaders/inst.wgsl"))] {
         ok &= check(name, &format!("{ov}{common}\n{facade}\n{src}"));
     }
+    // The G-buffer sample copies that composite's bindings 5-8 stand for, and
+    // the depth resolve's source, switch with MSAA (render.rs injects both);
+    // validate every combination of them wherever the test runs, not just the
+    // host's config — a phone at MSAA 1 is where these have to hold.
+    for (samples, ms_ty, ms_depth_ty, ms_idx) in [
+        (1u32, "texture_2d<f32>", "texture_depth_2d", "0"),
+        (4, "texture_multisampled_2d<f32>", "texture_depth_multisampled_2d", "i"),
+    ] {
+        let ov = format!("const SAMPLES = {samples}u;\nconst CS_RES = 512.0;\n");
+        let comp_ms = format!(
+            "@group(1) @binding(5) var t_color_ms: {ms_ty};\n@group(1) @binding(6) var t_aux_ms: {ms_ty};\n\
+             @group(1) @binding(7) var t_depth_ms: {ms_depth_ty};\n@group(1) @binding(8) var t_amb_ms: {ms_ty};\n\
+             fn ms_color(px: vec2i, i: u32) -> vec4f {{ return textureLoad(t_color_ms, px, {ms_idx}); }}\n\
+             fn ms_aux(px: vec2i, i: u32) -> vec4f {{ return textureLoad(t_aux_ms, px, {ms_idx}); }}\n\
+             fn ms_depth(px: vec2i, i: u32) -> f32 {{ return textureLoad(t_depth_ms, px, {ms_idx}); }}\n\
+             fn ms_amb(px: vec2i, i: u32) -> f32 {{ return textureLoad(t_amb_ms, px, {ms_idx}).r; }}\n"
+        );
+        ok &= check(&format!("composite msaa{samples}"), &format!("{ov}{common}\n{sky}\n{comp_ms}\n{}", include_str!("../src/shaders/composite.wgsl")));
+        // The safe-mode composite (no sky.wgsl, no sample copies).
+        ok &= check(&format!("composite lite msaa{samples}"), &format!("{ov}{common}\n{}", include_str!("../src/shaders/composite_lite.wgsl")));
+        let resolve = if samples > 1 {
+            include_str!("../src/shaders/resolve.wgsl").to_string()
+        } else {
+            // render.rs's MSAA-1 variant: a plain copy off a texture_depth_2d.
+            "@group(0) @binding(0) var t_d: texture_depth_2d;\n\
+             @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n\
+               let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));\n\
+               return vec4f(p * 2.0 - 1.0, 0.0, 1.0);\n\
+             }\n\
+             @fragment fn fs(@builtin(position) p: vec4f) -> @builtin(frag_depth) f32 {\n\
+               return textureLoad(t_d, vec2i(p.xy), 0);\n\
+             }\n"
+                .to_string()
+        };
+        ok &= check(&format!("resolve msaa{samples}"), &format!("{ov}{resolve}"));
+    }
     for (name, src) in [("composite", include_str!("../src/shaders/composite.wgsl")), ("clouds", include_str!("../src/shaders/clouds.wgsl"))] {
         ok &= check(name, &format!("{ov}{common}\n{sky}\n{src}"));
     }
