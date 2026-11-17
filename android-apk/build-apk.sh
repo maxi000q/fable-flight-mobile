@@ -39,7 +39,7 @@ build_variant() {
         ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Dbg"
     else
-        vcode=14; vname="1.0.14"
+        vcode=114; vname="1.0.14"
         ks=fableflight.keystore; kspass=fableflight2026
         label="Fable Flight Mobile"
     fi
