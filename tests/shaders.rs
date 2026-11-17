@@ -39,6 +39,9 @@ fn shaders_validate() {
     for (name, src) in [
         ("lut", include_str!("../src/shaders/lut.wgsl")),
         ("terrain", include_str!("../src/shaders/terrain.wgsl")),
+        // The safe-mode terrain (1.0.16): same bindings and entry points as
+        // the full one, no marches.
+        ("terrain lite", include_str!("../src/shaders/terrain_lite.wgsl")),
         ("photo", include_str!("../src/shaders/photo.wgsl")),
         ("post", include_str!("../src/shaders/post.wgsl")),
         ("particles_sim", include_str!("../src/shaders/particles_sim.wgsl")),

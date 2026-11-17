@@ -115,7 +115,7 @@ const INTEGRATED_SCALE: f32 = 0.75;
 const MOBILE_SCALE: f32 = 0.5;
 /// The app's version, as the APK carries it: start-up state that should not
 /// outlive a release (the GPU pipeline blacklist) is keyed to it.
-pub(crate) const VERSION: &str = "1.0.15";
+pub(crate) const VERSION: &str = "1.0.16";
 /// Where the Android app keeps its files (last_run.log's folder), for state
 /// that should outlive a start-up attempt. None on a desktop, where the
 /// GPU blacklist simply stays in memory for the one run.
@@ -788,11 +788,16 @@ const _: () = {
 /// the version; a new release starts clean, having possibly fixed the shader.
 struct GpuBlacklist {
     off: std::collections::BTreeSet<&'static str>,
+    /// how many times the GPU device was lost after start-up (App), from the
+    /// second death of a session on: the next launches start the ladder
+    /// further down (Game::new) instead of dying the same way each launch
+    runtime: u32,
 }
 
 impl GpuBlacklist {
     fn load() -> Self {
         let mut off = std::collections::BTreeSet::new();
+        let mut runtime = 0u32;
         if let Some(p) = GPU_STATE_DIR.get().and_then(|d| d.as_ref()).map(|d| d.join("gpu_blacklist.txt")) {
             if let Ok(s) = std::fs::read_to_string(&p) {
                 let header = format!("# {VERSION}");
@@ -807,15 +812,24 @@ impl GpuBlacklist {
                             "taa" => Some("taa"),
                             "logo" => Some("logo"),
                             "composite" => Some("composite"),
+                            "terrain" => Some("terrain"),
+                            "terrain off" => Some("terrain off"),
+                            "buildings" => Some("buildings"),
+                            "photo" => Some("photo"),
+                            "trees" => Some("trees"),
+                            "decals" => Some("decals"),
+                            "plane" => Some("plane"),
                             _ => None,
                         } {
                             off.insert(f);
+                        } else if let Some(n) = l.strip_prefix("runtime ") {
+                            runtime = n.parse().unwrap_or(0);
                         }
                     }
                 }
             }
         }
-        Self { off }
+        Self { off, runtime }
     }
 
     fn save(&self) {
@@ -824,6 +838,9 @@ impl GpuBlacklist {
             for f in &self.off {
                 s += f;
                 s += "\n";
+            }
+            if self.runtime > 0 {
+                s += &format!("runtime {}\n", self.runtime);
             }
             let _ = std::fs::write(d.join("gpu_blacklist.txt"), s);
         }
@@ -835,7 +852,7 @@ impl GpuBlacklist {
 }
 
 impl Game {
-    fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
+    fn new(window: Arc<Window>, args: &Args, gpu_deaths: u32) -> anyhow::Result<Self> {
         log::info!("Game::new: loading settings");
         let prefs = settings::Settings::load();
         // Saved graphics settings; the command line overrides them for this run.
@@ -875,27 +892,40 @@ impl Game {
         }
         log::info!("Game::new: creating the renderer (GPU device, pipelines)");
         // Start-up ladder: an Adreno loses its GPU device while the pipelines
-        // compile (every 1.0.7-1.0.13 build did, at a different pipeline each
+        // compile (every 1.0.7-1.0.15 build did, at a different pipeline each
         // time). Each attempt opens a fresh device; each later one reaches
         // less — fewer optional pipelines, smaller targets — and whatever an
         // attempt is lost at stays off the next attempt and the next runs
-        // (GpuBlacklist). Four attempts cover a flaky driver; a hopeless one
-        // fails with the exact pipeline named.
+        // (GpuBlacklist). Six attempts cover a flaky driver; a hopeless one
+        // fails with the exact pipeline named. A device lost *after* start-up
+        // (App's gpu_deaths, or the `runtime` line in the blacklist) starts
+        // the ladder two rungs down per death.
         let mut blacklist = GpuBlacklist::load();
+        let deaths = gpu_deaths.max(blacklist.runtime);
         let mut renderer = None;
-        for attempt in 1..=4u32 {
+        for attempt in 1..=6u32 {
             let mut p = render::StartupProfile::full(gfx.scale);
-            if attempt >= 3 {
+            let rung = attempt + 2 * deaths;
+            if rung >= 3 {
                 p.clouds = false;
                 p.cloud_shadows = false;
                 p.fx = false;
                 p.scale = p.scale.min(0.4);
             }
-            if attempt >= 4 {
+            if rung >= 4 {
                 p.ao = false;
                 p.taa = false;
                 p.logo = false;
                 p.scale = p.scale.min(0.35);
+            }
+            if rung >= 5 {
+                p.terrain_lite = true;
+                p.scale = p.scale.min(0.3);
+            }
+            if rung >= 6 {
+                p.terrain_lite = true;
+                p.terrain = false;
+                p.scale = p.scale.min(0.3);
             }
             for f in &blacklist.off {
                 match *f {
@@ -905,6 +935,16 @@ impl Game {
                     "ao" => p.ao = false,
                     "taa" => p.taa = false,
                     "composite" => p.comp_lite = true,
+                    "terrain" => p.terrain_lite = true,
+                    "terrain off" => {
+                        p.terrain_lite = true;
+                        p.terrain = false;
+                    }
+                    "buildings" => p.buildings = false,
+                    "photo" => p.photo = false,
+                    "trees" => p.trees = false,
+                    "decals" => p.decals = false,
+                    "plane" => p.plane = false,
                     _ => p.logo = false,
                 }
             }
@@ -918,6 +958,13 @@ impl Game {
                         (!p.taa).then_some("anti-aliasing"),
                         (!p.logo).then_some("the start logo"),
                         p.comp_lite.then_some("the detailed water and reflections (safe-mode composite)"),
+                        p.terrain_lite.then_some("the terrain detail (safe-mode terrain)"),
+                        (!p.terrain).then_some("the terrain itself (an endless sea and sky)"),
+                        (!p.buildings).then_some("buildings"),
+                        (!p.photo).then_some("the 3D city meshes"),
+                        (!p.trees).then_some("trees"),
+                        (!p.decals).then_some("roads and airfield markings"),
+                        (!p.plane).then_some("the aircraft itself"),
                     ]
                     .into_iter()
                     .flatten()
@@ -933,14 +980,22 @@ impl Game {
                     break;
                 }
                 Err(e) => {
-                    if attempt == 4 {
+                    if attempt == 6 {
                         return Err(anyhow::anyhow!("the renderer could not start on this GPU: {e}"));
                     }
-                    let minimal = if attempt >= 2 { " with the minimal shader set" } else { "" };
+                    let minimal = if rung >= 3 { " with the minimal shader set" } else { "" };
                     log::error!("Game::new: start-up attempt {attempt} failed ({e}); retrying on a fresh GPU device{minimal}");
                     if let Some(f) = render::lost_feature() {
+                        // A loss at the light terrain escalates to turning it
+                        // off outright; every other pipeline maps to its own
+                        // feature.
+                        let f: &'static str = if f == "terrain" && p.terrain_lite { "terrain off" } else { f };
                         if f == "composite" {
                             log::warn!("Game::new: the composite falls back to its safe mode for the next attempts (and runs)");
+                        } else if f == "terrain" {
+                            log::warn!("Game::new: the terrain falls back to its safe mode for the next attempts (and runs)");
+                        } else if f == "terrain off" {
+                            log::warn!("Game::new: the terrain is off for the next attempts (an endless sea and sky still run)");
                         } else {
                             log::warn!("Game::new: the {f} shaders are off for the next attempts (and runs)");
                         }
@@ -5398,6 +5453,14 @@ impl Game {
 struct App {
     args: Args,
     game: Option<Game>,
+    /// the window outlives the Game: a GPU device lost mid-flight tears the
+    /// Game down and builds a fresh one on the same window
+    window: Option<Arc<Window>>,
+    /// how many times the GPU device has been lost after start-up this
+    /// session; each rebuild starts the start-up ladder further down
+    /// (Game::new), and from the second death on it is also remembered
+    /// across launches (GpuBlacklist's `runtime` line)
+    gpu_deaths: u32,
 }
 
 impl ApplicationHandler for App {
@@ -5405,45 +5468,12 @@ impl ApplicationHandler for App {
         if self.game.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("Fable Flight").with_inner_size(winit::dpi::PhysicalSize::new(self.args.size.0, self.args.size.1));
-        let window = Arc::new(el.create_window(attrs).expect("window"));
-        log::info!("window created; starting Game::new");
-        // Game::new is written against a desktop's 8 MB main-thread stack and
-        // overflows the glue thread's 2 MB one (it looks like "crashes on
-        // launch"). Run it on a 64 MB-stack worker and hand the finished Game
-        // back here; the event loop itself stays on the glue thread, where
-        // android-activity requires every event poll to happen.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let init_args = self.args.clone();
-        let spawned = std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(move || {
-                let _ = tx.send(Game::new(window, &init_args));
-            });
-        if let Err(e) = spawned {
-            log::error!("spawning the init thread: {e}");
-            el.exit();
-            return;
+        if self.window.is_none() {
+            let attrs = Window::default_attributes().with_title("Fable Flight").with_inner_size(winit::dpi::PhysicalSize::new(self.args.size.0, self.args.size.1));
+            self.window = Some(Arc::new(el.create_window(attrs).expect("window")));
+            log::info!("window created; starting Game::new");
         }
-        match rx.recv() {
-            Ok(Ok(g)) => {
-                log::info!("Game::new finished; entering the main loop");
-                self.game = Some(g);
-            }
-            Ok(Err(e)) => {
-                // The whole chain of causes, not just the last: this is what
-                // a black screen used to hide entirely.
-                log::error!("failed to start: {e:#}");
-                eprintln!("failed to start: {e:#}");
-                el.exit();
-            }
-            Err(_) => {
-                // The worker died before sending: a panic (already logged by
-                // the hook) or a stack overflow, which aborts the process.
-                log::error!("failed to start: the init thread died (see the panic above)");
-                el.exit();
-            }
-        }
+        self.start_game(el);
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -5466,6 +5496,27 @@ impl ApplicationHandler for App {
                     // under the driver's shader compiler threads can crash it.
                     self.game = None;
                     std::process::exit(0);
+                } else if g.r.gpu_lost() {
+                    // The device died after start-up — on a driver this
+                    // fragile the first frames are as untested as the
+                    // pipelines were. Tear the whole Game down (the dead
+                    // device with it) and build a fresh one, one rung further
+                    // down the ladder; from the second death of a session it
+                    // is also remembered, so the next launch starts safe.
+                    self.gpu_deaths += 1;
+                    log::error!("the GPU device was lost mid-flight (death {}); rebuilding the game one rung safer", self.gpu_deaths);
+                    if self.gpu_deaths >= 4 {
+                        log::error!("the GPU keeps dying mid-flight; giving up rather than loop forever");
+                        el.exit();
+                        return;
+                    }
+                    if self.gpu_deaths >= 2 {
+                        let mut b = GpuBlacklist::load();
+                        b.runtime = self.gpu_deaths;
+                        b.save();
+                    }
+                    self.game = None;
+                    self.start_game(el);
                 }
             }
             WindowEvent::Focused(false) => g.keys.clear(),
@@ -5676,6 +5727,50 @@ impl ApplicationHandler for App {
     }
 }
 
+impl App {
+    /// Builds a Game (the first launch, or again after the GPU device was
+    /// lost mid-flight) on a 64 MB-stack worker — Game::new is written
+    /// against a desktop's 8 MB main-thread stack and overflows the glue
+    /// thread's 2 MB one (it looks like "crashes on launch") — and waits for
+    /// it here. The event loop itself stays on the glue thread, where
+    /// android-activity requires every event poll to happen.
+    fn start_game(&mut self, el: &ActiveEventLoop) {
+        let Some(window) = self.window.clone() else { el.exit(); return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let init_args = self.args.clone();
+        let deaths = self.gpu_deaths;
+        let spawned = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let _ = tx.send(Game::new(window, &init_args, deaths));
+            });
+        if let Err(e) = spawned {
+            log::error!("spawning the init thread: {e}");
+            el.exit();
+            return;
+        }
+        match rx.recv() {
+            Ok(Ok(g)) => {
+                log::info!("Game::new finished; entering the main loop");
+                self.game = Some(g);
+            }
+            Ok(Err(e)) => {
+                // The whole chain of causes, not just the last: this is what
+                // a black screen used to hide entirely.
+                log::error!("failed to start: {e:#}");
+                eprintln!("failed to start: {e:#}");
+                el.exit();
+            }
+            Err(_) => {
+                // The worker died before sending: a panic (already logged by
+                // the hook) or a stack overflow, which aborts the process.
+                log::error!("failed to start: the init thread died (see the panic above)");
+                el.exit();
+            }
+        }
+    }
+}
+
 /// The UI library ships no fonts of its own here, so borrow the system's.
 /// DejaVu is embedded as a last resort (see assets/fonts): a phone has none
 /// of the paths below and no fontconfig, and without any font egui can
@@ -5803,7 +5898,7 @@ pub fn main() -> anyhow::Result<()> {
     i18n::set_lang(args.lang.or(settings::Settings::load().lang).unwrap_or_else(i18n::Lang::detect));
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    el.run_app(&mut App { args, game: None })?;
+    el.run_app(&mut App { args, game: None, window: None, gpu_deaths: 0 })?;
     Ok(())
 }
 
@@ -5871,7 +5966,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         }
     };
     el.set_control_flow(ControlFlow::Poll);
-    if let Err(e) = el.run_app(&mut App { args, game: None }) {
+    if let Err(e) = el.run_app(&mut App { args, game: None, window: None, gpu_deaths: 0 }) {
         log::error!("event loop run: {e}");
     }
     log::info!("android_main: event loop finished");

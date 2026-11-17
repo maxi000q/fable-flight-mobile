@@ -812,6 +812,11 @@ pub struct Renderer {
     /// the composite is the light one (StartupProfile::comp_lite): its bind
     /// group holds only the resolved G-buffer, never the sample copies
     comp_lite: bool,
+    /// set by the device-lost callback; the start-up ladder reads it while
+    /// the pipelines come up, and the event loop reads it after every frame
+    /// (a device that dies mid-flight tears the Game down and rebuilds it
+    /// one rung safer — lib.rs App)
+    lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// cloud raymarch step length relative to High (clouds.wgsl)
     pub cloud_step: f32,
     casc_ub: wgpu::Buffer,
@@ -1385,11 +1390,30 @@ pub struct StartupProfile {
     /// cannot choke on. Game::new turns it on after a loss at the composite
     /// and keeps it on across runs (GpuBlacklist).
     pub comp_lite: bool,
+    /// Safe-mode terrain (terrain_lite.wgsl): the photo-shaded ground
+    /// without the hex-tiling, parallax and relief marches — the third shader
+    /// an Adreno 619 loses its device to (1.0.15, attempts 3 and 4, both
+    /// dead at the terrain pipeline after the composite had already fallen
+    /// back). Game::new turns it on after a loss at the terrain pipelines.
+    /// The next rung (`terrain` false) turns the terrain off outright: an
+    /// endless sea and sky keep running.
+    pub terrain: bool,
+    pub terrain_lite: bool,
+    /// The rest of the scene's heavy modules, each of which can fall to the
+    /// no-op set after a loss at its pipelines (lost_feature / the Game::new
+    /// ladder): buildings and instanced solids, the 3D city meshes (photo),
+    /// trees, road/airfield/lamp decals, and last of all the aircraft
+    /// itself. `full` keeps them all on.
+    pub buildings: bool,
+    pub photo: bool,
+    pub trees: bool,
+    pub decals: bool,
+    pub plane: bool,
 }
 
 impl StartupProfile {
     pub fn full(scale: f32) -> Self {
-        Self { scale, clouds: true, cloud_shadows: true, fx: true, ao: true, taa: true, logo: true, comp_lite: false }
+        Self { scale, clouds: true, cloud_shadows: true, fx: true, ao: true, taa: true, logo: true, comp_lite: false, terrain: true, terrain_lite: false, buildings: true, photo: true, trees: true, decals: true, plane: true }
     }
 }
 
@@ -1411,6 +1435,12 @@ pub fn lost_feature() -> Option<&'static str> {
         "taa" | "final taa" => "taa",
         "logo" => "logo",
         "composite" | "composite lite" => "composite",
+        "terrain" | "terrain tess" | "terrain cells" | "terrain lite" | "terrain lite tess" | "terrain lite cells" | "water top" | "shore cover" => "terrain",
+        "build" | "build whole" | "build shadow" | "inst" | "inst shadow" => "buildings",
+        "photo" | "skin" | "photo shadow" | "photo shadow fast" | "photo mask" => "photo",
+        "tree" | "trees near" | "tree shadow" | "tree shadow fixed" | "leaf cards" | "tree impostors" => "trees",
+        "road" | "airfield" | "lamp top" | "lights" => "decals",
+        "obj" | "obj shadow" | "obj solid" | "obj shadow solid" | "glass" => "plane",
         _ => return None,
     })
 }
@@ -1640,8 +1670,58 @@ impl Renderer {
         let overrides = format!("const SAMPLES = {MSAA}u;\nconst CS_RES = {CS_RES}.0;\n");
         let module = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{overrides}{common}\n{src}").into()) });
         let module_s = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{overrides}{src}").into()) });
+        // A pipeline that draws nothing, in place of one whose real shader
+        // has killed this GPU before (see StartupProfile and lost_feature):
+        // the same layouts, buffers and formats, so the frame's passes stay
+        // valid — the effect is simply absent from the frame. Every entry
+        // point any feature-gated pipeline can ask for is stubbed: a vertex
+        // that collapses every primitive onto the origin (nothing
+        // rasterises, nothing writes depth) and a fragment that writes
+        // nothing at all — wgpu matches shader outputs against the targets,
+        // never the other way round, so the silent fragment is valid
+        // whatever the pipeline declares. 1.0.15's minimal attempts logged
+        // seven "Unable to find entry point 'vs_full'" validation errors
+        // for want of these.
+        let noop_src = "\
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_full() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_top() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_tess() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_cells() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_shadow() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_shadow_fixed() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_card() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_near() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_bake() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_bake_card() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_imp() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@vertex fn vs_mask() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n\
+@fragment fn fs() {}\n\
+@fragment fn fs_top() {}\n\
+@fragment fn fs_cover() {}\n\
+@fragment fn fs_shadow() {}\n\
+@fragment fn fs_whole() {}\n\
+@fragment fn fs_solid() {}\n\
+@fragment fn fs_skin() {}\n\
+@fragment fn fs_mask() {}\n\
+@fragment fn fs_cut() {}\n\
+@fragment fn fs_card() {}\n\
+@fragment fn fs_glass() {}\n\
+@fragment fn fs_bake() {}\n\
+@fragment fn fs_bake_card() {}\n\
+@fragment fn fs_imp() {}\n\
+@compute @workgroup_size(4, 4, 1) fn cs() {}\n";
+        let m_noop = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("noop"), source: wgpu::ShaderSource::Wgsl(noop_src.into()) });
         let m_lut = module("lut", include_str!("shaders/lut.wgsl"));
-        let m_terrain = module("terrain", include_str!("shaders/terrain.wgsl"));
+        // The terrain: the full module, its safe mode, or — last rung — the
+        // no-op set (an endless sea and sky still run; see StartupProfile).
+        let m_terrain = if prof.terrain_lite {
+            module("terrain lite", include_str!("shaders/terrain_lite.wgsl"))
+        } else if prof.terrain {
+            module("terrain", include_str!("shaders/terrain.wgsl"))
+        } else {
+            module_s("terrain off", noop_src)
+        };
         let m_photo = module("photo", include_str!("shaders/photo.wgsl"));
         let facade = include_str!("shaders/facade.wgsl");
         let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
@@ -1708,14 +1788,18 @@ impl Renderer {
                  }\n",
             )
         };
-        // A pipeline that draws nothing, in place of one whose real shader
-        // has killed this GPU before (see StartupProfile): the same layouts
-        // and formats, so the frame's passes stay valid — the effect is
-        // simply absent from the frame.
-        let m_noop = d.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("noop"),
-            source: wgpu::ShaderSource::Wgsl("@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n@fragment fn fs() {}\n@compute @workgroup_size(4, 4, 1) fn cs() {}".into()),
-        });
+        // Feature gates (StartupProfile): a module whose shader has killed
+        // this GPU before (lost_feature / the Game::new ladder) is swapped
+        // for the no-op — its pipelines still come up, on the same layouts,
+        // and draw nothing.
+        let m_build_e = if prof.buildings { &m_build } else { &m_noop };
+        let m_inst_e = if prof.buildings { &m_inst } else { &m_noop };
+        let m_photo_e = if prof.photo { &m_photo } else { &m_noop };
+        let m_road_e = if prof.decals { &m_road } else { &m_noop };
+        let m_field_e = if prof.decals { &m_field } else { &m_noop };
+        let m_lights_e = if prof.decals { &m_lights } else { &m_noop };
+        let m_tree_e = if prof.trees { &m_tree } else { &m_noop };
+        let m_obj_e = if prof.plane { &m_obj } else { &m_noop };
         log::info!("renderer: {} shader modules assembled", [
             (&m_lut, "lut"), (&m_terrain, "terrain"), (&m_photo, "photo"), (&m_build, "buildings"), (&m_obj, "plane"),
             (&m_comp, "composite"), (&m_cloud, "clouds"), (&m_post, "post"), (&m_psim, "psim"), (&m_pdraw, "pdraw"),
@@ -2232,18 +2316,24 @@ impl Renderer {
             wgpu::VertexAttribute { format: VF::Unorm8x4, offset: 32, shader_location: 5 },
         ];
         const A_INST: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4];
-        let p_terrain = geom("terrain", Some(&l_tile), &m_terrain, &[vb(40, false, &A_TERRAIN)], 0)?;
+        // The terrain: full, safe mode (lite) or off; the label tells
+        // Game::new which rung a loss here belongs to (lost_feature).
+        let t_label = if prof.terrain_lite { "terrain lite" } else { "terrain" };
+        if prof.terrain_lite {
+            log::info!("renderer: terrain in safe mode (photo-shaded ground, no relief detail)");
+        }
+        let p_terrain = geom(t_label, Some(&l_tile), &m_terrain, &[vb(40, false, &A_TERRAIN)], 0)?;
         // Mode 8: cells near the camera as tessellated patches; 9: the rest of such a tile.
-        let p_terrain_tess = geom("terrain tess", Some(&l_tile), &m_terrain, &[], 8)?;
-        let p_terrain_cells = geom("terrain cells", Some(&l_tile), &m_terrain, &[], 9)?;
-        let p_build = geom("build", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 0)?;
-        let p_build_whole = geom("build whole", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 14)?;
+        let p_terrain_tess = geom(&format!("{t_label} tess"), Some(&l_tile), &m_terrain, &[], 8)?;
+        let p_terrain_cells = geom(&format!("{t_label} cells"), Some(&l_tile), &m_terrain, &[], 9)?;
+        let p_build = geom("build", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 0)?;
+        let p_build_whole = geom("build whole", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 14)?;
         const A_PHOTO: [wgpu::VertexAttribute; 3] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: VF::Float32x2, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: VF::Snorm8x4, offset: 20, shader_location: 2 },
         ];
-        let p_photo = geom("photo", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 0)?;
+        let p_photo = geom("photo", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 0)?;
         // Mode 11: the 3D tiles' mesh of a destroyed building, riding on its pieces.
         const A_SKIN: [wgpu::VertexAttribute; 4] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
@@ -2251,19 +2341,19 @@ impl Renderer {
             wgpu::VertexAttribute { format: VF::Snorm8x4, offset: 20, shader_location: 2 },
             wgpu::VertexAttribute { format: VF::Uint32, offset: 24, shader_location: 3 },
         ];
-        let p_skin = geom("skin", Some(&l_skin), &m_photo, &[vb(28, false, &A_SKIN)], 11)?;
-        let p_photo_shadow = geom("photo shadow", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 13)?;
-        let p_photo_shadow_fast = geom("photo shadow fast", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 12)?;
+        let p_skin = geom("skin", Some(&l_skin), m_photo_e, &[vb(28, false, &A_SKIN)], 11)?;
+        let p_photo_shadow = geom("photo shadow", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 13)?;
+        let p_photo_shadow_fast = geom("photo shadow fast", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 12)?;
         // The coverage mask: the same tiles from above, 1 wherever they are.
         let p_photo_mask = {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("photo mask"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_photo), Some(&l_casc)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_photo, entry_point: Some("vs_mask"), compilation_options: Default::default(), buffers: &[vb(24, false, &A_PHOTO)] },
+            vertex: wgpu::VertexState { module: m_photo_e, entry_point: Some("vs_mask"), compilation_options: Default::default(), buffers: &[vb(24, false, &A_PHOTO)] },
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: None,
             multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_photo, entry_point: Some("fs_mask"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
+            fragment: Some(wgpu::FragmentState { module: m_photo_e, entry_point: Some("fs_mask"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
             multiview_mask: None,
             cache: None,
         });
@@ -2310,35 +2400,35 @@ impl Renderer {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lamp top"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu), Some(&l_casc)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_road, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(32, false, &A_ROAD)] },
+            vertex: wgpu::VertexState { module: m_road_e, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(32, false, &A_ROAD)] },
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: None,
             multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_road, entry_point: Some("fs_top"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: Some(wgpu::BlendState { color: max, alpha: max }), write_mask: wgpu::ColorWrites::BLUE | wgpu::ColorWrites::ALPHA })] }),
+            fragment: Some(wgpu::FragmentState { module: m_road_e, entry_point: Some("fs_top"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: Some(wgpu::BlendState { color: max, alpha: max }), write_mask: wgpu::ColorWrites::BLUE | wgpu::ColorWrites::ALPHA })] }),
             multiview_mask: None,
             cache: None,
         });
             pipe_up(d, &lost, "lamp top")?;
             p
         };
-        let p_build_shadow = geom("build shadow", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 1)?;
+        let p_build_shadow = geom("build shadow", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 1)?;
         const A_PART: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4];
-        let p_obj = geom("obj", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 0)?;
-        let p_obj_shadow = geom("obj shadow", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 4)?;
-        let p_obj_solid = geom("obj solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 5)?;
-        let p_obj_shadow_solid = geom("obj shadow solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 1)?;
+        let p_obj = geom("obj", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 0)?;
+        let p_obj_shadow = geom("obj shadow", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 4)?;
+        let p_obj_solid = geom("obj solid", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 5)?;
+        let p_obj_shadow_solid = geom("obj shadow solid", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 1)?;
         // Glass and the propeller blur: blended over the finished, lit scene,
         // tested against the resolved depth.
         let p_glass = {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glass"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj), Some(&l_glass)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_obj, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(64, false, &A_PART)] },
+            vertex: wgpu::VertexState { module: m_obj_e, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(64, false, &A_PART)] },
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &m_obj,
+                module: m_obj_e,
                 entry_point: Some("fs_glass"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -2356,20 +2446,20 @@ impl Renderer {
             pipe_up(d, &lost, "glass")?;
             p
         };
-        let p_road = geom("road", Some(&l_tileu), &m_road, &[vb(32, false, &A_ROAD)], 2)?;
+        let p_road = geom("road", Some(&l_tileu), m_road_e, &[vb(32, false, &A_ROAD)], 2)?;
         const A_AIR: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
-        let p_field = geom("airfield", Some(&l_tileu), &m_field, &[vb(56, false, &A_AIR)], 2)?;
+        let p_field = geom("airfield", Some(&l_tileu), m_field_e, &[vb(56, false, &A_AIR)], 2)?;
         const A_LIGHT: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Unorm8x4, 5 => Uint8x4];
         let p_lights = {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lights"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_lights, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(40, true, &A_LIGHT)] },
+            vertex: wgpu::VertexState { module: m_lights_e, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(40, true, &A_LIGHT)] },
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &m_lights,
+                module: m_lights_e,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -2387,15 +2477,15 @@ impl Renderer {
             pipe_up(d, &lost, "lights")?;
             p
         };
-        let p_tree = geom("tree", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0)?;
-        let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, &m_tree);
+        let p_tree = geom("tree", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0)?;
+        let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, m_tree_e);
         pipe_up(d, &lost, "tree impostors")?;
-        let p_tree_near = geom("trees near", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7)?;
-        let p_tree_shadow = geom("tree shadow", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 1)?;
-        let p_tree_shadow_fixed = geom("tree shadow fixed", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 10)?;
-        let p_card = geom("leaf cards", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3)?;
-        let p_inst = geom("inst", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0)?;
-        let p_inst_shadow = geom("inst shadow", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1)?;
+        let p_tree_near = geom("trees near", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7)?;
+        let p_tree_shadow = geom("tree shadow", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 1)?;
+        let p_tree_shadow_fixed = geom("tree shadow fixed", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 10)?;
+        let p_card = geom("leaf cards", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3)?;
+        let p_inst = geom("inst", None, m_inst_e, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0)?;
+        let p_inst_shadow = geom("inst shadow", None, m_inst_e, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1)?;
         let p_dres = {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("depth resolve"),
@@ -2498,7 +2588,7 @@ impl Renderer {
         Ok(Self {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
-            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: s, ao: prof.ao, taa_on: prof.taa, clouds_on: prof.clouds, cloud_shadows_on: prof.cloud_shadows, fx_on: prof.fx, comp_lite: prof.comp_lite, cloud_step: 1.0, l_tile, l_build, l_composite: l_comp, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
+            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: s, ao: prof.ao, taa_on: prof.taa, clouds_on: prof.clouds, cloud_shadows_on: prof.cloud_shadows, fx_on: prof.fx, comp_lite: prof.comp_lite, lost, cloud_step: 1.0, l_tile, l_build, l_composite: l_comp, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
@@ -2569,6 +2659,14 @@ impl Renderer {
             logo_tex,
             color, aux, amb, depth, hdr, cloud, cloud_dist, cloud_hist, bloom, ldr_tex, ldr,
         }
+    }
+
+    /// Whether the GPU device was lost after start-up (the callback's flag):
+    /// the event loop tears the Game down and rebuilds it one rung safer
+    /// (lib.rs App). During start-up the ladder reads the same flag through
+    /// `LOST_PIPELINE` instead.
+    pub fn gpu_lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
