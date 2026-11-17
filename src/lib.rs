@@ -113,6 +113,13 @@ const INTEGRATED_SCALE: f32 = 0.75;
 /// system (often with under a gigabyte free for all of it), and the
 /// temporal AA's sharpening hides most of the softness.
 const MOBILE_SCALE: f32 = 0.5;
+/// The app's version, as the APK carries it: start-up state that should not
+/// outlive a release (the GPU pipeline blacklist) is keyed to it.
+pub(crate) const VERSION: &str = "1.0.14";
+/// Where the Android app keeps its files (last_run.log's folder), for state
+/// that should outlive a start-up attempt. None on a desktop, where the
+/// GPU blacklist simply stays in memory for the one run.
+static GPU_STATE_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 /// What a 3D tiles detail level costs, as measured over San Francisco (see
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
@@ -776,6 +783,55 @@ const _: () = {
     let _ = assert_send::<Game>;
 };
 
+/// Effects whose shaders have lost the GPU device on this phone, kept across
+/// runs so the next start stays off the same compiler fault. The file carries
+/// the version; a new release starts clean, having possibly fixed the shader.
+struct GpuBlacklist {
+    off: std::collections::BTreeSet<&'static str>,
+}
+
+impl GpuBlacklist {
+    fn load() -> Self {
+        let mut off = std::collections::BTreeSet::new();
+        if let Some(p) = GPU_STATE_DIR.get().and_then(|d| d.as_ref()).map(|d| d.join("gpu_blacklist.txt")) {
+            if let Ok(s) = std::fs::read_to_string(&p) {
+                let mut lines = s.lines();
+                if lines.next() == Some(concat!("# ", "1.0.14")) {
+                    for l in lines {
+                        if let Some(f) = match l {
+                            "clouds" => Some("clouds"),
+                            "cloud shadows" => Some("cloud shadows"),
+                            "fx" => Some("fx"),
+                            "ao" => Some("ao"),
+                            "taa" => Some("taa"),
+                            "logo" => Some("logo"),
+                            _ => None,
+                        } {
+                            off.insert(f);
+                        }
+                    }
+                }
+            }
+        }
+        Self { off }
+    }
+
+    fn save(&self) {
+        if let Some(d) = GPU_STATE_DIR.get().and_then(|d| d.as_ref()) {
+            let mut s = format!("# {VERSION}\n");
+            for f in &self.off {
+                s += f;
+                s += "\n";
+            }
+            let _ = std::fs::write(d.join("gpu_blacklist.txt"), s);
+        }
+    }
+
+    fn add(&mut self, f: &'static str) {
+        self.off.insert(f);
+    }
+}
+
 impl Game {
     fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
         log::info!("Game::new: loading settings");
@@ -807,18 +863,97 @@ impl Game {
                 grab("LowMemKiller:").unwrap_or(0)
             );
         }
-        log::info!("Game::new: creating the renderer (GPU device, pipelines)");
-        let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync))?;
-        log::info!("Game::new: renderer ready");
+        // The scale the renderer opens its targets at: a phone starts low
+        // (shared memory, see MOBILE_SCALE) before any saved settings touch
+        // it, and the start-up attempts below can only cut it further.
         if let Some(sc) = args.render_scale {
             gfx.scale = sc;
         } else if touchui::active() && !graphics::Graphics::saved() {
-            // Re-asserted here: Renderer::new may have read the window's
-            // size before the fullscreen mode settled, and the mobile
-            // scale is a memory decision, not an aesthetic one.
             gfx.scale = MOBILE_SCALE;
-        } else if r.integrated && !graphics::Graphics::saved() {
-            gfx.scale = INTEGRATED_SCALE;
+        }
+        log::info!("Game::new: creating the renderer (GPU device, pipelines)");
+        // Start-up ladder: an Adreno loses its GPU device while the pipelines
+        // compile (every 1.0.7-1.0.13 build did, at a different pipeline each
+        // time). Each attempt opens a fresh device; each later one reaches
+        // less — fewer optional pipelines, smaller targets — and whatever an
+        // attempt is lost at stays off the next attempt and the next runs
+        // (GpuBlacklist). Four attempts cover a flaky driver; a hopeless one
+        // fails with the exact pipeline named.
+        let mut blacklist = GpuBlacklist::load();
+        let mut renderer = None;
+        for attempt in 1..=4u32 {
+            let mut p = render::StartupProfile::full(gfx.scale);
+            if attempt >= 3 {
+                p.clouds = false;
+                p.cloud_shadows = false;
+                p.fx = false;
+                p.scale = p.scale.min(0.4);
+            }
+            if attempt >= 4 {
+                p.ao = false;
+                p.taa = false;
+                p.logo = false;
+                p.scale = p.scale.min(0.35);
+            }
+            for f in &blacklist.off {
+                match *f {
+                    "clouds" => p.clouds = false,
+                    "cloud shadows" => p.cloud_shadows = false,
+                    "fx" => p.fx = false,
+                    "ao" => p.ao = false,
+                    "taa" => p.taa = false,
+                    _ => p.logo = false,
+                }
+            }
+            match pollster::block_on(Renderer::new(window.clone(), gfx.vsync, &p)) {
+                Ok(r) => {
+                    let off: Vec<&str> = [
+                        (!p.clouds).then_some("clouds"),
+                        (!p.cloud_shadows).then_some("cloud shadows"),
+                        (!p.fx).then_some("smoke and particles"),
+                        (!p.ao).then_some("ambient occlusion"),
+                        (!p.taa).then_some("anti-aliasing"),
+                        (!p.logo).then_some("the start logo"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    if !off.is_empty() {
+                        log::warn!("renderer: started without {} (the GPU blacklist)", off.join(", "));
+                    }
+                    // The attempt's reduced scale is a memory decision, not
+                    // an aesthetic one: keep the renderer at it until the
+                    // settings say otherwise.
+                    gfx.scale = gfx.scale.min(p.scale);
+                    renderer = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 4 {
+                        return Err(anyhow::anyhow!("the renderer could not start on this GPU: {e}"));
+                    }
+                    let minimal = if attempt == 2 { " with the minimal shader set" } else { "" };
+                    log::error!("Game::new: start-up attempt {attempt} failed ({e}); retrying on a fresh GPU device{minimal}");
+                    if let Some(f) = render::lost_feature() {
+                        log::warn!("Game::new: the {f} shaders are off for the next attempts (and runs)");
+                        blacklist.add(f);
+                        blacklist.save();
+                    }
+                    // Let the dead device's driver threads go before the next
+                    // one opens; a beat for the system to reclaim its memory.
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    if cfg!(target_os = "android") {
+                        let mem = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+                        let grab = |k: &str| mem.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).map(|kb| kb / 1024);
+                        log::info!("Game::new: {} MB available before attempt {}", grab("MemAvailable:").unwrap_or(0), attempt + 1);
+                    }
+                }
+            }
+        }
+        let r = renderer.ok_or_else(|| anyhow::anyhow!("the renderer could not start on this GPU"))?;
+        log::info!("Game::new: renderer ready");
+        if r.integrated && !graphics::Graphics::saved() && args.render_scale.is_none() {
+            gfx.scale = gfx.scale.min(INTEGRATED_SCALE);
         }
         // The app's own files, not a desktop cache dir Android does not
         // have; dirs::cache_dir() is None there and would fall back to
@@ -5708,6 +5843,8 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         p
     });
     android_logging(&log_path);
+    // The GPU pipeline blacklist (lib.rs GpuBlacklist) lives beside the log.
+    GPU_STATE_DIR.set(log_path.as_deref().and_then(|p| p.parent()).map(std::path::Path::to_path_buf)).ok();
     // Panics on the game thread abort the process by default; with a hook,
     // the message and place land in the log before the crash.
     std::panic::set_hook(Box::new(move |info| {
@@ -5788,7 +5925,7 @@ fn android_logging(log_path: &Option<std::path::PathBuf>) {
     });
     let _ = log::set_boxed_logger(Box::new(Both { cat: Logcat, file }));
     log::set_max_level(log::LevelFilter::Info);
-    log::info!("fablegame starting, log mirrored to {:?}", log_path);
+    log::info!("fablegame {} starting, log mirrored to {:?}", VERSION, log_path);
 }
 
 
