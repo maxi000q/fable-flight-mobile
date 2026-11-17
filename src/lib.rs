@@ -115,7 +115,7 @@ const INTEGRATED_SCALE: f32 = 0.75;
 const MOBILE_SCALE: f32 = 0.5;
 /// The app's version, as the APK carries it: start-up state that should not
 /// outlive a release (the GPU pipeline blacklist) is keyed to it.
-pub(crate) const VERSION: &str = "1.0.16";
+pub(crate) const VERSION: &str = "1.0.17";
 /// Where the Android app keeps its files (last_run.log's folder), for state
 /// that should outlive a start-up attempt. None on a desktop, where the
 /// GPU blacklist simply stays in memory for the one run.
@@ -819,6 +819,7 @@ impl GpuBlacklist {
                             "trees" => Some("trees"),
                             "decals" => Some("decals"),
                             "plane" => Some("plane"),
+                            "geometry" => Some("geometry"),
                             _ => None,
                         } {
                             off.insert(f);
@@ -892,18 +893,20 @@ impl Game {
         }
         log::info!("Game::new: creating the renderer (GPU device, pipelines)");
         // Start-up ladder: an Adreno loses its GPU device while the pipelines
-        // compile (every 1.0.7-1.0.15 build did, at a different pipeline each
-        // time). Each attempt opens a fresh device; each later one reaches
-        // less — fewer optional pipelines, smaller targets — and whatever an
-        // attempt is lost at stays off the next attempt and the next runs
-        // (GpuBlacklist). Six attempts cover a flaky driver; a hopeless one
-        // fails with the exact pipeline named. A device lost *after* start-up
-        // (App's gpu_deaths, or the `runtime` line in the blacklist) starts
-        // the ladder two rungs down per death.
+        // come up (every 1.0.7-1.0.16 build did, at a different pipeline each
+        // time — the composite's module, the particles' vertex storage read,
+        // and the terrain pipelines' descriptor itself). Each attempt opens a
+        // fresh device; each later one reaches less, and whatever an attempt
+        // is lost at is not merely given a no-op shader but NOT CREATED at all
+        // on the next attempt (GpuBlacklist) — a no-op was not enough for the
+        // terrain (1.0.16). Eight attempts cover a driver that dies at each
+        // group in turn; a hopeless one fails with the exact pipeline named.
+        // A device lost *after* start-up (App's gpu_deaths, or the `runtime`
+        // line in the blacklist) starts the ladder two rungs down per death.
         let mut blacklist = GpuBlacklist::load();
         let deaths = gpu_deaths.max(blacklist.runtime);
         let mut renderer = None;
-        for attempt in 1..=6u32 {
+        for attempt in 1..=8u32 {
             let mut p = render::StartupProfile::full(gfx.scale);
             let rung = attempt + 2 * deaths;
             if rung >= 3 {
@@ -945,6 +948,18 @@ impl Game {
                     "trees" => p.trees = false,
                     "decals" => p.decals = false,
                     "plane" => p.plane = false,
+                    // Every pipeline that takes a vertex buffer (the start-up
+                    // probes' verdict when the driver dies on those): the whole
+                    // 3D scene is skipped — an endless sea and sky still run.
+                    "geometry" => {
+                        p.terrain_lite = true;
+                        p.terrain = false;
+                        p.buildings = false;
+                        p.photo = false;
+                        p.trees = false;
+                        p.decals = false;
+                        p.plane = false;
+                    }
                     _ => p.logo = false,
                 }
             }
@@ -980,7 +995,7 @@ impl Game {
                     break;
                 }
                 Err(e) => {
-                    if attempt == 6 {
+                    if attempt == 8 {
                         return Err(anyhow::anyhow!("the renderer could not start on this GPU: {e}"));
                     }
                     let minimal = if rung >= 3 { " with the minimal shader set" } else { "" };
@@ -996,6 +1011,8 @@ impl Game {
                             log::warn!("Game::new: the terrain falls back to its safe mode for the next attempts (and runs)");
                         } else if f == "terrain off" {
                             log::warn!("Game::new: the terrain is off for the next attempts (an endless sea and sky still run)");
+                        } else if f == "geometry" {
+                            log::warn!("Game::new: the whole 3D scene is off for the next attempts (an endless sea and sky still run)");
                         } else {
                             log::warn!("Game::new: the {f} shaders are off for the next attempts (and runs)");
                         }

@@ -827,21 +827,26 @@ pub struct Renderer {
     p_gtao: wgpu::RenderPipeline,
     p_ao_blur: wgpu::RenderPipeline,
     p_dres: wgpu::RenderPipeline,
-    p_road: wgpu::RenderPipeline,
-    p_field: wgpu::RenderPipeline,
-    p_lights: wgpu::RenderPipeline,
+    /// Optional geometry pipelines (StartupProfile): a feature whose pipeline
+    /// CREATION has killed this GPU is not created at all on the next attempt
+    /// — 1.0.16 proved a no-op shader module is not enough, the driver dies on
+    /// the descriptor itself (the terrain pipelines died with a module whose
+    /// every entry point was empty). `None` skips the draws too.
+    p_road: Option<wgpu::RenderPipeline>,
+    p_field: Option<wgpu::RenderPipeline>,
+    p_lights: Option<wgpu::RenderPipeline>,
     dyn_lights: wgpu::Buffer,
     /// loose trees; `p_tree_near` draws the rest short of IMP_DIST (with the
     /// outlines of their crowns cut into clumps), `imp` the ones beyond
-    p_tree: wgpu::RenderPipeline,
-    p_tree_near: wgpu::RenderPipeline,
-    imp: crate::impostor::Impostors,
-    p_tree_shadow: wgpu::RenderPipeline,
-    p_tree_shadow_fixed: wgpu::RenderPipeline,
-    p_card: wgpu::RenderPipeline,
+    p_tree: Option<wgpu::RenderPipeline>,
+    p_tree_near: Option<wgpu::RenderPipeline>,
+    imp: Option<crate::impostor::Impostors>,
+    p_tree_shadow: Option<wgpu::RenderPipeline>,
+    p_tree_shadow_fixed: Option<wgpu::RenderPipeline>,
+    p_card: Option<wgpu::RenderPipeline>,
     near_buf: wgpu::Buffer,
-    p_inst: wgpu::RenderPipeline,
-    p_inst_shadow: wgpu::RenderPipeline,
+    p_inst: Option<wgpu::RenderPipeline>,
+    p_inst_shadow: Option<wgpu::RenderPipeline>,
     inst_buf: wgpu::Buffer,
     fall_buf: wgpu::Buffer,
     tree_lib: Option<MeshLib>,
@@ -859,17 +864,17 @@ pub struct Renderer {
     tile_ub: wgpu::Buffer,
     l_photo: wgpu::BindGroupLayout,
     photo_ub: wgpu::Buffer,
-    p_photo: wgpu::RenderPipeline,
-    p_photo_mask: wgpu::RenderPipeline,
-    p_photo_shadow: wgpu::RenderPipeline,
-    p_photo_shadow_fast: wgpu::RenderPipeline,
+    p_photo: Option<wgpu::RenderPipeline>,
+    p_photo_mask: Option<wgpu::RenderPipeline>,
+    p_photo_shadow: Option<wgpu::RenderPipeline>,
+    p_photo_shadow_fast: Option<wgpu::RenderPipeline>,
     l_skin: wgpu::BindGroupLayout,
-    p_skin: wgpu::RenderPipeline,
+    p_skin: Option<wgpu::RenderPipeline>,
     skin_slots: wgpu::Buffer,
-    p_water_top: wgpu::RenderPipeline,
+    p_water_top: Option<wgpu::RenderPipeline>,
     /// where any ground is, into the shore mask (shore.rs)
-    p_shore_cover: wgpu::RenderPipeline,
-    p_lamp_top: wgpu::RenderPipeline,
+    p_shore_cover: Option<wgpu::RenderPipeline>,
+    p_lamp_top: Option<wgpu::RenderPipeline>,
     photo_mask: wgpu::TextureView,
     /// the mask holds something that has to be cleared when no tiles are drawn
     photo_mask_dirty: bool,
@@ -886,22 +891,22 @@ pub struct Renderer {
     tile_ibuf: wgpu::Buffer,
     tile_nidx: u32,
     p_sky: wgpu::RenderPipeline,
-    p_terrain: wgpu::RenderPipeline,
-    p_terrain_tess: wgpu::RenderPipeline,
-    p_terrain_cells: wgpu::RenderPipeline,
+    p_terrain: Option<wgpu::RenderPipeline>,
+    p_terrain_tess: Option<wgpu::RenderPipeline>,
+    p_terrain_cells: Option<wgpu::RenderPipeline>,
     /// index buffers of a tessellated cell patch and of a single cell quad
     tess_ibuf: wgpu::Buffer,
     tess_nidx: u32,
     cell_ibuf: wgpu::Buffer,
-    p_build: wgpu::RenderPipeline,
+    p_build: Option<wgpu::RenderPipeline>,
     /// the same without any discard in the fragment shader (`fs_whole`)
-    p_build_whole: wgpu::RenderPipeline,
-    p_build_shadow: wgpu::RenderPipeline,
-    p_obj: wgpu::RenderPipeline,
-    p_obj_shadow: wgpu::RenderPipeline,
-    p_obj_solid: wgpu::RenderPipeline,
-    p_obj_shadow_solid: wgpu::RenderPipeline,
-    p_glass: wgpu::RenderPipeline,
+    p_build_whole: Option<wgpu::RenderPipeline>,
+    p_build_shadow: Option<wgpu::RenderPipeline>,
+    p_obj: Option<wgpu::RenderPipeline>,
+    p_obj_shadow: Option<wgpu::RenderPipeline>,
+    p_obj_solid: Option<wgpu::RenderPipeline>,
+    p_obj_shadow_solid: Option<wgpu::RenderPipeline>,
+    p_glass: Option<wgpu::RenderPipeline>,
     p_composite: wgpu::RenderPipeline,
     p_cloud: wgpu::RenderPipeline,
     p_cloud_apply: wgpu::RenderPipeline,
@@ -1441,6 +1446,11 @@ pub fn lost_feature() -> Option<&'static str> {
         "tree" | "trees near" | "tree shadow" | "tree shadow fixed" | "leaf cards" | "tree impostors" => "trees",
         "road" | "airfield" | "lamp top" | "lights" => "decals",
         "obj" | "obj shadow" | "obj solid" | "obj shadow solid" | "glass" => "plane",
+        // The start-up probes (render.rs, before the terrain pipelines): each
+        // isolates one feature of their descriptors. A death at one names the
+        // feature, and lands on the rung that does without it.
+        "probe layout" => "terrain",
+        "probe input" | "probe depth" | "probe targets" => "geometry",
         _ => return None,
     })
 }
@@ -2036,7 +2046,15 @@ impl Renderer {
                 ub_entry(0, true, 48),
                 tex_entry(1, d2, false),
                 tex_entry(2, d2, false),
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                // The tessellator's copy of the tile's grid, 10 floats per
+                // vertex in a r32float texture (10 * GV wide, GV high). It was
+                // a read-only storage buffer read by the VERTEX stage — and a
+                // vertex stage touching a storage buffer is the second thing
+                // this phone's driver reliably dies on (1.0.16: the real
+                // particles module, which reads its buffer the same way, was
+                // the only pipeline besides the terrain to kill it). A vertex
+                // texture fetch is the supported path everywhere.
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: ALL_STAGES, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: d2, multisampled: false }, count: None },
                 tex_entry(4, d2, false),
                 tex_entry(5, d2, false),
             ],
@@ -2318,22 +2336,65 @@ impl Renderer {
         const A_INST: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4];
         // The terrain: full, safe mode (lite) or off; the label tells
         // Game::new which rung a loss here belongs to (lost_feature).
+        if !prof.terrain {
+            log::info!("renderer: terrain off (an endless sea and sky)");
+        }
         let t_label = if prof.terrain_lite { "terrain lite" } else { "terrain" };
-        if prof.terrain_lite {
+        if prof.terrain && prof.terrain_lite {
             log::info!("renderer: terrain in safe mode (photo-shaded ground, no relief detail)");
         }
-        let p_terrain = geom(t_label, Some(&l_tile), &m_terrain, &[vb(40, false, &A_TERRAIN)], 0)?;
+        // What is left that can kill this driver at the terrain is its
+        // DESCRIPTOR, not the shader: 1.0.16 lost two devices on pipelines
+        // whose every entry point was empty. These one-time probes (once per
+        // process, phones only) each add exactly one of the terrain
+        // pipelines' distinguishing features to an otherwise empty pipeline,
+        // so a field log names the killer however the next attempts go:
+        //   probe layout  — l_tile (its bindings and dynamic uniform)
+        //   probe input   — a 5-attribute, 40-byte vertex buffer
+        //   probe depth   — a reversed-Z depth-stencil with write
+        //   probe targets — three simultaneous colour targets (the G-buffer)
+        // They cost four trivial pipelines on a healthy GPU; whatever rung
+        // they land on, lost_feature maps it (see there).
+        #[cfg(target_os = "android")]
+        if prof.terrain {
+            static PROBES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !PROBES.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let probe = |label: &str, groups: &[Option<&wgpu::BindGroupLayout>], buffers: &[Option<wgpu::VertexBufferLayout>], depth: bool, targets: &[Option<wgpu::ColorTargetState>]| -> anyhow::Result<()> {
+                    let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: groups, immediate_size: 0 });
+                    let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState { module: &m_noop, entry_point: Some("vs"), compilation_options: Default::default(), buffers },
+                        primitive: Default::default(),
+                        depth_stencil: depth.then(|| wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState { module: &m_noop, entry_point: Some("fs"), compilation_options: Default::default(), targets }),
+                        multiview_mask: None,
+                        cache: None,
+                    });
+                    pipe_up(d, &lost, label)?;
+                    drop(p);
+                    Ok(())
+                };
+                let one = || Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: wgpu::ColorWrites::ALL });
+                probe("probe layout", &[Some(&l0), Some(&l_tile)], &[], false, &[one()])?;
+                probe("probe input", &[Some(&l0)], &[vb(40, false, &A_TERRAIN)], false, &[one()])?;
+                probe("probe depth", &[Some(&l0)], &[], true, &[one()])?;
+                probe("probe targets", &[Some(&l0)], &[], false, &[one(), one(), Some(wgpu::ColorTargetState { format: AMB, blend: None, write_mask: wgpu::ColorWrites::ALL })])?;
+            }
+        }
+        let p_terrain = prof.terrain.then(|| geom(t_label, Some(&l_tile), &m_terrain, &[vb(40, false, &A_TERRAIN)], 0)).transpose()?;
         // Mode 8: cells near the camera as tessellated patches; 9: the rest of such a tile.
-        let p_terrain_tess = geom(&format!("{t_label} tess"), Some(&l_tile), &m_terrain, &[], 8)?;
-        let p_terrain_cells = geom(&format!("{t_label} cells"), Some(&l_tile), &m_terrain, &[], 9)?;
-        let p_build = geom("build", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 0)?;
-        let p_build_whole = geom("build whole", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 14)?;
+        let p_terrain_tess = prof.terrain.then(|| geom(&format!("{t_label} tess"), Some(&l_tile), &m_terrain, &[], 8)).transpose()?;
+        let p_terrain_cells = prof.terrain.then(|| geom(&format!("{t_label} cells"), Some(&l_tile), &m_terrain, &[], 9)).transpose()?;
+        let p_build = prof.buildings.then(|| geom("build", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 0)).transpose()?;
+        let p_build_whole = prof.buildings.then(|| geom("build whole", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 14)).transpose()?;
         const A_PHOTO: [wgpu::VertexAttribute; 3] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: VF::Float32x2, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: VF::Snorm8x4, offset: 20, shader_location: 2 },
         ];
-        let p_photo = geom("photo", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 0)?;
+        let p_photo = prof.photo.then(|| geom("photo", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 0)).transpose()?;
         // Mode 11: the 3D tiles' mesh of a destroyed building, riding on its pieces.
         const A_SKIN: [wgpu::VertexAttribute; 4] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
@@ -2341,11 +2402,11 @@ impl Renderer {
             wgpu::VertexAttribute { format: VF::Snorm8x4, offset: 20, shader_location: 2 },
             wgpu::VertexAttribute { format: VF::Uint32, offset: 24, shader_location: 3 },
         ];
-        let p_skin = geom("skin", Some(&l_skin), m_photo_e, &[vb(28, false, &A_SKIN)], 11)?;
-        let p_photo_shadow = geom("photo shadow", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 13)?;
-        let p_photo_shadow_fast = geom("photo shadow fast", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 12)?;
+        let p_skin = prof.photo.then(|| geom("skin", Some(&l_skin), m_photo_e, &[vb(28, false, &A_SKIN)], 11)).transpose()?;
+        let p_photo_shadow = prof.photo.then(|| geom("photo shadow", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 13)).transpose()?;
+        let p_photo_shadow_fast = prof.photo.then(|| geom("photo shadow fast", Some(&l_photo), m_photo_e, &[vb(24, false, &A_PHOTO)], 12)).transpose()?;
         // The coverage mask: the same tiles from above, 1 wherever they are.
-        let p_photo_mask = {
+        let p_photo_mask = if prof.photo {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("photo mask"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_photo), Some(&l_casc)], immediate_size: 0 })),
@@ -2358,10 +2419,12 @@ impl Renderer {
             cache: None,
         });
             pipe_up(d, &lost, "photo mask")?;
-            p
+            Some(p)
+        } else {
+            None
         };
         // Our water into the same mask (green): where the mesh gives way to it.
-        let p_water_top = {
+        let p_water_top = if prof.terrain {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water top"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
@@ -2374,11 +2437,13 @@ impl Renderer {
             cache: None,
         });
             pipe_up(d, &lost, "water top")?;
-            p
+            Some(p)
+        } else {
+            None
         };
         // Where there is ground at all, into the shore mask (red; our water
         // goes into its green with `p_water_top`).
-        let p_shore_cover = {
+        let p_shore_cover = if prof.terrain {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shore cover"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
@@ -2391,12 +2456,14 @@ impl Renderer {
             cache: None,
         });
             pipe_up(d, &lost, "shore cover")?;
-            p
+            Some(p)
+        } else {
+            None
         };
         // Our street lamps into the same mask (blue, with the road's height in
         // alpha): the light they would throw on the mesh at night.
         let max = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Max };
-        let p_lamp_top = {
+        let p_lamp_top = if prof.decals {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lamp top"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu), Some(&l_casc)], immediate_size: 0 })),
@@ -2409,17 +2476,19 @@ impl Renderer {
             cache: None,
         });
             pipe_up(d, &lost, "lamp top")?;
-            p
+            Some(p)
+        } else {
+            None
         };
-        let p_build_shadow = geom("build shadow", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 1)?;
+        let p_build_shadow = prof.buildings.then(|| geom("build shadow", Some(&l_build), m_build_e, &[vb(40, false, &A_BUILD)], 1)).transpose()?;
         const A_PART: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4];
-        let p_obj = geom("obj", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 0)?;
-        let p_obj_shadow = geom("obj shadow", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 4)?;
-        let p_obj_solid = geom("obj solid", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 5)?;
-        let p_obj_shadow_solid = geom("obj shadow solid", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 1)?;
+        let p_obj = prof.plane.then(|| geom("obj", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 0)).transpose()?;
+        let p_obj_shadow = prof.plane.then(|| geom("obj shadow", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 4)).transpose()?;
+        let p_obj_solid = prof.plane.then(|| geom("obj solid", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 5)).transpose()?;
+        let p_obj_shadow_solid = prof.plane.then(|| geom("obj shadow solid", Some(&l_obj), m_obj_e, &[vb(64, false, &A_PART)], 1)).transpose()?;
         // Glass and the propeller blur: blended over the finished, lit scene,
         // tested against the resolved depth.
-        let p_glass = {
+        let p_glass = if prof.plane {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glass"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj), Some(&l_glass)], immediate_size: 0 })),
@@ -2444,13 +2513,15 @@ impl Renderer {
             cache: None,
         });
             pipe_up(d, &lost, "glass")?;
-            p
+            Some(p)
+        } else {
+            None
         };
-        let p_road = geom("road", Some(&l_tileu), m_road_e, &[vb(32, false, &A_ROAD)], 2)?;
+        let p_road = prof.decals.then(|| geom("road", Some(&l_tileu), m_road_e, &[vb(32, false, &A_ROAD)], 2)).transpose()?;
         const A_AIR: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
-        let p_field = geom("airfield", Some(&l_tileu), m_field_e, &[vb(56, false, &A_AIR)], 2)?;
+        let p_field = prof.decals.then(|| geom("airfield", Some(&l_tileu), m_field_e, &[vb(56, false, &A_AIR)], 2)).transpose()?;
         const A_LIGHT: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Unorm8x4, 5 => Uint8x4];
-        let p_lights = {
+        let p_lights = if prof.decals {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lights"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu)], immediate_size: 0 })),
@@ -2475,17 +2546,24 @@ impl Renderer {
             cache: None,
         });
             pipe_up(d, &lost, "lights")?;
-            p
+            Some(p)
+        } else {
+            None
         };
-        let p_tree = geom("tree", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0)?;
-        let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, m_tree_e);
-        pipe_up(d, &lost, "tree impostors")?;
-        let p_tree_near = geom("trees near", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7)?;
-        let p_tree_shadow = geom("tree shadow", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 1)?;
-        let p_tree_shadow_fixed = geom("tree shadow fixed", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 10)?;
-        let p_card = geom("leaf cards", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3)?;
-        let p_inst = geom("inst", None, m_inst_e, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0)?;
-        let p_inst_shadow = geom("inst shadow", None, m_inst_e, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1)?;
+        let p_tree = prof.trees.then(|| geom("tree", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0)).transpose()?;
+        let imp = if prof.trees {
+            let i = crate::impostor::Impostors::new(d, &l0, &l_tileu, m_tree_e);
+            pipe_up(d, &lost, "tree impostors")?;
+            Some(i)
+        } else {
+            None
+        };
+        let p_tree_near = prof.trees.then(|| geom("trees near", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7)).transpose()?;
+        let p_tree_shadow = prof.trees.then(|| geom("tree shadow", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 1)).transpose()?;
+        let p_tree_shadow_fixed = prof.trees.then(|| geom("tree shadow fixed", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 10)).transpose()?;
+        let p_card = prof.trees.then(|| geom("leaf cards", Some(&l_tileu), m_tree_e, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3)).transpose()?;
+        let p_inst = prof.buildings.then(|| geom("inst", None, m_inst_e, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0)).transpose()?;
+        let p_inst_shadow = prof.buildings.then(|| geom("inst shadow", None, m_inst_e, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1)).transpose()?;
         let p_dres = {
             let p = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("depth resolve"),
@@ -2739,11 +2817,31 @@ impl Renderer {
 
     pub fn upload_tile(&self, t: &crate::sources::TileData) -> TileGpu {
         let d = &self.device;
-        let vbuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&t.verts), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE });
+        let vbuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&t.verts), usage: wgpu::BufferUsages::VERTEX });
+        // The tessellator's copy of the 65x65 grid: 10 floats per vertex in a
+        // r32float texture (see l_tile's binding 3 for why not a storage
+        // buffer). Rows are padded to 704 floats (2816 bytes) for the copy.
+        let flat: &[f32] = bytemuck::cast_slice(&t.verts);
+        const ROW: usize = 650;
+        const PAD: usize = 704;
+        let rows = crate::sources::GV;
+        let mut pad = vec![0f32; PAD * rows];
+        for y in 0..rows {
+            let (a, b) = (y * PAD, y * ROW);
+            pad[a..a + ROW].copy_from_slice(&flat[b..b + ROW]);
+        }
+        let tv = make_tex(d, "tile grid", ROW as u32, rows as u32, 1, 1, wgpu::TextureFormat::R32Float, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &tv, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&pad),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((PAD * 4) as u32), rows_per_image: Some(rows as u32) },
+            wgpu::Extent3d { width: ROW as u32, height: rows as u32, depth_or_array_layers: 1 },
+        );
+        let tv = tv.create_view(&wgpu::TextureViewDescriptor::default());
         let img = upload_mips(d, &self.queue, "imagery", t.img_size, wgpu::TextureFormat::Rgba8UnormSrgb, 4, &t.imagery);
         let mask = upload_mips(d, &self.queue, "mask", crate::sources::MASK as u32, wgpu::TextureFormat::Rgba8Unorm, 4, &t.mask);
         let lights = upload_mips(d, &self.queue, "lights", crate::sources::MASK as u32, wgpu::TextureFormat::R8Unorm, 1, &t.lights);
-        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_tile, entries: &[buf_res(0, &self.tile_ub, 48), tex_res(1, &img), tex_res(2, &mask), buf_res(3, &vbuf, 0), tex_res(4, &lights), tex_res(5, &self.light_cover_view)] });
+        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_tile, entries: &[buf_res(0, &self.tile_ub, 48), tex_res(1, &img), tex_res(2, &mask), tex_res(3, &tv), tex_res(4, &lights), tex_res(5, &self.light_cover_view)] });
         TileGpu { vbuf, bind }
     }
 
@@ -2839,8 +2937,10 @@ impl Renderer {
     /// Also takes the pictures for the impostors.
     pub fn set_tree_meshes(&mut self, meshes: &[(Vec<TreeVertex>, Vec<u32>)]) {
         let lib = self.mesh_lib(meshes);
-        let bounds = crate::impostor::Impostors::bounds(meshes);
-        self.imp.bake(&self.device, &self.queue, &self.bg0, &self.bg_tileu, &lib.vbuf, &lib.ibuf, &lib.ranges, &bounds);
+        if let Some(imp) = &mut self.imp {
+            let bounds = crate::impostor::Impostors::bounds(meshes);
+            imp.bake(&self.device, &self.queue, &self.bg0, &self.bg_tileu, &lib.vbuf, &lib.ibuf, &lib.ranges, &bounds);
+        }
         self.tree_lib = Some(lib);
     }
     /// Models for instanced solids (cars, rubble, rocks).
@@ -3149,11 +3249,14 @@ impl Renderer {
             // the pipeline that has no discard (early depth testing hides the
             // facades behind them before they are shaded); the rest follow.
             for pass in if shadow { 1..2 } else { 0..2 } {
-                rp.set_pipeline(match (shadow, pass) {
-                    (true, _) => &self.p_build_shadow,
-                    (false, 0) => &self.p_build_whole,
-                    _ => &self.p_build,
-                });
+                let Some(pipe) = (match (shadow, pass) {
+                    (true, _) => self.p_build_shadow.as_ref(),
+                    (false, 0) => self.p_build_whole.as_ref(),
+                    _ => self.p_build.as_ref(),
+                }) else {
+                    continue;
+                };
+                rp.set_pipeline(pipe);
                 for (i, dd) in f.details.iter().take(n_builds).enumerate() {
                     let g = dd.gpu;
                     let (mid, fine) = (dd.u[12] > 0.0, dd.u[13] > 0.0);
@@ -3240,15 +3343,15 @@ impl Renderer {
                     }
                 }
             }
-            if let Some(lib) = &self.tree_lib {
+            if let (Some(lib), Some(p_tree_shadow), Some(p_tree_shadow_fixed), Some(p_tree_near), Some(p_tree), Some(p_card)) = (&self.tree_lib, &self.p_tree_shadow, &self.p_tree_shadow_fixed, &self.p_tree_near, &self.p_tree, &self.p_card) {
                 rp.set_vertex_buffer(0, lib.vbuf.slice(..));
                 rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 // In view only the trees short of IMP_DIST are models (impostors follow below).
                 // The second cascade draws whole batches with one model each.
                 rp.set_pipeline(match c {
-                    Some(1) => &self.p_tree_shadow_fixed,
-                    Some(_) => &self.p_tree_shadow,
-                    None => &self.p_tree_near,
+                    Some(1) => p_tree_shadow_fixed,
+                    Some(_) => p_tree_shadow,
+                    None => p_tree_near,
                 });
                 {
                     for (i, dd) in f.details.iter().take(n_builds).enumerate() {
@@ -3269,7 +3372,7 @@ impl Renderer {
                     }
                 }
                 if !shadow {
-                    rp.set_pipeline(&self.p_tree);
+                    rp.set_pipeline(p_tree);
                 }
                 let loose = c != Some(2) && fall_ranges.iter().any(|r| r.1 > r.0);
                 if loose {
@@ -3303,18 +3406,19 @@ impl Renderer {
                 };
                 if c.is_none() || c == Some(0) {
                     if !shadow {
-                        rp.set_pipeline(&self.p_tree_near);
+                        rp.set_pipeline(p_tree_near);
                     }
                     near(rp, false);
                 }
                 if c.is_none() {
-                    rp.set_pipeline(&self.p_card);
+                    rp.set_pipeline(p_card);
                     near(rp, true);
                     // Everything further off: one picture each.
-                    if self.imp.ready {
-                        rp.set_pipeline(&self.imp.p_draw);
-                        rp.set_bind_group(2, &self.imp.bg, &[]);
-                        rp.set_index_buffer(self.imp.quad.slice(..), wgpu::IndexFormat::Uint32);
+                    if let Some(imp) = &self.imp {
+                    if imp.ready {
+                        rp.set_pipeline(&imp.p_draw);
+                        rp.set_bind_group(2, &imp.bg, &[]);
+                        rp.set_index_buffer(imp.quad.slice(..), wgpu::IndexFormat::Uint32);
                         for (i, dd) in f.details.iter().take(n_builds).enumerate() {
                             let Some(tb) = &dd.gpu.trees else { continue };
                             let mut bound = false;
@@ -3327,9 +3431,10 @@ impl Renderer {
                                 rp.draw_indexed(0..6, t.mesh as i32 * 4, t.first..t.first + t.count);
                             }
                         }
-                        rp.set_pipeline(&self.p_card);
+                        rp.set_pipeline(p_card);
                         rp.set_vertex_buffer(0, lib.vbuf.slice(..));
                         rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    }
                     }
                     if loose {
                         rp.set_bind_group(1, &self.bg_tileu, &[loose_slot]);
@@ -3346,8 +3451,8 @@ impl Renderer {
             if c == Some(2) {
                 return;
             }
-            if let Some(lib) = &self.inst_lib {
-                rp.set_pipeline(if shadow { &self.p_inst_shadow } else { &self.p_inst });
+            if let (Some(lib), Some(pipe)) = (&self.inst_lib, if shadow { &self.p_inst_shadow } else { &self.p_inst }) {
+                rp.set_pipeline(pipe);
                 rp.set_vertex_buffer(0, lib.vbuf.slice(..));
                 rp.set_vertex_buffer(1, self.inst_buf.slice(..));
                 rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -3365,13 +3470,16 @@ impl Renderer {
                 if o.glass || if shadow { o.cast & bit == 0 } else { false } {
                     continue;
                 }
+                let Some(pipe) = (match (shadow, o.cut) {
+                    (true, true) => self.p_obj_shadow.as_ref(),
+                    (true, false) => self.p_obj_shadow_solid.as_ref(),
+                    (false, true) => self.p_obj.as_ref(),
+                    (false, false) => self.p_obj_solid.as_ref(),
+                }) else {
+                    continue;
+                };
                 if cur != Some(o.cut) {
-                    rp.set_pipeline(match (shadow, o.cut) {
-                        (true, true) => &self.p_obj_shadow,
-                        (true, false) => &self.p_obj_shadow_solid,
-                        (false, true) => &self.p_obj,
-                        (false, false) => &self.p_obj_solid,
-                    });
+                    rp.set_pipeline(pipe);
                     cur = Some(o.cut);
                 }
                 let m = &self.meshes[o.mesh];
@@ -3387,7 +3495,8 @@ impl Renderer {
             let clear = wgpu::RenderPassColorAttachment { view: &self.photo_mask, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: -1e4, b: 0.0, a: -1e4 }), store: wgpu::StoreOp::Store } };
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(clear)], None));
             if n_photo > 0 && f.g.photo[2] > 0.0 {
-                rp.set_pipeline(&self.p_photo_mask);
+                if let Some(p_photo_mask) = &self.p_photo_mask {
+                rp.set_pipeline(p_photo_mask);
                 rp.set_bind_group(0, &self.bg0_pre, &[]);
                 rp.set_bind_group(2, &self.bg_casc, &[MASK_SLOT as u32 * 256]);
                 for (i, (pg, _)) in f.photo.iter().take(n_photo).enumerate() {
@@ -3396,17 +3505,21 @@ impl Renderer {
                     rp.set_index_buffer(pg.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     rp.draw_indexed(0..pg.n_idx, 0, 0..1);
                 }
-                rp.set_pipeline(&self.p_water_top);
+                }
+                if let Some(p_water_top) = &self.p_water_top {
+                rp.set_pipeline(p_water_top);
                 rp.set_index_buffer(self.tile_ibuf.slice(..), wgpu::IndexFormat::Uint16);
                 for (i, (tile, _)) in f.tiles.iter().take(n_tiles).enumerate() {
                     rp.set_bind_group(1, &tile.bind, &[i as u32 * 256]);
                     rp.set_vertex_buffer(0, tile.vbuf.slice(..));
                     rp.draw_indexed(0..self.tile_nidx, 0, 0..1);
                 }
+                }
                 // Street lamps, once the sun is low enough for them to matter.
                 let sun_up = f.g.up[0] * f.g.sun_dir[0] + f.g.up[1] * f.g.sun_dir[1] + f.g.up[2] * f.g.sun_dir[2];
                 if sun_up < 0.12 {
-                    rp.set_pipeline(&self.p_lamp_top);
+                    if let Some(p_lamp_top) = &self.p_lamp_top {
+                    rp.set_pipeline(p_lamp_top);
                     for (i, dd) in f.details.iter().take(n_builds).enumerate() {
                         if let (true, Some((vb, ib, n))) = (dd.view && dd.near, &dd.gpu.road) {
                             rp.set_bind_group(1, &self.bg_tileu, &[i as u32 * 256]);
@@ -3414,6 +3527,7 @@ impl Renderer {
                             rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                             rp.draw_indexed(0..*n, 0, 0..1);
                         }
+                    }
                     }
                 }
             }
@@ -3434,7 +3548,7 @@ impl Renderer {
                     let reach = half as f32 * 1.45;
                     let near = |u: &[f32; 12]| (glam::Vec3::new(u[0], u[1], u[2]) - c).length() - u[3] * crate::sources::GRID as f32 * 0.75 < reach;
                     let all = f.tiles.iter().take(n_tiles).chain(f.shore_tiles.iter().take(n_shore_tiles)).enumerate();
-                    for p in [&self.p_shore_cover, &self.p_water_top] {
+                    for p in [self.p_shore_cover.as_ref(), self.p_water_top.as_ref()].into_iter().flatten() {
                         rp.set_pipeline(p);
                         for (i, (tile, u)) in all.clone() {
                             if near(u) {
@@ -3497,7 +3611,8 @@ impl Renderer {
                         // still water casts: our water looks above it, composite.wgsl.)
                         let plain = dz + pg.rad < r_cast && (0..n_cut).all(|k| p.distance(glam::Vec3::from_slice(&f.g.cut[k * 3][..3])) > pg.rad + f.g.cut[k * 3][3]);
                         if fast != Some(plain) {
-                            rp.set_pipeline(if plain { &self.p_photo_shadow_fast } else { &self.p_photo_shadow });
+                            let Some(pipe) = (if plain { &self.p_photo_shadow_fast } else { &self.p_photo_shadow }).as_ref() else { continue };
+                            rp.set_pipeline(pipe);
                             fast = Some(plain);
                         }
                         rp.set_bind_group(1, &pg.bind, &[i as u32 * 256]);
@@ -3521,7 +3636,8 @@ impl Renderer {
                     if o.glass || o.cast & (1 << PLANE_LAYER) == 0 {
                         continue;
                     }
-                    rp.set_pipeline(if o.cut { &self.p_obj_shadow } else { &self.p_obj_shadow_solid });
+                    let Some(pipe) = (if o.cut { &self.p_obj_shadow } else { &self.p_obj_shadow_solid }).as_ref() else { continue };
+                    rp.set_pipeline(pipe);
                     let m = &self.meshes[o.mesh];
                     rp.set_bind_group(1, &self.bg_obj, &[i as u32 * 256]);
                     rp.set_vertex_buffer(0, m.vbuf.slice(..));
@@ -3536,8 +3652,8 @@ impl Renderer {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(att(&t.color_ms, &t.color)), Some(att(&t.aux_ms, &t.aux)), Some(att(&t.amb_ms, &t.amb))], Some(depth_att(&t.depth_ms, 0.0))));
             rp.set_bind_group(0, &self.bg0, &[]);
             // The 3D tiles first: up close they hide most of what follows.
-            if n_photo > 0 {
-                rp.set_pipeline(&self.p_photo);
+            if let Some(p_photo) = &self.p_photo {
+                rp.set_pipeline(p_photo);
                 for (i, (pg, _)) in f.photo.iter().take(n_photo).enumerate() {
                     rp.set_bind_group(1, &pg.bind, &[i as u32 * 256]);
                     rp.set_vertex_buffer(0, pg.vbuf.slice(..));
@@ -3546,8 +3662,8 @@ impl Renderer {
                 }
             }
             // Destroyed buildings: their own mesh, on the pieces they came down in.
-            if !f.skins.is_empty() {
-                rp.set_pipeline(&self.p_skin);
+            if let Some(p_skin) = &self.p_skin {
+                rp.set_pipeline(p_skin);
                 for (sk, first) in &f.skins {
                     if (*first as usize) + SKIN_SLOTS > SKIN_SLOT_BUF + SKIN_SLOTS || (*first as usize) >= n_slots.max(1) {
                         continue;
@@ -3557,7 +3673,8 @@ impl Renderer {
                     rp.draw(0..sk.n, 0..1);
                 }
             }
-            rp.set_pipeline(&self.p_terrain);
+            if let Some(p_terrain) = &self.p_terrain {
+            rp.set_pipeline(p_terrain);
             rp.set_index_buffer(self.tile_ibuf.slice(..), wgpu::IndexFormat::Uint16);
             let tess = |u: &[f32; 12]| u[10] >= 1.0 && u[11] >= 1.0;
             for (i, (tile, u)) in f.tiles.iter().take(n_tiles).enumerate() {
@@ -3571,16 +3688,19 @@ impl Renderer {
                 if !tess(u) {
                     continue;
                 }
+                let (Some(p_terrain_cells), Some(p_terrain_tess)) = (&self.p_terrain_cells, &self.p_terrain_tess) else { continue };
                 rp.set_bind_group(1, &tile.bind, &[i as u32 * 256]);
-                rp.set_pipeline(&self.p_terrain_cells);
+                rp.set_pipeline(p_terrain_cells);
                 rp.set_index_buffer(self.cell_ibuf.slice(..), wgpu::IndexFormat::Uint16);
                 rp.draw_indexed(0..6, 0, 0..(crate::sources::GRID * crate::sources::GRID) as u32);
-                rp.set_pipeline(&self.p_terrain_tess);
+                rp.set_pipeline(p_terrain_tess);
                 rp.set_index_buffer(self.tess_ibuf.slice(..), wgpu::IndexFormat::Uint16);
                 rp.draw_indexed(0..self.tess_nidx, 0, 0..(u[10] * u[11]) as u32);
             }
+            }
             // Airfield pavement, then roads, straight onto the terrain.
-            rp.set_pipeline(&self.p_field);
+            if let Some(p_field) = &self.p_field {
+            rp.set_pipeline(p_field);
             for (i, (fg, _)) in f.fields.iter().take(n_fields).enumerate() {
                 if fg.n_idx > 0 {
                     rp.set_bind_group(1, &self.bg_tileu, &[field_slot(i)]);
@@ -3589,7 +3709,9 @@ impl Renderer {
                     rp.draw_indexed(0..fg.n_idx, 0, 0..1);
                 }
             }
-            rp.set_pipeline(&self.p_road);
+            }
+            if let Some(p_road) = &self.p_road {
+            rp.set_pipeline(p_road);
             for (i, dd) in f.details.iter().take(n_builds).enumerate() {
                 if let (true, Some((vb, ib, n))) = (dd.view && dd.near, &dd.gpu.road) {
                     rp.set_bind_group(1, &self.bg_tileu, &[i as u32 * 256]);
@@ -3597,6 +3719,7 @@ impl Renderer {
                     rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     rp.draw_indexed(0..*n, 0, 0..1);
                 }
+            }
             }
             solids(&mut rp, None);
         }
@@ -3623,11 +3746,11 @@ impl Renderer {
         }
         full(&mut enc, &t.hdr, true, &self.p_composite, &t.bg_composite);
         // Lights over the lit scene, under the clouds.
-        if n_fields > 0 || n_dyn > 0 {
+        if let (true, Some(p_lights)) = ((n_fields > 0 || n_dyn > 0), &self.p_lights) {
             let ds = wgpu::RenderPassDepthStencilAttachment { view: &t.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }), stencil_ops: None };
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], Some(ds)));
             rp.set_bind_group(0, &self.bg0, &[]);
-            rp.set_pipeline(&self.p_lights);
+            rp.set_pipeline(p_lights);
             for (i, (fg, _)) in f.fields.iter().take(n_fields).enumerate() {
                 if let Some((buf, n)) = &fg.lights {
                     rp.set_bind_group(1, &self.bg_tileu, &[field_slot(i)]);
@@ -3685,7 +3808,7 @@ impl Renderer {
             rp.set_bind_group(1, &ft.bg_up, &[]);
             rp.draw(0..3, 0..1);
         }
-        if f.objs.iter().take(n_objs).any(|o| o.glass) {
+        if let (true, Some(p_glass)) = (f.objs.iter().take(n_objs).any(|o| o.glass), &self.p_glass) {
             // The windows bend what is seen through them, so they read the
             // scene from a copy. The depth stays read-only: it is sampled too.
             let (w, h) = (t.hdr_tex.width(), t.hdr_tex.height());
@@ -3694,7 +3817,7 @@ impl Renderer {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], Some(ds)));
             rp.set_bind_group(0, &self.bg0, &[]);
             rp.set_bind_group(2, &t.bg_glass, &[]);
-            rp.set_pipeline(&self.p_glass);
+            rp.set_pipeline(p_glass);
             for (i, o) in f.objs.iter().take(n_objs).enumerate() {
                 if !o.glass {
                     continue;

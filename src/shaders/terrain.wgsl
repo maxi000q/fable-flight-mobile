@@ -7,8 +7,12 @@ struct Tile { offset: vec4f, info: vec4f, tess: vec4f };
 @group(1) @binding(1) var t_img: texture_2d<f32>;
 // R water coverage, G water class * 80, B ground class | seed << 4, A field direction.
 @group(1) @binding(2) var t_mask: texture_2d<f32>;
-// The tile's own vertex buffer (10 floats per vertex), read by the tessellator.
-@group(1) @binding(3) var<storage, read> TV: array<f32>;
+// The tile's own grid (the first 65x65 vertices of the drawn buffer), 10
+// floats per vertex, in a r32float texture 650 wide (a vertex never wraps a
+// row: 10 * 65 = 650). It was a read-only storage buffer — but a VERTEX stage
+// touching a storage buffer is what an Adreno 619's driver dies on, so the
+// tessellator fetches its vertices from a texture instead.
+@group(1) @binding(3) var t_tv: texture_2d<f32>;
 // How much artificial light the ground gives off at night (sources.rs `NightLights`, from NASA Black Marble).
 @group(1) @binding(4) var t_lights: texture_2d<f32>;
 // How far the building tile at each place in the square around the camera
@@ -543,9 +547,10 @@ const TN = 16u;
 const TESS_K = 0.03;
 
 struct CV { P: vec3f, depth: f32, N: vec3f, uv: vec2f };
+fn tv_at(b: u32) -> f32 { return textureLoad(t_tv, vec2i(i32(b % 650u), i32(b / 650u)), 0).r; }
 fn cv(i: u32) -> CV {
   let b = i * 10u;
-  return CV(vec3f(TV[b], TV[b + 1u], TV[b + 2u]) + T.offset.xyz, TV[b + 3u], vec3f(TV[b + 4u], TV[b + 5u], TV[b + 6u]), vec2f(TV[b + 8u], TV[b + 9u]));
+  return CV(vec3f(tv_at(b), tv_at(b + 1u), tv_at(b + 2u)) + T.offset.xyz, tv_at(b + 3u), vec3f(tv_at(b + 4u), tv_at(b + 5u), tv_at(b + 6u)), vec2f(tv_at(b + 8u), tv_at(b + 9u)));
 }
 // Written out so that t = 0 and t = 1 give the end points exactly.
 fn lerp_cv(a: CV, b: CV, t: f32) -> CV {

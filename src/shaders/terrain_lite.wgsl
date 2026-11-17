@@ -22,8 +22,9 @@ struct Tile { offset: vec4f, info: vec4f, tess: vec4f };
 @group(1) @binding(1) var t_img: texture_2d<f32>;
 // R water coverage, G water class * 80, B ground class | seed << 4.
 @group(1) @binding(2) var t_mask: texture_2d<f32>;
-// The tile's own vertex buffer (10 floats per vertex), read by the tessellator.
-@group(1) @binding(3) var<storage, read> TV: array<f32>;
+// The tessellator's copy of the tile's grid, as a texture (see the full
+// terrain.wgsl's binding 3 for why not a storage buffer).
+@group(1) @binding(3) var t_tv: texture_2d<f32>;
 
 struct VOut {
   @builtin(position) clip: vec4f,
@@ -51,9 +52,10 @@ const TN = 16u;
 const TESS_K = 0.03;
 
 struct CV { P: vec3f, depth: f32, N: vec3f, uv: vec2f };
+fn tv_at(b: u32) -> f32 { return textureLoad(t_tv, vec2i(i32(b % 650u), i32(b / 650u)), 0).r; }
 fn cv(i: u32) -> CV {
   let b = i * 10u;
-  return CV(vec3f(TV[b], TV[b + 1u], TV[b + 2u]) + T.offset.xyz, TV[b + 3u], vec3f(TV[b + 4u], TV[b + 5u], TV[b + 6u]), vec2f(TV[b + 8u], TV[b + 9u]));
+  return CV(vec3f(tv_at(b), tv_at(b + 1u), tv_at(b + 2u)) + T.offset.xyz, tv_at(b + 3u), vec3f(tv_at(b + 4u), tv_at(b + 5u), tv_at(b + 6u)), vec2f(tv_at(b + 8u), tv_at(b + 9u)));
 }
 fn lerp_cv(a: CV, b: CV, t: f32) -> CV {
   let s = 1.0 - t;
